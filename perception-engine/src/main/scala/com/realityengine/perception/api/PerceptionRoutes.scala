@@ -14,7 +14,12 @@ import io.circe.Json
 import io.circe.syntax._
 import sttp.client3._
 
+import akka.http.scaladsl.model.sse.ServerSentEvent
+import akka.http.scaladsl.marshalling.sse.EventStreamMarshalling._
+import akka.stream.scaladsl.{BroadcastHub, Keep, Source}
+import akka.stream.OverflowStrategy
 import scala.concurrent.{ExecutionContext, Future}
+import scala.concurrent.duration._
 import scala.util.{Failure, Success}
 import java.util.concurrent.atomic.{AtomicBoolean, AtomicReference}
 import com.realityengine.perception.logging.{AuditConfig, AuditLogger}
@@ -37,6 +42,17 @@ class PerceptionRoutes(
   private val lastPush     = new AtomicReference[Option[Long]](None)
   // A-1: prevents push cycles from stacking when doPush takes longer than the interval
   private val pushInFlight = new AtomicBoolean(false)
+
+  // In-memory dispatch ledger (ring buffer, capped at dispatchLedgerLimit entries)
+  private val dispatchLedgerLimit = sys.env.get("TRIGGER_DISPATCH_LEDGER_LIMIT").flatMap(_.toIntOption).getOrElse(100)
+  private val dispatchLedger      = new AtomicReference[Vector[Json]](Vector.empty)
+
+  // SSE broadcast hub — mirrors /ws but as Server-Sent Events for /api/events
+  private val (ssePEQueue, ssePEBroadcast) = {
+    Source.queue[Json](16, OverflowStrategy.dropHead)
+      .toMat(BroadcastHub.sink[Json](bufferSize = 1))(Keep.both)
+      .run()
+  }
 
   // ── Auto-push scheduler ───────────────────────────────────────────────────
 
@@ -127,8 +143,11 @@ class PerceptionRoutes(
       "state" -> encodeEngineState(engine.getState(lastPush.get(), AutoConfig(isAutoRunning, autoIntervalMs))),
     ))
 
-  private def broadcast(json: Json): Unit =
+  private def broadcast(json: Json): Unit = {
     broadcastActor ! WsBroadcastActor.BroadcastMsg(json.noSpaces)
+    ssePEQueue.offer(json)
+    ()
+  }
 
   private def saveAndBroadcast(): Future[Unit] = Future {
     store.save(engine.getSources)
@@ -296,6 +315,194 @@ class PerceptionRoutes(
               .flatMap(b => io.circe.parser.parse(b).toOption)
               .getOrElse(Json.Null)
             complete(json)
+          case resp =>
+            complete(StatusCodes.BadGateway ->
+              Json.obj("error" -> resp.body.fold(identity, identity).asJson))
+        }
+      }
+    },
+
+    // ── SSE events endpoint — parity with /api/events on LSP/CPP ────────────
+    path("api" / "events") {
+      get {
+        complete(ssePEBroadcast
+          .map(json => ServerSentEvent(json.noSpaces))
+          .keepAlive(15.seconds, () => ServerSentEvent.heartbeat))
+      }
+    },
+
+    // ── Dispatch ledger ───────────────────────────────────────────────────────
+    path("api" / "dispatch" / "ledger") {
+      get { complete(Json.obj(
+        "records" -> Json.arr(dispatchLedger.get(): _*),
+        "total"   -> Json.fromInt(dispatchLedger.get().length)
+      )) }
+    },
+    path("api" / "dispatch" / "records" / Segment) { id =>
+      concat(
+        get {
+          dispatchLedger.get().find(_.hcursor.get[String]("id").toOption.contains(id)) match {
+            case Some(r) => complete(r)
+            case None    => complete(StatusCodes.NotFound -> Json.obj("error" -> "Dispatch record not found".asJson))
+          }
+        },
+        patch { entity(as[Json]) { body =>
+          val ledger  = dispatchLedger.get()
+          val updated = ledger.map { r =>
+            if (r.hcursor.get[String]("id").toOption.contains(id)) r.deepMerge(body) else r
+          }
+          dispatchLedger.set(updated)
+          updated.find(_.hcursor.get[String]("id").toOption.contains(id)) match {
+            case Some(r) =>
+              broadcast(Json.obj("type" -> "dispatch-updated".asJson, "record" -> r))
+              complete(r)
+            case None => complete(StatusCodes.NotFound -> Json.obj("error" -> "Dispatch record not found".asJson))
+          }
+        } }
+      )
+    },
+
+    // ── Integrations ─────────────────────────────────────────────────────────
+    path("api" / "integrations" / "status") {
+      get { complete(Json.obj(
+        "loaded"             -> false.asJson,
+        "path"               -> Json.Null,
+        "error"              -> Json.Null,
+        "integrationCount"   -> 0.asJson,
+        "integrations"       -> Json.arr(),
+        "completionEndpoint" -> "/api/integrations/completions".asJson
+      )) }
+    },
+    path("api" / "integrations" / "completions") {
+      post { entity(as[Json]) { body =>
+        val sensorId = body.hcursor.get[String]("sensorId").getOrElse("completion_agent")
+        val values   = body.hcursor.downField("values").as[Vector[Double]].getOrElse(Vector(1.0))
+        engine.updateSensorValue(sensorId, values)
+        val ts     = System.currentTimeMillis()
+        val record = Json.obj(
+          "id"        -> s"compl-$ts".asJson,
+          "type"      -> "completion".asJson,
+          "timestamp" -> ts.asJson,
+          "body"      -> body
+        )
+        dispatchLedger.updateAndGet(l => (l :+ record).takeRight(dispatchLedgerLimit))
+        broadcast(Json.obj("type" -> "agent.completion.received".asJson, "record" -> record))
+        complete(record)
+      } }
+    },
+    path("api" / "integrations" / "ollama" / "status") {
+      get { complete(Json.obj("enabled" -> false.asJson, "configured" -> false.asJson)) }
+    },
+    path("api" / "integrations" / "ollama" / "dispatch") {
+      post { complete(StatusCodes.NotImplemented -> Json.obj("error" -> "Ollama integration not configured".asJson)) }
+    },
+    path("api" / "integrations" / "openai" / "status") {
+      get { complete(Json.obj("enabled" -> false.asJson, "configured" -> false.asJson)) }
+    },
+    path("api" / "integrations" / "openai" / "dispatch") {
+      post { complete(StatusCodes.NotImplemented -> Json.obj("error" -> "OpenAI integration not configured".asJson)) }
+    },
+    path("api" / "integrations" / "acp" / "status") {
+      get { complete(Json.obj("enabled" -> false.asJson, "configured" -> false.asJson)) }
+    },
+    path("api" / "integrations" / "acp" / "dispatch") {
+      post { complete(StatusCodes.NotImplemented -> Json.obj("error" -> "ACP integration not configured".asJson)) }
+    },
+    path("api" / "integrations" / "healthkit" / "status") {
+      get { complete(Json.obj("enabled" -> false.asJson, "configured" -> false.asJson)) }
+    },
+    path("api" / "integrations" / "healthkit" / "ingest") {
+      post { complete(StatusCodes.NotImplemented -> Json.obj("error" -> "HealthKit integration not configured".asJson)) }
+    },
+    path("api" / "integrations" / "carekit" / "status") {
+      get { complete(Json.obj("enabled" -> false.asJson, "configured" -> false.asJson)) }
+    },
+    path("api" / "integrations" / "carekit" / "ingest") {
+      post { complete(StatusCodes.NotImplemented -> Json.obj("error" -> "CareKit integration not configured".asJson)) }
+    },
+    path("api" / "integrations" / "localai" / "status") {
+      get { complete(Json.obj("enabled" -> false.asJson, "configured" -> false.asJson)) }
+    },
+    path("api" / "integrations" / "localai" / "catalog") {
+      get { complete(Json.obj("models" -> Json.arr())) }
+    },
+    path("api" / "integrations" / "localai" / "bootstrap") {
+      post { complete(StatusCodes.NotImplemented -> Json.obj("error" -> "LocalAI integration not configured".asJson)) }
+    },
+    path("api" / "integrations" / "localai" / "invoke") {
+      post { complete(StatusCodes.NotImplemented -> Json.obj("error" -> "LocalAI integration not configured".asJson)) }
+    },
+
+    // ── Signals ───────────────────────────────────────────────────────────────
+    path("api" / "signals") {
+      post { entity(as[Json]) { body =>
+        val sensorId = body.hcursor.get[String]("sensorId").getOrElse("localai_agent_activity")
+        val values   = body.hcursor.downField("values").as[Vector[Double]].getOrElse(Vector.empty)
+        val ttlMs    = body.hcursor.get[Long]("ttlMs").getOrElse(30000L)
+        val updated  = engine.updateSensorValue(sensorId, values)
+        val ts       = System.currentTimeMillis()
+        broadcastState()
+        complete(Json.obj(
+          "success"   -> updated.asJson,
+          "sensorId"  -> sensorId.asJson,
+          "timestamp" -> ts.asJson,
+          "ttlMs"     -> ttlMs.asJson
+        ))
+      } }
+    },
+
+    // ── Triggers status ───────────────────────────────────────────────────────
+    path("api" / "triggers" / "status") {
+      get { complete(Json.obj(
+        "enabled"      -> false.asJson,
+        "dispatchMode" -> "dry-run".asJson
+      )) }
+    },
+
+    // ── MQTT bridge (disabled — set MQTT_BROKER_HOST to enable) ──────────────
+    path("api" / "mqtt" / "status") {
+      get { complete(Json.obj("enabled" -> false.asJson)) }
+    },
+    path("api" / "mqtt" / "mappings") {
+      get { complete(Json.obj("enabled" -> false.asJson, "mappings" -> Json.arr())) }
+    },
+
+    // ── Bootstrap sources from Reality Engine machines ────────────────────────
+    path("api" / "sources" / "bootstrap-from-machines") {
+      post {
+        val req = basicRequest.get(uri"$realityEngineUrl/api/machines").response(asString)
+        req.send(sttpBackend) match {
+          case resp if resp.isSuccess =>
+            val machines = resp.body.toOption
+              .flatMap(b => io.circe.parser.parse(b).toOption)
+              .flatMap(_.hcursor.downField("machines").as[Vector[Json]].toOption)
+              .getOrElse(Vector.empty)
+            val created = machines.flatMap { m =>
+              val name     = m.hcursor.get[String]("name").getOrElse("unknown")
+              val machineId = m.hcursor.get[String]("id").getOrElse(s"machine-${System.currentTimeMillis()}")
+              engine.findSensorBySensorId(machineId) match {
+                case Some(_) => None
+                case None =>
+                  val src = engine.addSource(SensorSourceConfig(
+                    id          = machineId,
+                    name        = s"Machine: $name",
+                    region      = com.realityengine.perception.models.Region(0, 1),
+                    active      = true,
+                    sensorId    = machineId,
+                    lastValue   = Vector.empty,
+                    lastUpdated = None,
+                    ttlMs       = 30000L
+                  ))
+                  Some(src.asJson)
+              }
+            }
+            onComplete(saveAndBroadcast()) { _ =>
+              complete(Json.obj(
+                "success" -> true.asJson,
+                "created" -> created.length.asJson,
+                "sources" -> Json.arr(created: _*)
+              ))
+            }
           case resp =>
             complete(StatusCodes.BadGateway ->
               Json.obj("error" -> resp.body.fold(identity, identity).asJson))

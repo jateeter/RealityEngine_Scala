@@ -42,6 +42,11 @@ class Routes(
   // Invalidated automatically when the file's mtime changes.
   private val jsonFileCache = TrieMap.empty[String, (Long, String)]
 
+  // Runtime options — mutable defaults exposed via /api/runtime/options
+  private val historyLimitRef           = new AtomicReference[Int](1000)
+  private val includeMachineResultsRef  = new AtomicReference[Boolean](true)
+  private val includePerceptualSpaceRef = new AtomicReference[Boolean](true)
+
   private def readJsonFile(file: File): String = {
     val mtime = file.lastModified()
     val key   = file.getAbsolutePath
@@ -135,6 +140,112 @@ class Routes(
     if (machine.perceptualMapping.isDefined) {
       simulator.addMachine(machine)
       println(s"""  ✓ Machine "${machine.name}" registered with perceptual simulator""")
+    }
+  }
+
+  // ── Helpers ───────────────────────────────────────────────────────────────
+
+  private def runtimeOptionsJson(): Json = Json.obj(
+    "historyLimit"           -> Json.fromInt(historyLimitRef.get()),
+    "includeMachineResults"  -> Json.fromBoolean(includeMachineResultsRef.get()),
+    "includePerceptualSpace" -> Json.fromBoolean(includePerceptualSpaceRef.get()),
+    "projectionControls"     -> Json.obj(
+      "includeMachineResults"  -> Json.fromString("boolean request field on /api/perceive"),
+      "includePerceptualSpace" -> Json.fromString("boolean request field on /api/perceive"),
+      "compact"                -> Json.fromString("sets includeMachineResults false when includeMachineResults is omitted")
+    )
+  )
+
+  private def storageFootprintJson(): Json = {
+    val mappedMachines = engine.getAllMachines.filter(_.perceptualMapping.isDefined)
+    var totalFloat64Bytes = 0L
+    var totalPackedBytes  = 0L
+    var hist1 = 0; var hist2 = 0; var hist4 = 0; var hist8 = 0
+    val perMachine = mappedMachines.map { m =>
+      val mapping   = m.perceptualMapping.get
+      val bits      = m.metadata.get("bitsPerElement")
+        .flatMap(_.asNumber.flatMap(_.toInt))
+        .filter(Set(1, 2, 4, 8).contains)
+        .getOrElse(8)
+      val cells     = mapping.input.length + mapping.output.length
+      val f64Bytes  = cells * 8L
+      val packBytes = math.ceil(cells.toDouble * bits / 8).toInt
+      val shrink    = if (packBytes == 0) 0.0 else f64Bytes.toDouble / packBytes
+      totalFloat64Bytes += f64Bytes
+      totalPackedBytes  += packBytes
+      bits match { case 1 => hist1 += 1; case 2 => hist2 += 1; case 4 => hist4 += 1; case _ => hist8 += 1 }
+      Json.obj(
+        "machineId"      -> Json.fromString(m.id),
+        "machineName"    -> Json.fromString(m.name),
+        "bitsPerElement" -> Json.fromInt(bits),
+        "inputCells"     -> Json.fromInt(mapping.input.length),
+        "outputCells"    -> Json.fromInt(mapping.output.length),
+        "totalCells"     -> Json.fromInt(cells),
+        "float64Bytes"   -> Json.fromLong(f64Bytes),
+        "packedBytes"    -> Json.fromInt(packBytes),
+        "shrinkFactor"   -> Json.fromDoubleOrNull(shrink)
+      )
+    }
+    val totalShrink = if (totalPackedBytes == 0) 0.0 else totalFloat64Bytes.toDouble / totalPackedBytes
+    Json.obj(
+      "perMachine"        -> Json.arr(perMachine: _*),
+      "widthHistogram"    -> Json.obj("1" -> Json.fromInt(hist1), "2" -> Json.fromInt(hist2), "4" -> Json.fromInt(hist4), "8" -> Json.fromInt(hist8)),
+      "totalCells"        -> Json.fromLong(mappedMachines.map(m => { val mp = m.perceptualMapping.get; (mp.input.length + mp.output.length).toLong }).sum),
+      "totalFloat64Bytes" -> Json.fromLong(totalFloat64Bytes),
+      "totalPackedBytes"  -> Json.fromLong(totalPackedBytes),
+      "totalShrinkFactor" -> Json.fromDoubleOrNull(totalShrink)
+    )
+  }
+
+  private def resolveGovernance(machine: Machine, sequenceId: String, values: Vector[Double]): Option[Json] = {
+    val rulesOpt = for {
+      tc    <- machine.metadata.get("triggerConfig")
+      rules <- tc.hcursor.downField("rules").as[Vector[Json]].toOption
+    } yield rules
+    rulesOpt.flatMap { rules =>
+      rules.find { rule =>
+        val rc      = rule.hcursor
+        val rSeqId  = rc.get[String]("sequenceId").getOrElse("")
+        val matches = rc.downField("outputMatches").as[Vector[Double]].getOrElse(Vector.empty)
+        rSeqId == sequenceId && matches.length == values.length &&
+          matches.zip(values).forall { case (a, b) => math.abs(a - b) < 1e-9 }
+      }.map { rule =>
+        val rc         = rule.hcursor
+        val machineGov = machine.metadata.get("governance")
+        val ruleGov    = rc.downField("governance").as[Json].toOption
+        def rgStr(f: String): Option[String] = ruleGov.flatMap(_.hcursor.get[String](f).toOption)
+        def mgStr(f: String): Option[String] = machineGov.flatMap(_.hcursor.get[String](f).toOption)
+        val processStatus  = rc.get[String]("processStatus").toOption
+        val slaFromRule    = ruleGov.flatMap(_.hcursor.get[Int]("slaSeconds").toOption)
+        val slaFromMachine = machineGov.flatMap { mg =>
+          processStatus.flatMap(ps => mg.hcursor.downField("sla").get[Int](ps).toOption)
+        }
+        val ruleContact    = ruleGov.flatMap(_.hcursor.downField("contact").as[Json].toOption)
+        val machineContact = machineGov.flatMap(_.hcursor.downField("contact").as[Json].toOption)
+        def cStr(j: Option[Json], f: String): Option[String] = j.flatMap(_.hcursor.get[String](f).toOption)
+        val contactFields = List(
+          cStr(ruleContact, "primary").orElse(cStr(machineContact, "primary")).map("primary" -> Json.fromString(_)),
+          cStr(ruleContact, "secondary").orElse(cStr(machineContact, "secondary")).map("secondary" -> Json.fromString(_))
+        ).flatten
+        val sourceStr = if (ruleGov.isDefined) "rule-with-override"
+                        else if (machineGov.isDefined) "rule-only"
+                        else "machine-fallback"
+        Json.obj(
+          "machineId"            -> Json.fromString(machine.id),
+          "machineName"          -> Json.fromString(machine.name),
+          "sequenceId"           -> Json.fromString(sequenceId),
+          "ragStatusCode"        -> rc.get[String]("ragStatusCode").toOption.fold(Json.Null)(Json.fromString),
+          "processStatus"        -> processStatus.fold(Json.Null)(Json.fromString),
+          "ownerTeam"            -> Json.fromString(rgStr("ownerTeam").orElse(mgStr("ownerTeam")).getOrElse("unrouted")),
+          "slaSeconds"           -> slaFromRule.orElse(slaFromMachine).fold(Json.Null)(Json.fromInt),
+          "runbook"              -> rgStr("runbook").orElse(mgStr("runbook")).fold(Json.Null)(Json.fromString),
+          "escalationPolicy"     -> rgStr("escalationPolicy").orElse(mgStr("escalationPolicy")).fold(Json.Null)(Json.fromString),
+          "contact"              -> Json.fromFields(contactFields),
+          "source"               -> Json.fromString(sourceStr),
+          "hasMachineGovernance" -> Json.fromBoolean(machineGov.isDefined),
+          "description"          -> Json.fromString(s"Governance resolved for machine ${machine.name}, sequence $sequenceId")
+        )
+      }
     }
   }
 
@@ -746,6 +857,57 @@ class Routes(
           sseQueue.offer(step)
           complete(step.asJson)
         } } },
+
+        // Runtime introspection — parity with /api/runtime/* on LSP and CPP runtimes
+        pathPrefix("runtime") { concat(
+          path("metrics") { get { complete(Json.obj(
+            "stats"            -> engine.getStats,
+            "domainWorkerPool" -> Json.obj("semantics" -> Json.fromString("akka-futures"))
+          )) } },
+          path("vector-space") { get {
+            val dim    = simulator.getPerceptualSpace.getPerceptualVector.length
+            val reqDim = engine.getAllMachines.flatMap(_.perceptualMapping).map(m => m.input.offset + m.input.length).foldLeft(dim)(math.max)
+            complete(Json.obj(
+              "dimension"                 -> Json.fromInt(dim),
+              "requiredDimension"         -> Json.fromInt(reqDim),
+              "encoding"                  -> Json.fromString("dense-float64-clamped-0-1"),
+              "mappingVersion"            -> Json.fromInt(100),
+              "eventBusSubscriptionCount" -> Json.fromInt(0)
+            ))
+          } },
+          path("storage-footprint") { get { complete(storageFootprintJson()) } },
+          path("options") { concat(
+            get  { complete(runtimeOptionsJson()) },
+            patch { entity(as[Json]) { body =>
+              val c = body.hcursor
+              c.get[Int]("historyLimit").toOption.foreach(historyLimitRef.set)
+              c.get[Boolean]("includeMachineResults").toOption.foreach(includeMachineResultsRef.set)
+              c.get[Boolean]("includePerceptualSpace").toOption.foreach(includePerceptualSpaceRef.set)
+              complete(runtimeOptionsJson())
+            } }
+          ) }
+        ) },
+
+        // Governance / paging decision resolver — single source of truth for on-call routing
+        path("governance" / "route") { get {
+          parameter("machineId".?) { mid =>
+          parameter("sequenceId".?) { sid =>
+          parameter("values".?) { vals =>
+            (mid, sid, vals) match {
+              case (Some(machineId), Some(sequenceId), Some(valuesStr)) =>
+                engine.getMachine(machineId) match {
+                  case None => complete(StatusCodes.NotFound -> Json.obj("error" -> Json.fromString(s"Machine not found: $machineId")))
+                  case Some(machine) =>
+                    val values = valuesStr.split(",").flatMap(s => Try(s.trim.toDouble).toOption).toVector
+                    resolveGovernance(machine, sequenceId, values) match {
+                      case None    => complete(StatusCodes.NotFound -> Json.obj("error" -> Json.fromString(s"No triggerConfig rule matches (sequenceId=$sequenceId, values=$valuesStr)")))
+                      case Some(d) => complete(Json.obj("success" -> Json.fromBoolean(true), "decision" -> d))
+                    }
+                }
+              case _ => complete(StatusCodes.BadRequest -> Json.obj("error" -> Json.fromString("machineId, sequenceId, and values query parameters are required")))
+            }
+          }}}
+        } },
 
         // SSE step-stream — Visualizer Backend subscribes here as a passive observer.
         // Each subscriber gets a live-only feed; the dropHead queue ensures the VB
