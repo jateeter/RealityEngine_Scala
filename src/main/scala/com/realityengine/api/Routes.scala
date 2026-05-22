@@ -437,8 +437,14 @@ class Routes(
   }
 
   val routes: Route = AuditLogger.directive(auditCfg) { handleExceptions(exceptionHandler) {
-    pathPrefix("api") {
-      concat(
+    concat(
+      pathEndOrSingleSlash { get { complete(Json.obj(
+        "name"    -> Json.fromString("Reality Engine"),
+        "version" -> Json.fromString("1.0.0"),
+        "status"  -> Json.fromString("running")
+      )) } },
+      pathPrefix("api") {
+        concat(
         // Health
         path("health") { get { complete(Json.obj("status" -> Json.fromString("healthy"), "timestamp" -> Json.fromLong(System.currentTimeMillis()), "version" -> Json.fromString("1.0.0"))) } },
 
@@ -960,13 +966,14 @@ class Routes(
             .keepAlive(15.seconds, () => ServerSentEvent.heartbeat))
         } },
 
-        // Root
-        pathEndOrSingleSlash { get { complete(Json.obj(
-          "name"    -> Json.fromString("Reality Engine"),
-          "version" -> Json.fromString("1.0.0"),
-          "status"  -> Json.fromString("running")
-        )) } }
-      )
-    }
+          // Root /api
+          pathEndOrSingleSlash { get { complete(Json.obj(
+            "name"    -> Json.fromString("Reality Engine"),
+            "version" -> Json.fromString("1.0.0"),
+            "status"  -> Json.fromString("running")
+          )) } }
+        )
+      }
+    )
   } }
 }
