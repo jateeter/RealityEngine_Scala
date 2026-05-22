@@ -249,6 +249,39 @@ class Routes(
     }
   }
 
+  // ── Demo machine response ─────────────────────────────────────────────────
+
+  private def demoMachineResponse(machineName: String, fileName: String, displayName: String): Route =
+    engine.getAllMachines.find(_.name == machineName) match {
+      case None =>
+        complete(StatusCodes.NotFound ->
+          Json.obj("error" -> s"$displayName machine not found. Please ensure $fileName is loaded.".asJson))
+      case Some(machine) =>
+        val seqNames = Json.arr(machine.getAllSequences.map(s => Json.fromString(s.name)): _*)
+        val inputSeqs = machine.metadata.getOrElse("inputSequences", Json.arr())
+        val inputVectorCount = inputSeqs.asArray
+          .flatMap(_.headOption)
+          .flatMap(_.hcursor.downField("vectors").as[Vector[Json]].toOption)
+          .map(_.length)
+          .getOrElse(0)
+        val extraMeta = Json.obj(
+          "name"              -> machine.name.asJson,
+          "description"       -> machine.description.asJson,
+          "machineId"         -> machine.id.asJson,
+          "totalSequences"    -> machine.getSequenceCount.asJson,
+          "sequenceNames"     -> seqNames,
+          "totalInputVectors" -> inputVectorCount.asJson
+        )
+        val metaJson = Json.fromFields(machine.metadata.toSeq).deepMerge(extraMeta)
+        complete(Json.obj(
+          "success"            -> true.asJson,
+          "machine"            -> machine.toFullJson,
+          "metadata"           -> metaJson,
+          "sequencesLoaded"    -> machine.getSequenceCount.asJson,
+          "inputVectorsLoaded" -> inputVectorCount.asJson
+        ))
+    }
+
   // ── Route tree ────────────────────────────────────────────────────────────
 
   // ── Prometheus metrics ───────────────────────────────────────────────────
@@ -840,8 +873,8 @@ class Routes(
           )
         },
 
-        // Preception diagnostic
-        path("preception" / "diagnostic") { post { entity(as[Json]) { body =>
+        // Perception diagnostic
+        path("perception" / "diagnostic") { post { entity(as[Json]) { body =>
           val vec = body.hcursor.downField("universalInputSpace").as[Vector[Double]].getOrElse(Vector.empty)
           complete(engine.getDiagnosticMapping(vec))
         } } },
@@ -908,6 +941,13 @@ class Routes(
             }
           }}}
         } },
+
+        // ── Demos ────────────────────────────────────────────────────────────────
+        pathPrefix("demo") { concat(
+          path("multi-step")  { get { demoMachineResponse("Multi-Step State Machine", "MultiStep.json",           "Multi-Step State Machine") } },
+          path("data-center") { get { demoMachineResponse("Data Center Monitoring",   "DataCenterMonitoring.json", "Data Center Monitoring") } },
+          path("kleene-star") { get { demoMachineResponse("Kleene Star Operator",     "KleeneStar.json",           "Kleene Star Operator") } },
+        ) },
 
         // SSE step-stream — Visualizer Backend subscribes here as a passive observer.
         // Each subscriber gets a live-only feed; the dropHead queue ensures the VB

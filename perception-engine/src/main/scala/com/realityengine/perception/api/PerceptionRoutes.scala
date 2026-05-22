@@ -47,12 +47,80 @@ class PerceptionRoutes(
   private val dispatchLedgerLimit = sys.env.get("TRIGGER_DISPATCH_LEDGER_LIMIT").flatMap(_.toIntOption).getOrElse(100)
   private val dispatchLedger      = new AtomicReference[Vector[Json]](Vector.empty)
 
+  // In-memory push history (ring buffer, capped at pushHistoryLimit entries)
+  private val pushHistoryLimit = sys.env.get("PUSH_HISTORY_LIMIT").flatMap(_.toIntOption).getOrElse(100)
+  private val pushHistory      = new AtomicReference[Vector[Json]](Vector.empty)
+
+  // MQTT bridge config — enabled when MQTT_BROKER_HOST is set at startup
+  private val mqttBrokerHost  = sys.env.get("MQTT_BROKER_HOST")
+  private val mqttMappingsRef = new AtomicReference[Json](Json.arr())
+
   // SSE broadcast hub — mirrors /ws but as Server-Sent Events for /api/events
   private val (ssePEQueue, ssePEBroadcast) = {
     Source.queue[Json](16, OverflowStrategy.dropHead)
       .toMat(BroadcastHub.sink[Json](bufferSize = 1))(Keep.both)
       .run()
   }
+
+  // ── Integration configuration ─────────────────────────────────────────────
+
+  private val ollamaBaseUrl      = sys.env.getOrElse("OLLAMA_BASE_URL",   "http://localhost:11434")
+  private val ollamaModel        = sys.env.getOrElse("OLLAMA_MODEL",      "llama3.2")
+  private val openAiBaseUrl      = sys.env.getOrElse("OPENAI_BASE_URL",   "https://api.openai.com/v1")
+  private val openAiApiKey       = sys.env.get("OPENAI_API_KEY")
+  private val openAiModel        = sys.env.getOrElse("OPENAI_MODEL",      "gpt-4o")
+  private val acpEndpointUrl     = sys.env.get("ACP_ENDPOINT_URL")
+  private val acpAgentId         = sys.env.getOrElse("ACP_AGENT_ID",      "openclaw")
+  private val hkBridgeToken      = sys.env.get("HEALTHKIT_BRIDGE_TOKEN")
+  private val hkEnabled          = sys.env.get("HEALTHKIT_ENABLED").exists(v => v == "true" || v == "1")
+  private val ckBridgeToken      = sys.env.get("CAREKIT_BRIDGE_TOKEN")
+  private val ckEnabled          = sys.env.get("CAREKIT_ENABLED").exists(v => v == "true" || v == "1")
+  private val localAiApiUrl      = sys.env.getOrElse("LOCAL_AI_API_URL",  "http://localhost:8080")
+  private val localAiMachinesDir = sys.env.get("LOCAL_AI_MACHINES_DIR")
+
+  // ── Source mapping registry ───────────────────────────────────────────────
+
+  private val sourceMappings: scala.collection.concurrent.TrieMap[String, Json] = {
+    val m       = new scala.collection.concurrent.TrieMap[String, Json]()
+    val cfgPath = sys.env.getOrElse("INTEGRATIONS_CONFIG", "config/integrations.json")
+    try {
+      val src  = scala.io.Source.fromFile(cfgPath)
+      val text = try src.mkString finally src.close()
+      io.circe.parser.parse(text).toOption.foreach { json =>
+        json.hcursor.downField("sourceMappings").as[Vector[Json]].getOrElse(Vector.empty).foreach { sm =>
+          sm.hcursor.get[String]("id").toOption.foreach(id => m.put(id, sm))
+        }
+      }
+    } catch { case _: Exception => }
+    m
+  }
+
+  // ── Integration helpers ───────────────────────────────────────────────────
+
+  private def resolveTemplate(template: String, tokens: Map[String, String]): String =
+    tokens.foldLeft(template) { case (t, (k, v)) => t.replace(s"{$k}", v) }
+
+  private def ingestCompletion(body: Json): Json = {
+    val sensorId = body.hcursor.get[String]("sensorId").getOrElse("completion_agent")
+    val values   = body.hcursor.downField("values").as[Vector[Double]].getOrElse(Vector(1.0))
+    engine.updateSensorValue(sensorId, values)
+    val ts     = System.currentTimeMillis()
+    val record = Json.obj(
+      "id"        -> s"compl-$ts".asJson,
+      "type"      -> "completion".asJson,
+      "timestamp" -> ts.asJson,
+      "body"      -> body
+    )
+    dispatchLedger.updateAndGet(l => (l :+ record).takeRight(dispatchLedgerLimit))
+    broadcast(Json.obj("type" -> "agent.completion.received".asJson, "record" -> record))
+    record
+  }
+
+  private def probeHttp(url: String): (Boolean, String) =
+    try {
+      val resp = basicRequest.get(uri"$url").response(asString).send(sttpBackend)
+      (resp.isSuccess, resp.body.fold(identity, identity))
+    } catch { case e: Exception => (false, e.getMessage) }
 
   // ── Auto-push scheduler ───────────────────────────────────────────────────
 
@@ -178,9 +246,22 @@ class PerceptionRoutes(
     path("api" / "push") {
       post {
         onComplete(doPush()) {
-          case Success(r) => complete(r)
+          case Success(r) =>
+            val id     = s"push-${System.currentTimeMillis()}-${java.util.UUID.randomUUID().toString.take(8)}"
+            val record = r.asJson.deepMerge(Json.obj("id" -> id.asJson))
+            pushHistory.updateAndGet(h => (h :+ record).takeRight(pushHistoryLimit))
+            complete(record)
           case Failure(e) => complete(StatusCodes.InternalServerError ->
             Json.obj("error" -> e.getMessage.asJson))
+        }
+      }
+    },
+    path("api" / "push" / Segment) { id =>
+      get {
+        pushHistory.get().find(_.hcursor.get[String]("id").toOption.contains(id)) match {
+          case Some(r) => complete(r)
+          case None    => complete(StatusCodes.NotFound ->
+            Json.obj("error" -> s"Push record $id not found".asJson))
         }
       }
     },
@@ -365,72 +446,342 @@ class PerceptionRoutes(
     // ── Integrations ─────────────────────────────────────────────────────────
     path("api" / "integrations" / "status") {
       get { complete(Json.obj(
-        "loaded"             -> false.asJson,
-        "path"               -> Json.Null,
+        "loaded"             -> sourceMappings.nonEmpty.asJson,
+        "path"               -> sys.env.getOrElse("INTEGRATIONS_CONFIG", "config/integrations.json").asJson,
         "error"              -> Json.Null,
-        "integrationCount"   -> 0.asJson,
-        "integrations"       -> Json.arr(),
+        "integrationCount"   -> sourceMappings.size.asJson,
+        "integrations"       -> Json.arr(sourceMappings.keys.map(Json.fromString).toSeq: _*),
         "completionEndpoint" -> "/api/integrations/completions".asJson
       )) }
     },
     path("api" / "integrations" / "completions") {
+      post { entity(as[Json]) { body => complete(ingestCompletion(body)) } }
+    },
+
+    // ── Ollama ───────────────────────────────────────────────────────────────
+    path("api" / "integrations" / "ollama" / "status") {
+      get {
+        val (reachable, respBody) = probeHttp(s"$ollamaBaseUrl/api/tags")
+        val models = if (reachable)
+          io.circe.parser.parse(respBody).toOption
+            .flatMap(_.hcursor.downField("models").as[Vector[Json]].toOption)
+            .getOrElse(Vector.empty)
+        else Vector.empty
+        complete(Json.obj(
+          "enabled"    -> true.asJson,
+          "configured" -> true.asJson,
+          "baseUrl"    -> ollamaBaseUrl.asJson,
+          "model"      -> ollamaModel.asJson,
+          "reachable"  -> reachable.asJson,
+          "models"     -> Json.arr(models: _*)
+        ))
+      }
+    },
+    path("api" / "integrations" / "ollama" / "dispatch") {
       post { entity(as[Json]) { body =>
-        val sensorId = body.hcursor.get[String]("sensorId").getOrElse("completion_agent")
-        val values   = body.hcursor.downField("values").as[Vector[Double]].getOrElse(Vector(1.0))
-        engine.updateSensorValue(sensorId, values)
-        val ts     = System.currentTimeMillis()
-        val record = Json.obj(
-          "id"        -> s"compl-$ts".asJson,
-          "type"      -> "completion".asJson,
+        val model    = body.hcursor.get[String]("model").getOrElse(ollamaModel)
+        val messages = body.hcursor.downField("messages").as[Json].getOrElse(Json.arr())
+        val agentId  = body.hcursor.get[String]("agentId").toOption
+        val reqBody  = Json.obj("model" -> model.asJson, "messages" -> messages, "stream" -> false.asJson).noSpaces
+        try {
+          val resp = basicRequest
+            .post(uri"$ollamaBaseUrl/api/chat")
+            .contentType("application/json")
+            .body(reqBody)
+            .response(asString)
+            .send(sttpBackend)
+          if (resp.isSuccess) {
+            val parsed  = resp.body.toOption.flatMap(b => io.circe.parser.parse(b).toOption).getOrElse(Json.Null)
+            val content = parsed.hcursor.downField("message").get[String]("content").getOrElse("")
+            val cJson   = io.circe.parser.parse(content).toOption.getOrElse(Json.Null)
+            val sensorId = cJson.hcursor.get[String]("sensorId").toOption
+              .orElse(agentId.map(id => s"agent.$id.completion"))
+              .getOrElse("ollama.completion")
+            val values = cJson.hcursor.downField("values").as[Vector[Double]].getOrElse(Vector(1.0))
+            val record = ingestCompletion(Json.obj("sensorId" -> sensorId.asJson, "values" -> values.asJson))
+            complete(Json.obj("success" -> true.asJson, "content" -> content.asJson, "record" -> record))
+          } else {
+            complete(StatusCodes.BadGateway -> Json.obj("error" -> resp.body.fold(identity, identity).asJson))
+          }
+        } catch { case e: Exception =>
+          complete(StatusCodes.ServiceUnavailable -> Json.obj("error" -> e.getMessage.asJson))
+        }
+      } }
+    },
+
+    // ── OpenAI ───────────────────────────────────────────────────────────────
+    path("api" / "integrations" / "openai" / "status") {
+      get { complete(Json.obj(
+        "enabled"       -> openAiApiKey.isDefined.asJson,
+        "configured"    -> openAiApiKey.isDefined.asJson,
+        "baseUrl"       -> openAiBaseUrl.asJson,
+        "model"         -> openAiModel.asJson,
+        "keyConfigured" -> openAiApiKey.isDefined.asJson
+      )) }
+    },
+    path("api" / "integrations" / "openai" / "dispatch") {
+      post { entity(as[Json]) { body =>
+        openAiApiKey match {
+          case None =>
+            complete(StatusCodes.BadRequest -> Json.obj("error" -> "OPENAI_API_KEY not configured".asJson))
+          case Some(key) =>
+            val input   = body.hcursor.get[String]("input").getOrElse("")
+            val model   = body.hcursor.get[String]("model").getOrElse(openAiModel)
+            val agentId = body.hcursor.get[String]("agentId").toOption
+            val reqBody = Json.obj("model" -> model.asJson, "input" -> input.asJson).noSpaces
+            try {
+              val resp = basicRequest
+                .post(uri"$openAiBaseUrl/responses")
+                .header("Authorization", s"Bearer $key")
+                .contentType("application/json")
+                .body(reqBody)
+                .response(asString)
+                .send(sttpBackend)
+              if (resp.isSuccess) {
+                val parsed = resp.body.toOption.flatMap(b => io.circe.parser.parse(b).toOption).getOrElse(Json.Null)
+                val outputText = parsed.hcursor.downField("output").downArray
+                  .downField("content").downArray.get[String]("text").toOption.getOrElse("")
+                val cJson    = io.circe.parser.parse(outputText).toOption.getOrElse(Json.Null)
+                val sensorId = cJson.hcursor.get[String]("sensorId").toOption
+                  .orElse(agentId.map(id => s"agent.$id.completion"))
+                  .getOrElse("openai.completion")
+                val values = cJson.hcursor.downField("values").as[Vector[Double]].getOrElse(Vector(1.0))
+                val record = ingestCompletion(Json.obj("sensorId" -> sensorId.asJson, "values" -> values.asJson))
+                complete(Json.obj("success" -> true.asJson, "outputText" -> outputText.asJson, "record" -> record))
+              } else {
+                complete(StatusCodes.BadGateway -> Json.obj("error" -> resp.body.fold(identity, identity).asJson))
+              }
+            } catch { case e: Exception =>
+              complete(StatusCodes.ServiceUnavailable -> Json.obj("error" -> e.getMessage.asJson))
+            }
+        }
+      } }
+    },
+
+    // ── ACP ──────────────────────────────────────────────────────────────────
+    path("api" / "integrations" / "acp" / "status") {
+      get { complete(Json.obj(
+        "enabled"     -> acpEndpointUrl.isDefined.asJson,
+        "configured"  -> acpEndpointUrl.isDefined.asJson,
+        "endpointUrl" -> acpEndpointUrl.map(_.asJson).getOrElse(Json.Null),
+        "agentId"     -> acpAgentId.asJson
+      )) }
+    },
+    path("api" / "integrations" / "acp" / "dispatch") {
+      post { entity(as[Json]) { body =>
+        val ts      = System.currentTimeMillis()
+        val agentId = body.hcursor.get[String]("agentId").getOrElse(acpAgentId)
+        val id      = s"acp-$ts-${java.util.UUID.randomUUID().toString.take(8)}"
+        val record  = Json.obj(
+          "id"        -> id.asJson,
+          "type"      -> "acp-handoff".asJson,
+          "agentId"   -> agentId.asJson,
           "timestamp" -> ts.asJson,
+          "endpoint"  -> acpEndpointUrl.map(_.asJson).getOrElse(Json.Null),
+          "status"    -> "accepted".asJson,
           "body"      -> body
         )
         dispatchLedger.updateAndGet(l => (l :+ record).takeRight(dispatchLedgerLimit))
-        broadcast(Json.obj("type" -> "agent.completion.received".asJson, "record" -> record))
-        complete(record)
+        broadcast(Json.obj("type" -> "acp.handoff.accepted".asJson, "record" -> record))
+        complete(StatusCodes.Accepted -> record)
       } }
     },
-    path("api" / "integrations" / "ollama" / "status") {
-      get { complete(Json.obj("enabled" -> false.asJson, "configured" -> false.asJson)) }
-    },
-    path("api" / "integrations" / "ollama" / "dispatch") {
-      post { complete(StatusCodes.NotImplemented -> Json.obj("error" -> "Ollama integration not configured".asJson)) }
-    },
-    path("api" / "integrations" / "openai" / "status") {
-      get { complete(Json.obj("enabled" -> false.asJson, "configured" -> false.asJson)) }
-    },
-    path("api" / "integrations" / "openai" / "dispatch") {
-      post { complete(StatusCodes.NotImplemented -> Json.obj("error" -> "OpenAI integration not configured".asJson)) }
-    },
-    path("api" / "integrations" / "acp" / "status") {
-      get { complete(Json.obj("enabled" -> false.asJson, "configured" -> false.asJson)) }
-    },
-    path("api" / "integrations" / "acp" / "dispatch") {
-      post { complete(StatusCodes.NotImplemented -> Json.obj("error" -> "ACP integration not configured".asJson)) }
-    },
+
+    // ── HealthKit ─────────────────────────────────────────────────────────────
     path("api" / "integrations" / "healthkit" / "status") {
-      get { complete(Json.obj("enabled" -> false.asJson, "configured" -> false.asJson)) }
+      get { complete(Json.obj(
+        "enabled"        -> hkEnabled.asJson,
+        "configured"     -> hkBridgeToken.isDefined.asJson,
+        "tokenRequired"  -> true.asJson,
+        "bridgeEndpoint" -> "/api/integrations/healthkit/ingest".asJson
+      )) }
     },
     path("api" / "integrations" / "healthkit" / "ingest") {
-      post { complete(StatusCodes.NotImplemented -> Json.obj("error" -> "HealthKit integration not configured".asJson)) }
+      post {
+        optionalHeaderValueByName("Authorization") { authHeader =>
+          entity(as[Json]) { body =>
+            hkBridgeToken match {
+              case None =>
+                complete(StatusCodes.ServiceUnavailable ->
+                  Json.obj("error" -> "HealthKit bridge not configured".asJson))
+              case Some(expectedToken) =>
+                val tokenFromBody   = body.hcursor.get[String]("token").toOption
+                val tokenFromHeader = authHeader.map(_.stripPrefix("Bearer ")).filter(_.nonEmpty)
+                val token = tokenFromBody.orElse(tokenFromHeader).getOrElse("")
+                if (token != expectedToken) {
+                  complete(StatusCodes.Unauthorized -> Json.obj("error" -> "Unauthorized".asJson))
+                } else {
+                  val samples = body.hcursor.downField("samples").as[Vector[Json]].getOrElse(Vector.empty)
+                  val results = samples.map { sample =>
+                    val sampleType = sample.hcursor.get[String]("sampleType").getOrElse("unknown")
+                    val values     = sample.hcursor.downField("values").as[Vector[Double]].getOrElse(Vector.empty)
+                    val sensorId   = resolveTemplate("healthkit.{sampleType}", Map("sampleType" -> sampleType))
+                    val updated    = engine.updateSensorValue(sensorId, values)
+                    Json.obj("sampleType" -> sampleType.asJson, "sensorId" -> sensorId.asJson, "updated" -> updated.asJson)
+                  }
+                  broadcastState()
+                  complete(StatusCodes.MultiStatus -> Json.obj(
+                    "results"   -> Json.arr(results: _*),
+                    "processed" -> results.length.asJson
+                  ))
+                }
+            }
+          }
+        }
+      }
     },
+
+    // ── CareKit ──────────────────────────────────────────────────────────────
     path("api" / "integrations" / "carekit" / "status") {
-      get { complete(Json.obj("enabled" -> false.asJson, "configured" -> false.asJson)) }
+      get { complete(Json.obj(
+        "enabled"        -> ckEnabled.asJson,
+        "configured"     -> ckBridgeToken.isDefined.asJson,
+        "tokenRequired"  -> true.asJson,
+        "bridgeEndpoint" -> "/api/integrations/carekit/ingest".asJson
+      )) }
     },
     path("api" / "integrations" / "carekit" / "ingest") {
-      post { complete(StatusCodes.NotImplemented -> Json.obj("error" -> "CareKit integration not configured".asJson)) }
+      post {
+        optionalHeaderValueByName("Authorization") { authHeader =>
+          entity(as[Json]) { body =>
+            ckBridgeToken match {
+              case None =>
+                complete(StatusCodes.ServiceUnavailable ->
+                  Json.obj("error" -> "CareKit bridge not configured".asJson))
+              case Some(expectedToken) =>
+                val tokenFromBody   = body.hcursor.get[String]("token").toOption
+                val tokenFromHeader = authHeader.map(_.stripPrefix("Bearer ")).filter(_.nonEmpty)
+                val token = tokenFromBody.orElse(tokenFromHeader).getOrElse("")
+                if (token != expectedToken) {
+                  complete(StatusCodes.Unauthorized -> Json.obj("error" -> "Unauthorized".asJson))
+                } else {
+                  val samples = body.hcursor.downField("samples").as[Vector[Json]].getOrElse(Vector.empty)
+                  val results = samples.map { sample =>
+                    val sampleType = sample.hcursor.get[String]("sampleType").getOrElse("unknown")
+                    val values     = sample.hcursor.downField("values").as[Vector[Double]].getOrElse(Vector.empty)
+                    val sensorId   = resolveTemplate("carekit.{sampleType}", Map("sampleType" -> sampleType))
+                    val updated    = engine.updateSensorValue(sensorId, values)
+                    Json.obj("sampleType" -> sampleType.asJson, "sensorId" -> sensorId.asJson, "updated" -> updated.asJson)
+                  }
+                  broadcastState()
+                  complete(StatusCodes.MultiStatus -> Json.obj(
+                    "results"   -> Json.arr(results: _*),
+                    "processed" -> results.length.asJson
+                  ))
+                }
+            }
+          }
+        }
+      }
     },
+
+    // ── LocalAI ──────────────────────────────────────────────────────────────
     path("api" / "integrations" / "localai" / "status") {
-      get { complete(Json.obj("enabled" -> false.asJson, "configured" -> false.asJson)) }
+      get {
+        val (reachable, _) = probeHttp(localAiApiUrl)
+        complete(Json.obj(
+          "enabled"     -> true.asJson,
+          "configured"  -> true.asJson,
+          "baseUrl"     -> localAiApiUrl.asJson,
+          "reachable"   -> reachable.asJson,
+          "machinesDir" -> localAiMachinesDir.map(_.asJson).getOrElse(Json.Null)
+        ))
+      }
     },
     path("api" / "integrations" / "localai" / "catalog") {
-      get { complete(Json.obj("models" -> Json.arr())) }
+      get {
+        val schema = try {
+          val resp = basicRequest.get(uri"$localAiApiUrl/graph/schema").response(asString).send(sttpBackend)
+          if (resp.isSuccess) io.circe.parser.parse(resp.body.fold(identity, identity)).toOption.getOrElse(Json.Null)
+          else Json.Null
+        } catch { case _: Exception => Json.Null }
+        val events = try {
+          val resp = basicRequest.get(uri"$localAiApiUrl/graphql/events").response(asString).send(sttpBackend)
+          if (resp.isSuccess) io.circe.parser.parse(resp.body.fold(identity, identity)).toOption.getOrElse(Json.Null)
+          else Json.Null
+        } catch { case _: Exception => Json.Null }
+        complete(Json.obj("schema" -> schema, "events" -> events))
+      }
     },
     path("api" / "integrations" / "localai" / "bootstrap") {
-      post { complete(StatusCodes.NotImplemented -> Json.obj("error" -> "LocalAI integration not configured".asJson)) }
+      post {
+        val defaultSensors = List(
+          ("localai_rag_retrieval",  "LocalAI RAG Retrieval",  0),
+          ("localai_rag_grading",    "LocalAI RAG Grading",    4),
+          ("localai_agent_activity", "LocalAI Agent Activity", 8)
+        )
+        val created = defaultSensors.flatMap { case (sid, name, offset) =>
+          engine.findSensorBySensorId(sid) match {
+            case Some(_) => None
+            case None =>
+              val src = engine.addSource(SensorSourceConfig(
+                id          = sid,
+                name        = name,
+                region      = com.realityengine.perception.models.Region(offset, 4),
+                active      = true,
+                sensorId    = sid,
+                lastValue   = Vector.empty,
+                lastUpdated = None,
+                ttlMs       = 60000L
+              ))
+              Some(src.asJson)
+          }
+        }
+        val machineResults = localAiMachinesDir.map { dir =>
+          val d = new java.io.File(dir)
+          if (d.isDirectory)
+            Option(d.listFiles()).getOrElse(Array.empty).filter(_.getName.endsWith(".json")).map { f =>
+              try {
+                val src  = scala.io.Source.fromFile(f)
+                val text = try src.mkString finally src.close()
+                val resp = basicRequest
+                  .post(uri"$realityEngineUrl/api/machines/import")
+                  .contentType("application/json")
+                  .body(text)
+                  .response(asString)
+                  .send(sttpBackend)
+                Json.obj("file" -> f.getName.asJson, "success" -> resp.isSuccess.asJson)
+              } catch { case e: Exception =>
+                Json.obj("file" -> f.getName.asJson, "success" -> false.asJson, "error" -> e.getMessage.asJson)
+              }
+            }.toVector
+          else Vector.empty
+        }.getOrElse(Vector.empty)
+        onComplete(saveAndBroadcast()) { _ =>
+          complete(Json.obj(
+            "success"  -> true.asJson,
+            "sources"  -> Json.arr(created: _*),
+            "machines" -> Json.arr(machineResults: _*)
+          ))
+        }
+      }
     },
     path("api" / "integrations" / "localai" / "invoke") {
-      post { complete(StatusCodes.NotImplemented -> Json.obj("error" -> "LocalAI integration not configured".asJson)) }
+      post { entity(as[Json]) { body =>
+        val allowed = Set(
+          "/v1/chat/completions", "/v1/completions", "/v1/embeddings", "/v1/models",
+          "/v1/images/generations", "/v1/audio/transcriptions", "/graphql", "/api/predict"
+        )
+        val targetPath = body.hcursor.get[String]("path").getOrElse("/v1/chat/completions")
+        if (!allowed.contains(targetPath)) {
+          complete(StatusCodes.Forbidden ->
+            Json.obj("error" -> "Path not in allowed list".asJson, "path" -> targetPath.asJson))
+        } else {
+          val payload = body.hcursor.downField("body").as[Json].getOrElse(body)
+          try {
+            val resp = basicRequest
+              .post(uri"$localAiApiUrl$targetPath")
+              .contentType("application/json")
+              .body(payload.noSpaces)
+              .response(asString)
+              .send(sttpBackend)
+            val parsed = resp.body.toOption.flatMap(b => io.circe.parser.parse(b).toOption).getOrElse(Json.Null)
+            complete((if (resp.isSuccess) StatusCodes.OK else StatusCodes.BadGateway) -> parsed)
+          } catch { case e: Exception =>
+            complete(StatusCodes.ServiceUnavailable -> Json.obj("error" -> e.getMessage.asJson))
+          }
+        }
+      } }
     },
 
     // ── Signals ───────────────────────────────────────────────────────────────
@@ -459,12 +810,48 @@ class PerceptionRoutes(
       )) }
     },
 
-    // ── MQTT bridge (disabled — set MQTT_BROKER_HOST to enable) ──────────────
+    // ── MQTT bridge (set MQTT_BROKER_HOST at startup to enable) ──────────────
     path("api" / "mqtt" / "status") {
-      get { complete(Json.obj("enabled" -> false.asJson)) }
+      get { complete(Json.obj(
+        "enabled"    -> mqttBrokerHost.isDefined.asJson,
+        "configured" -> mqttBrokerHost.isDefined.asJson,
+        "broker"     -> mqttBrokerHost.map(_.asJson).getOrElse(Json.Null)
+      )) }
     },
     path("api" / "mqtt" / "mappings") {
-      get { complete(Json.obj("enabled" -> false.asJson, "mappings" -> Json.arr())) }
+      concat(
+        get { complete(Json.obj(
+          "enabled"  -> mqttBrokerHost.isDefined.asJson,
+          "mappings" -> mqttMappingsRef.get()
+        )) },
+        put { entity(as[Json]) { body =>
+          mqttBrokerHost match {
+            case None =>
+              complete(StatusCodes.Conflict ->
+                Json.obj("error" -> "no broker config — set MQTT_BROKER_HOST at PE startup before reloading mappings".asJson))
+            case Some(_) =>
+              val mappings = body.hcursor.downField("mappings").as[Json].getOrElse(Json.arr())
+              val count    = mappings.asArray.map(_.length).getOrElse(0)
+              if (count == 0)
+                complete(StatusCodes.BadRequest ->
+                  Json.obj("error" -> "mappings array is empty — at least one rule is required".asJson))
+              else {
+                mqttMappingsRef.set(mappings)
+                broadcast(Json.obj(
+                  "type"     -> "mqtt-mappings-updated".asJson,
+                  "mappings" -> mappings,
+                  "count"    -> count.asJson
+                ))
+                complete(Json.obj(
+                  "success"  -> true.asJson,
+                  "enabled"  -> true.asJson,
+                  "mappings" -> count.asJson,
+                  "warnings" -> Json.arr()
+                ))
+              }
+          }
+        } }
+      )
     },
 
     // ── Bootstrap sources from Reality Engine machines ────────────────────────
