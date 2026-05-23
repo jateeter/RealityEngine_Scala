@@ -1,6 +1,6 @@
 SBT ?= sbt
 
-.PHONY: compile test assembly e2e-healthkit-spezi clean
+.PHONY: compile test assembly reality-assembly e2e-healthkit-spezi clean
 
 compile:
 	$(SBT) compile
@@ -11,7 +11,10 @@ test:
 assembly:
 	$(SBT) assembly
 
-e2e-healthkit-spezi: assembly
+reality-assembly:
+	cd .. && $(SBT) assembly
+
+e2e-healthkit-spezi: reality-assembly assembly
 	tests/e2e_healthkit_spezi.sh
 
 clean:

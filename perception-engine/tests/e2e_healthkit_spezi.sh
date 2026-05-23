@@ -10,8 +10,9 @@ PERCEPTION_ENGINE_E2E_PORT="${PERCEPTION_ENGINE_E2E_PORT:-3401}"
 VECTOR_DIMENSION="${VECTOR_DIMENSION:-5120}"
 HEALTHKIT_BRIDGE_TOKEN="${HEALTHKIT_BRIDGE_TOKEN:-spezi-e2e-token}"
 
-# Reality Engine binary — default to LSP's built-in RE; override with CPP binary if preferred.
-REALITY_ENGINE_BIN="${REALITY_ENGINE_BIN:-../RealityEngine_LSP/bin/reality-engine-lsp}"
+# Reality Engine jar from the Scala runtime. Override only to test a different
+# Scala RE build artifact; this e2e must not depend on another implementation.
+REALITY_ENGINE_JAR="${REALITY_ENGINE_JAR:-../target/scala-2.13/reality-engine.jar}"
 
 REALITY_PID=""
 PERCEPTION_PID=""
@@ -123,16 +124,16 @@ post_machine() {
 
 JAR="target/scala-2.13/perception-engine.jar"
 [ -f "$JAR" ] || { echo "$JAR missing; run sbt assembly first" >&2; exit 1; }
-[ -x "$REALITY_ENGINE_BIN" ] || { echo "$REALITY_ENGINE_BIN missing or not executable" >&2; exit 1; }
+[ -f "$REALITY_ENGINE_JAR" ] || { echo "$REALITY_ENGINE_JAR missing; run sbt assembly from the Scala repo root first" >&2; exit 1; }
 
 echo "HealthKit Spezi bridge e2e (Scala)"
 echo "  Reality Engine port:    $REALITY_ENGINE_E2E_PORT"
 echo "  Perception Engine port: $PERCEPTION_ENGINE_E2E_PORT"
-echo "  Reality Engine binary:  $REALITY_ENGINE_BIN"
+echo "  Reality Engine jar:     $REALITY_ENGINE_JAR"
 
-REALITY_ENGINE_PORT="$REALITY_ENGINE_E2E_PORT" \
+PORT="$REALITY_ENGINE_E2E_PORT" \
   VECTOR_DIMENSION="$VECTOR_DIMENSION" \
-  "$REALITY_ENGINE_BIN" reality >/tmp/reality_engine_healthkit_spezi_scala_e2e.log 2>&1 &
+  java -jar "$REALITY_ENGINE_JAR" >/tmp/reality_engine_healthkit_spezi_scala_e2e.log 2>&1 &
 REALITY_PID="$!"
 wait_for_http "http://localhost:${REALITY_ENGINE_E2E_PORT}/api/health" "Reality Engine"
 
