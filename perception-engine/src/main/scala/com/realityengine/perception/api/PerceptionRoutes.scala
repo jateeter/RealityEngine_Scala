@@ -460,6 +460,7 @@ class PerceptionRoutes(
         "path"               -> sys.env.getOrElse("INTEGRATIONS_CONFIG", "config/integrations.json").asJson,
         "error"              -> Json.Null,
         "integrationCount"   -> sourceMappings.size.asJson,
+        "sourceMappings"     -> Json.arr(sourceMappings.values.toSeq: _*),
         "integrations"       -> Json.arr(sourceMappings.keys.map(Json.fromString).toSeq: _*),
         "completionEndpoint" -> "/api/integrations/completions".asJson
       )) }
@@ -682,6 +683,7 @@ class PerceptionRoutes(
                     val name  = m.hcursor.get[String]("name").getOrElse(s"healthkit:$tpe")
                     val mapId = m.hcursor.get[String]("id").getOrElse(explicitId.getOrElse(""))
                     engine.updateSensorValue(sensorId, values)
+                    val regionJson = m.hcursor.downField("region").as[Json].getOrElse(Json.Null)
                     val r = Json.obj(
                       "resolved"        -> true.asJson,
                       "sensorId"        -> sensorId.asJson,
@@ -689,7 +691,9 @@ class PerceptionRoutes(
                       "type"            -> tpe.asJson,
                       "sourceName"      -> sourceName.asJson,
                       "sourceMappingId" -> mapId.asJson,
+                      "region"          -> regionJson,
                       "values"          -> values.asJson,
+                      "source"          -> Json.obj("lastValue" -> values.asJson),
                       "ttlMs"           -> ttlMs.asJson)
                     (res :+ r, unm)
                 }

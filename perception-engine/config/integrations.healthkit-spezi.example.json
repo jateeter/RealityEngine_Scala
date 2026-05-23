@@ -1,0 +1,89 @@
+{
+  "_comment": "Example PE registry for a Stanford SpeziHealthKit iOS bridge. The native iOS app owns HealthKit authorization and posts normalized, read-only samples to /api/integrations/healthkit/ingest.",
+  "version": "1.0",
+  "defaults": {
+    "ttlMs": 900000,
+    "completionEndpoint": "/api/integrations/completions"
+  },
+  "integrations": [
+    {
+      "id": "healthkit-ios-spezi-bridge",
+      "kind": "healthkit",
+      "enabled": true,
+      "bridgeId": "healthkit-ios-bridge",
+      "defaultSourceMappingId": "healthkit-activity",
+      "transport": "https",
+      "nativeBridge": {
+        "framework": "Stanford SpeziHealthKit",
+        "repository": "https://github.com/StanfordSpezi/SpeziHealthKit",
+        "authorizationOwner": "ios-app",
+        "accessMode": "read-only"
+      }
+    }
+  ],
+  "sourceMappings": [
+    {
+      "id": "healthkit:HKCorrelationTypeIdentifierBloodPressure",
+      "sensorIdTemplate": "healthkit.blood-pressure",
+      "name": "HealthKit Blood Pressure",
+      "region": { "offset": 4320, "length": 4 },
+      "extract": {
+        "type": "normalized-healthkit",
+        "pointers": ["/systolicNormalized", "/diastolicNormalized", "/pulsePressureNormalized", "/confidence"]
+      },
+      "fhir": {
+        "resourceType": "Observation",
+        "profile": "http://hl7.org/fhir/us/core/StructureDefinition/us-core-blood-pressure",
+        "code": "85354-9",
+        "components": {
+          "systolic": "8480-6",
+          "diastolic": "8462-4"
+        },
+        "unit": "mm[Hg]"
+      },
+      "normalize": { "mode": "bridge-normalized", "clamp": true },
+      "ttlMs": 900000
+    },
+    {
+      "id": "healthkit:HKWorkoutTypeIdentifierWorkout",
+      "sensorIdTemplate": "healthkit.exercise",
+      "name": "HealthKit Exercise",
+      "region": { "offset": 4330, "length": 4 },
+      "extract": {
+        "type": "normalized-healthkit",
+        "pointers": ["/durationNormalized", "/stepsNormalized", "/energyNormalized", "/confidence"]
+      },
+      "fhir": {
+        "resourceType": "Observation",
+        "profile": "http://hl7.org/fhir/us/physical-activity",
+        "codes": {
+          "dailySteps": "41950-7",
+          "exerciseDuration": "55411-3",
+          "evsMinutesPerWeek": "82290-8"
+        }
+      },
+      "normalize": { "mode": "bridge-normalized", "clamp": true },
+      "ttlMs": 900000
+    },
+    {
+      "id": "healthkit:HKCategoryTypeIdentifierSleepAnalysis",
+      "sensorIdTemplate": "healthkit.sleep",
+      "name": "HealthKit Sleep Analysis",
+      "region": { "offset": 4340, "length": 4 },
+      "extract": {
+        "type": "normalized-healthkit",
+        "pointers": ["/sleepDurationNormalized", "/sleepQualityTrend", "/interruptionScore", "/confidence"]
+      },
+      "fhir": {
+        "resourceType": "Observation",
+        "codes": {
+          "sleepDuration": "93832-4",
+          "deepSleepDuration": "93831-6",
+          "remSleepDuration": "93829-0"
+        }
+      },
+      "normalize": { "mode": "bridge-normalized", "clamp": true },
+      "ttlMs": 900000
+    }
+  ]
+}
