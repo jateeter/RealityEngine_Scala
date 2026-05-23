@@ -5,6 +5,7 @@ import akka.http.scaladsl.model.StatusCodes
 import akka.http.scaladsl.server.Directives._
 import akka.http.scaladsl.server.Route
 import akka.stream.Materializer
+import com.realityengine.perception.VectorAggregator
 import com.realityengine.perception.engine.PerceptionEngine
 import com.realityengine.perception.models._
 import com.realityengine.perception.models.PerceptionJsonCodecs._
@@ -72,9 +73,12 @@ class PerceptionRoutes(
   private val acpEndpointUrl     = sys.env.get("ACP_ENDPOINT_URL")
   private val acpAgentId         = sys.env.getOrElse("ACP_AGENT_ID",      "openclaw")
   private val hkBridgeToken      = sys.env.get("HEALTHKIT_BRIDGE_TOKEN")
+  private val hkBridgeId         = sys.env.getOrElse("HEALTHKIT_BRIDGE_ID", "healthkit-ios-bridge")
   private val hkEnabled          = sys.env.get("HEALTHKIT_ENABLED").exists(v => v == "true" || v == "1")
   private val ckBridgeToken      = sys.env.get("CAREKIT_BRIDGE_TOKEN")
+  private val ckBridgeId         = sys.env.getOrElse("CAREKIT_BRIDGE_ID", "carekit-ios-bridge")
   private val ckEnabled          = sys.env.get("CAREKIT_ENABLED").exists(v => v == "true" || v == "1")
+  private val ckDefaultMappingId = sys.env.getOrElse("CAREKIT_DEFAULT_SOURCE_MAPPING_ID", "carekit-activity")
   private val localAiApiUrl      = sys.env.getOrElse("LOCAL_AI_API_URL",  "http://localhost:8080")
   private val localAiMachinesDir = sys.env.get("LOCAL_AI_MACHINES_DIR")
 
@@ -149,8 +153,10 @@ class PerceptionRoutes(
     val algoStr = MatchAlgorithm.asString(engine.matchAlgorithm)
 
     val bodyJson = Json.obj(
-      "vector"         -> vector.asJson,
-      "matchAlgorithm" -> algoStr.asJson,
+      "vector"                 -> vector.asJson,
+      "matchAlgorithm"         -> algoStr.asJson,
+      "includeMachineResults"  -> true.asJson,
+      "includePerceptualSpace" -> true.asJson,
     ).noSpaces
 
     // Push directly to the Reality Engine — VB is a passive SSE observer, not in the path
@@ -171,12 +177,16 @@ class PerceptionRoutes(
           .getOrElse(Json.Null)
 
         // RE returns SimulationStep directly (perceptualSpace at top level).
-        // Length need not equal vectorDimension: updateFromPerceptualSpace
-        // auto-grows the engine's persistent vector when RE's space has been
-        // expanded by machines whose mapping extends past our initial size.
+        // Aggregate gated machine CES output vectors from machineResults into
+        // the perceptual space before updating the persistent vector — this is
+        // the PE-side gate that ensures machine outputs are explicitly merged
+        // into the next InputSpaceVector before the next PE→RE→PE cycle.
         parsed.hcursor.get[Vector[Double]]("perceptualSpace") match {
-          case Right(ps) if ps.nonEmpty => engine.updateFromPerceptualSpace(ps)
-          case _                        =>
+          case Right(ps) if ps.nonEmpty =>
+            val machineResults = parsed.hcursor.downField("machineResults").focus.getOrElse(Json.Null)
+            val nextPs         = VectorAggregator.aggregate(ps, machineResults)
+            engine.updateFromPerceptualSpace(nextPs)
+          case _ =>
         }
 
         val stepJson = Some(parsed)
@@ -590,42 +600,113 @@ class PerceptionRoutes(
     // ── HealthKit ─────────────────────────────────────────────────────────────
     path("api" / "integrations" / "healthkit" / "status") {
       get { complete(Json.obj(
-        "enabled"        -> hkEnabled.asJson,
-        "configured"     -> hkBridgeToken.isDefined.asJson,
-        "tokenRequired"  -> true.asJson,
-        "bridgeEndpoint" -> "/api/integrations/healthkit/ingest".asJson
+        "bridgeId"              -> hkBridgeId.asJson,
+        "enabled"               -> hkEnabled.asJson,
+        "tokenConfigured"       -> hkBridgeToken.isDefined.asJson,
+        "nativeAppRequired"     -> true.asJson,
+        "nativeWorkOutsideRepo" -> true.asJson,
+        "registryKey"           -> "healthkit:<typeIdentifier>".asJson,
+        "statusEndpoint"        -> "/api/integrations/healthkit/status".asJson,
+        "ingestEndpoint"        -> "/api/integrations/healthkit/ingest".asJson,
+        "contract"              -> Json.obj(
+          "transport"    -> "https".asJson,
+          "singleSample" -> Json.arr("type".asJson, "value".asJson, "sourceName".asJson),
+          "batchSamples" -> Json.arr("bridgeId".asJson, "samples[]".asJson),
+          "auth"         -> (if (hkBridgeToken.isDefined) "bridgeToken" else "none").asJson
+        )
       )) }
     },
     path("api" / "integrations" / "healthkit" / "ingest") {
       post {
-        optionalHeaderValueByName("Authorization") { authHeader =>
-          entity(as[Json]) { body =>
-            hkBridgeToken match {
-              case None =>
-                complete(StatusCodes.ServiceUnavailable ->
-                  Json.obj("error" -> "HealthKit bridge not configured".asJson))
-              case Some(expectedToken) =>
-                val tokenFromBody   = body.hcursor.get[String]("token").toOption
-                val tokenFromHeader = authHeader.map(_.stripPrefix("Bearer ")).filter(_.nonEmpty)
-                val token = tokenFromBody.orElse(tokenFromHeader).getOrElse("")
-                if (token != expectedToken) {
-                  complete(StatusCodes.Unauthorized -> Json.obj("error" -> "Unauthorized".asJson))
-                } else {
-                  val samples = body.hcursor.downField("samples").as[Vector[Json]].getOrElse(Vector.empty)
-                  val results = samples.map { sample =>
-                    val sampleType = sample.hcursor.get[String]("sampleType").getOrElse("unknown")
-                    val values     = sample.hcursor.downField("values").as[Vector[Double]].getOrElse(Vector.empty)
-                    val sensorId   = resolveTemplate("healthkit.{sampleType}", Map("sampleType" -> sampleType))
-                    val updated    = engine.updateSensorValue(sensorId, values)
-                    Json.obj("sampleType" -> sampleType.asJson, "sensorId" -> sensorId.asJson, "updated" -> updated.asJson)
-                  }
-                  broadcastState()
-                  complete(StatusCodes.MultiStatus -> Json.obj(
-                    "results"   -> Json.arr(results: _*),
-                    "processed" -> results.length.asJson
-                  ))
+        entity(as[Json]) { body =>
+          // No-token mode: allowed when HEALTHKIT_BRIDGE_TOKEN is unset.
+          // If token is configured, require bridgeToken or token field in body.
+          val tokenOk = hkBridgeToken.forall { expected =>
+            body.hcursor.get[String]("bridgeToken").toOption
+              .orElse(body.hcursor.get[String]("token").toOption)
+              .contains(expected)
+          }
+          if (!tokenOk) {
+            complete(StatusCodes.Unauthorized ->
+              Json.obj("error" -> "invalid HealthKit bridge token".asJson))
+          } else {
+            // Batch (samples[]) or single flat body
+            val rawSamples = body.hcursor.downField("samples").as[Vector[Json]].toOption
+            val samples    = rawSamples.getOrElse(Vector(body))
+
+            val (resolved, unmapped) = samples.foldLeft(
+              (Vector.empty[Json], Vector.empty[Json])
+            ) { case ((res, unm), sample) =>
+              val tpe        = sample.hcursor.get[String]("type").toOption
+                                 .orElse(sample.hcursor.get[String]("sampleType").toOption)
+                                 .getOrElse("")
+              val sourceName = sample.hcursor.get[String]("sourceName").toOption.getOrElse("")
+              val valuesOpt  = sample.hcursor.downField("values").as[Vector[Double]].toOption
+              val valueOpt   = sample.hcursor.get[Double]("value").toOption
+              val values     = valuesOpt.getOrElse(valueOpt.map(Vector(_)).getOrElse(Vector.empty))
+
+              if (tpe.isEmpty) {
+                val u = Json.obj("unmapped" -> true.asJson, "type" -> tpe.asJson,
+                  "sourceName" -> sourceName.asJson, "reason" -> "sample.type is required".asJson)
+                (res, unm :+ u)
+              } else if (values.isEmpty) {
+                val u = Json.obj("unmapped" -> true.asJson, "type" -> tpe.asJson,
+                  "sourceName" -> sourceName.asJson, "reason" -> "sample.value must be a finite number".asJson)
+                (res, unm :+ u)
+              } else {
+                // Two-level registry lookup: healthkit:<type>:<sourceName> wins over healthkit:<type>
+                val explicitId = sample.hcursor.get[String]("sourceMappingId").toOption
+                                   .orElse(sample.hcursor.get[String]("mappingId").toOption)
+                val mapping = explicitId.flatMap(sourceMappings.get)
+                  .orElse(if (sourceName.nonEmpty) sourceMappings.get(s"healthkit:$tpe:$sourceName") else None)
+                  .orElse(sourceMappings.get(s"healthkit:$tpe"))
+
+                mapping match {
+                  case None =>
+                    val u = Json.obj("unmapped" -> true.asJson, "type" -> tpe.asJson,
+                      "sourceName" -> sourceName.asJson,
+                      "reason" -> s"no registry mapping (declare healthkit:$tpe[:<sourceName>])".asJson)
+                    (res, unm :+ u)
+                  case Some(m) if m.hcursor.downField("region").as[Json].isLeft =>
+                    val u = Json.obj("unmapped" -> true.asJson, "type" -> tpe.asJson,
+                      "reason" -> "mapping is missing region.offset/region.length".asJson)
+                    (res, unm :+ u)
+                  case Some(m) =>
+                    val sensorId = m.hcursor.get[String]("sensorId").toOption.filter(_.nonEmpty)
+                      .orElse(m.hcursor.get[String]("sensorIdTemplate").toOption.filter(_.nonEmpty).map { tpl =>
+                        resolveTemplate(tpl, Map("type" -> tpe, "sampleType" -> tpe,
+                          "source" -> sourceName, "provider" -> "healthkit", "agent" -> sourceName))
+                      })
+                      .getOrElse(s"hk.${tpe.replaceAll("[^a-zA-Z0-9]", "").toLowerCase}")
+                    val ttlMs = m.hcursor.get[Long]("ttlMs").getOrElse(3600000L)
+                    val name  = m.hcursor.get[String]("name").getOrElse(s"healthkit:$tpe")
+                    val mapId = m.hcursor.get[String]("id").getOrElse(explicitId.getOrElse(""))
+                    engine.updateSensorValue(sensorId, values)
+                    val r = Json.obj(
+                      "resolved"        -> true.asJson,
+                      "sensorId"        -> sensorId.asJson,
+                      "name"            -> name.asJson,
+                      "type"            -> tpe.asJson,
+                      "sourceName"      -> sourceName.asJson,
+                      "sourceMappingId" -> mapId.asJson,
+                      "values"          -> values.asJson,
+                      "ttlMs"           -> ttlMs.asJson)
+                    (res :+ r, unm)
                 }
+              }
             }
+
+            val allResolved = unmapped.isEmpty
+            val status = if (allResolved) StatusCodes.OK
+                         else if (resolved.isEmpty) StatusCodes.BadRequest
+                         else StatusCodes.MultiStatus
+            broadcastState()
+            complete(status -> Json.obj(
+              "success"  -> allResolved.asJson,
+              "bridgeId" -> hkBridgeId.asJson,
+              "resolved" -> Json.arr(resolved: _*),
+              "unmapped" -> Json.arr(unmapped: _*)
+            ))
           }
         }
       }
@@ -634,42 +715,85 @@ class PerceptionRoutes(
     // ── CareKit ──────────────────────────────────────────────────────────────
     path("api" / "integrations" / "carekit" / "status") {
       get { complete(Json.obj(
-        "enabled"        -> ckEnabled.asJson,
-        "configured"     -> ckBridgeToken.isDefined.asJson,
-        "tokenRequired"  -> true.asJson,
-        "bridgeEndpoint" -> "/api/integrations/carekit/ingest".asJson
+        "bridgeId"              -> ckBridgeId.asJson,
+        "enabled"               -> ckEnabled.asJson,
+        "defaultSourceMappingId" -> ckDefaultMappingId.asJson,
+        "tokenConfigured"       -> ckBridgeToken.isDefined.asJson,
+        "nativeAppRequired"     -> true.asJson,
+        "nativeWorkOutsideRepo" -> true.asJson,
+        "registryKey"           -> "carekit:<sampleType>".asJson,
+        "statusEndpoint"        -> "/api/integrations/carekit/status".asJson,
+        "ingestEndpoint"        -> "/api/integrations/carekit/ingest".asJson,
+        "contract"              -> Json.obj(
+          "transport"    -> "https".asJson,
+          "singleSample" -> Json.arr("bridgeId".asJson, "sampleType".asJson, "sourceMappingId".asJson, "values".asJson),
+          "batchSamples" -> Json.arr("bridgeId".asJson, "samples[]".asJson),
+          "auth"         -> (if (ckBridgeToken.isDefined) "bridgeToken" else "external-transport").asJson
+        )
       )) }
     },
     path("api" / "integrations" / "carekit" / "ingest") {
       post {
-        optionalHeaderValueByName("Authorization") { authHeader =>
-          entity(as[Json]) { body =>
-            ckBridgeToken match {
-              case None =>
-                complete(StatusCodes.ServiceUnavailable ->
-                  Json.obj("error" -> "CareKit bridge not configured".asJson))
-              case Some(expectedToken) =>
-                val tokenFromBody   = body.hcursor.get[String]("token").toOption
-                val tokenFromHeader = authHeader.map(_.stripPrefix("Bearer ")).filter(_.nonEmpty)
-                val token = tokenFromBody.orElse(tokenFromHeader).getOrElse("")
-                if (token != expectedToken) {
-                  complete(StatusCodes.Unauthorized -> Json.obj("error" -> "Unauthorized".asJson))
-                } else {
-                  val samples = body.hcursor.downField("samples").as[Vector[Json]].getOrElse(Vector.empty)
-                  val results = samples.map { sample =>
-                    val sampleType = sample.hcursor.get[String]("sampleType").getOrElse("unknown")
-                    val values     = sample.hcursor.downField("values").as[Vector[Double]].getOrElse(Vector.empty)
-                    val sensorId   = resolveTemplate("carekit.{sampleType}", Map("sampleType" -> sampleType))
-                    val updated    = engine.updateSensorValue(sensorId, values)
-                    Json.obj("sampleType" -> sampleType.asJson, "sensorId" -> sensorId.asJson, "updated" -> updated.asJson)
-                  }
-                  broadcastState()
-                  complete(StatusCodes.MultiStatus -> Json.obj(
-                    "results"   -> Json.arr(results: _*),
-                    "processed" -> results.length.asJson
-                  ))
-                }
+        entity(as[Json]) { body =>
+          val tokenOk = ckBridgeToken.forall { expected =>
+            body.hcursor.get[String]("bridgeToken").toOption
+              .orElse(body.hcursor.get[String]("token").toOption)
+              .contains(expected)
+          }
+          if (!tokenOk) {
+            complete(StatusCodes.Unauthorized ->
+              Json.obj("error" -> "invalid CareKit bridge token".asJson))
+          } else {
+            val bridgeIdFromBody = body.hcursor.get[String]("bridgeId").getOrElse(ckBridgeId)
+            val reserved         = Set("samples", "bridgeToken", "token")
+            val topLevel         = body.asObject.map(_.toMap.filterKeys(!reserved(_))).getOrElse(Map.empty)
+
+            // Batch (samples[]) or single flat body; top-level fields merged into each sample
+            val rawSamples  = body.hcursor.downField("samples").as[Vector[Json]].toOption
+            val ingestItems = rawSamples match {
+              case Some(ss) => ss.map { s =>
+                val sMap = s.asObject.map(_.toMap).getOrElse(Map.empty)
+                Json.fromFields(topLevel ++ sMap)
+              }
+              case None => Vector(body)
             }
+
+            val results = ingestItems.map { sample =>
+              val sampleType = sample.hcursor.get[String]("sampleType").toOption
+                                 .orElse(sample.hcursor.get[String]("type").toOption)
+                                 .getOrElse("task-event")
+              val mappingId  = sample.hcursor.get[String]("sourceMappingId").toOption
+                                 .filter(_.nonEmpty).getOrElse(ckDefaultMappingId)
+              val mapping    = sourceMappings.get(mappingId)
+              val valuesOpt  = sample.hcursor.downField("values").as[Vector[Double]].toOption
+              val valueOpt   = sample.hcursor.get[Double]("value").toOption
+              val values     = valuesOpt.getOrElse(valueOpt.map(Vector(_)).getOrElse(Vector.empty))
+              val tpl        = mapping.flatMap(_.hcursor.get[String]("sensorIdTemplate").toOption)
+                                 .getOrElse("carekit.{sampleType}")
+              val sensorId   = sample.hcursor.get[String]("sensorId").toOption.filter(_.nonEmpty)
+                                 .getOrElse(resolveTemplate(tpl, Map(
+                                   "bridgeId"   -> bridgeIdFromBody,
+                                   "sampleType" -> sampleType,
+                                   "type"       -> sampleType,
+                                   "taskId"     -> sample.hcursor.get[String]("taskId").getOrElse(sampleType),
+                                   "carePlanId" -> sample.hcursor.get[String]("carePlanId").getOrElse("care-plan"))))
+              engine.updateSensorValue(sensorId, values)
+              Json.obj(
+                "success"         -> true.asJson,
+                "sampleType"      -> sampleType.asJson,
+                "taskId"          -> sample.hcursor.get[String]("taskId").toOption.asJson,
+                "carePlanId"      -> sample.hcursor.get[String]("carePlanId").toOption.asJson,
+                "sourceMappingId" -> mappingId.asJson,
+                "sensorId"        -> sensorId.asJson)
+            }
+
+            val allOk = true
+            broadcastState()
+            complete((if (allOk) StatusCodes.OK else StatusCodes.MultiStatus) -> Json.obj(
+              "success"  -> allOk.asJson,
+              "bridgeId" -> bridgeIdFromBody.asJson,
+              "results"  -> Json.arr(results: _*)
+            ))
           }
         }
       }
