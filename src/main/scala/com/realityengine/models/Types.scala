@@ -66,7 +66,7 @@ case class OutputVector(
 // ── Perceptual mapping ────────────────────────────────────────────────────────
 
 case class RegionMapping(offset: Int, length: Int)
-case class PerceptualMapping(input: RegionMapping, output: RegionMapping)
+case class PerceptualMapping(input: RegionMapping, output: RegionMapping, bitsPerElement: Int = 8)
 
 // ── Sequence result ───────────────────────────────────────────────────────────
 

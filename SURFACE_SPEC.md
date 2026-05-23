@@ -1,6 +1,6 @@
 # RealityEngine Canonical Surface Specification
 
-**Version:** 1.0.0  
+**Version:** 1.1.0  
 **Date:** 2026-05-22  
 **Scope:** All production runtimes — CPP, LSP, Scala
 
@@ -256,36 +256,18 @@ Default ports: CPP 3003 · LSP 4000 · Scala 5000
 
 ## Gap Register
 
-All gaps must be resolved before Phase 2 is considered complete. The Manager is built against the full surface above with no workarounds for any gap.
+### Resolved gaps (v1.1.0)
 
-### LSP RE — 8 routes (Priority: High)
+| Runtime | Route | Resolution |
+|---------|-------|------------|
+| LSP RE | 8 routes (vectors/search, vectors, vectors/:id×2, sequences×4) | Promoted from dead `reality-routes` block into active route table |
+| Scala RE | `GET /` | Added bare root handler outside `pathPrefix("api")` via outer `concat` |
+| Scala PE | `GET /` | Confirmed present at `pathEndOrSingleSlash` outside any prefix |
+| All | HealthKit/CareKit status+ingest semantic shape | Unified (see Semantic Contracts section below) |
 
-All eight routes exist in the dead first `reality-routes` function in `src/reality-service.lisp` (lines 917–989) but are absent from the active second `reality-routes` function (line 1280+) that is actually wired to the server via `start-reality-service`. The implementations are correct — they simply need to be moved into the active route list.
+### Open gaps
 
-| Method | Path | File | Dead-block line |
-|--------|------|------|-----------------|
-| POST | `/api/vectors/search` | reality-service.lisp | 917 |
-| POST | `/api/vectors` | reality-service.lisp | 937 |
-| GET | `/api/vectors/:id` | reality-service.lisp | 946 |
-| DELETE | `/api/vectors/:id` | reality-service.lisp | 949 |
-| GET | `/api/sequences` | reality-service.lisp | 959 |
-| POST | `/api/sequences` | reality-service.lisp | 967 |
-| GET | `/api/sequences/:id` | reality-service.lisp | 975 |
-| POST | `/api/sequences/persist` | reality-service.lisp | 956 |
-
-**Fix:** Copy the 8 route forms from the dead block into the active `reality-routes` list. The dead block itself can remain as historical reference or be removed.
-
-### Scala PE — 1 route (Priority: Low)
-
-| Method | Path | Note |
-|--------|------|------|
-| GET | `/` | Bare root handler. CPP and LSP PE both return `{ name, version, status }`. Scala PE has `/api/health` but no bare root. |
-
-### Scala RE — 1 route (Priority: Low)
-
-| Method | Path | Note |
-|--------|------|------|
-| GET | `/` | Bare root handler. CPP and LSP RE return `{ name, version, status }`. Scala RE has `/api` (pathEndOrSingleSlash inside pathPrefix("api")) but no bare `/`. |
+None. All routes listed in this spec are implemented by all three runtimes.
 
 ---
 
@@ -337,6 +319,128 @@ A conformance script must make one request to each route listed in this spec aga
 - Response body is valid JSON
 
 Script location: `scripts/smoke-test.sh` (accepts `--target <url>` for RE and `--pe-target <url>` for PE).
+
+---
+
+## Semantic Contracts
+
+Route parity (a route exists) is necessary but not sufficient. The following contracts specify the exact JSON fields each endpoint must emit and accept. Deviations are bugs in the runtime.
+
+### HealthKit Integration
+
+#### `GET /api/integrations/healthkit/status`
+
+All runtimes must return:
+
+```json
+{
+  "bridgeId":              "healthkit-ios-bridge",
+  "enabled":               true,
+  "tokenConfigured":       false,
+  "nativeAppRequired":     true,
+  "nativeWorkOutsideRepo": true,
+  "registryKey":           "healthkit:<typeIdentifier>",
+  "statusEndpoint":        "/api/integrations/healthkit/status",
+  "ingestEndpoint":        "/api/integrations/healthkit/ingest",
+  "contract": {
+    "transport":    "https",
+    "singleSample": ["type", "value", "sourceName"],
+    "batchSamples": ["bridgeId", "samples[]"],
+    "auth":         "none"
+  }
+}
+```
+
+`tokenConfigured` is `true` when `HEALTHKIT_BRIDGE_TOKEN` is set; `auth` becomes `"bridgeToken"` in that case.  
+Field `enabled` reflects `HEALTHKIT_ENABLED` env (Scala) or `true` always (CPP/LSP — routes are always active).
+
+**Removed fields (no longer emitted):** `tokenRequired`, `configured`, `bridgeEndpoint`.
+
+#### `POST /api/integrations/healthkit/ingest`
+
+**Request — single sample (flat body):**
+```json
+{ "type": "HKQuantityTypeIdentifierHeartRate", "value": 72.0, "sourceName": "Apple Watch" }
+```
+
+**Request — batch:**
+```json
+{ "bridgeId": "healthkit-ios-bridge", "bridgeToken": "<token>", "samples": [ { "type": "...", "value": 72.0 } ] }
+```
+
+**Token auth rules (all runtimes):**
+- If `HEALTHKIT_BRIDGE_TOKEN` is unset: ingest is accepted with no auth check (no-token / dev mode).
+- If set: body must contain `bridgeToken` (primary) or `token` (secondary alias). Bearer `Authorization` header is **not** accepted.
+- Missing / wrong token → `401 Unauthorized`.
+
+**Mapping lookup order (two-level registry):**
+1. Explicit `sourceMappingId` or `mappingId` field in the sample, if present.
+2. `healthkit:<type>:<sourceName>` if `sourceName` is non-empty.
+3. `healthkit:<type>` (generic fallback).
+
+**Response:**
+```json
+{
+  "success":  true,
+  "bridgeId": "healthkit-ios-bridge",
+  "resolved": [ { "resolved": true, "sensorId": "...", "type": "...", "sourceMappingId": "...", "values": [...], "ttlMs": 3600000 } ],
+  "unmapped": []
+}
+```
+
+HTTP status: `200` (all resolved) · `207` (mixed) · `400` (all unmapped).
+
+**Unmapped entry shape:**
+```json
+{ "unmapped": true, "type": "...", "sourceName": "...", "reason": "no registry mapping (declare healthkit:<type>[:<sourceName>])" }
+```
+
+---
+
+### CareKit Integration
+
+#### `GET /api/integrations/carekit/status`
+
+```json
+{
+  "bridgeId":               "carekit-ios-bridge",
+  "enabled":                true,
+  "defaultSourceMappingId": "carekit-activity",
+  "tokenConfigured":        false,
+  "nativeAppRequired":      true,
+  "nativeWorkOutsideRepo":  true,
+  "registryKey":            "carekit:<sampleType>",
+  "statusEndpoint":         "/api/integrations/carekit/status",
+  "ingestEndpoint":         "/api/integrations/carekit/ingest",
+  "contract": {
+    "transport":    "https",
+    "singleSample": ["bridgeId", "sampleType", "sourceMappingId", "values"],
+    "batchSamples": ["bridgeId", "samples[]"],
+    "auth":         "external-transport"
+  }
+}
+```
+
+`auth` becomes `"bridgeToken"` when `CAREKIT_BRIDGE_TOKEN` is set.
+
+**Removed fields:** `tokenRequired`, `configured`, `bridgeEndpoint`.
+
+#### `POST /api/integrations/carekit/ingest`
+
+Same token auth rules as HealthKit. Same no-token / dev mode behavior.
+
+Top-level body fields are merged into each batch sample (sample keys win); `samples`, `bridgeToken`, `token` are stripped from the merge.
+
+**Response:**
+```json
+{
+  "success":  true,
+  "bridgeId": "carekit-ios-bridge",
+  "results": [ { "success": true, "sampleType": "...", "sourceMappingId": "...", "sensorId": "...", "taskId": null, "carePlanId": null } ]
+}
+```
+
+HTTP status: `200` (all ok) · `207` (partial failures).
 
 ---
 

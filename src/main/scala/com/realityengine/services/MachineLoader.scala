@@ -42,7 +42,12 @@ object MachineLoader {
           iLen <- mc.downField("input").get[Int]("length").toOption
           oOff <- mc.downField("output").get[Int]("offset").toOption
           oLen <- mc.downField("output").get[Int]("length").toOption
-        } yield PerceptualMapping(RegionMapping(iOff, iLen), RegionMapping(oOff, oLen))
+        } yield {
+          val bpe = mc.get[Int]("bitsPerElement").toOption
+            .filter(Set(1, 2, 4, 8).contains)
+            .getOrElse(8)
+          PerceptualMapping(RegionMapping(iOff, iLen), RegionMapping(oOff, oLen), bpe)
+        }
       }
     }
 
@@ -66,7 +71,10 @@ object MachineLoader {
     val seqId = sc.get[String]("id").getOrElse(UUID.randomUUID().toString)
     val name  = sc.get[String]("name").getOrElse("unnamed")
     val seq   = new CriticalEventSequence(name, seqId)
-    seq.metadata = sc.downField("metadata").as[Map[String, Json]].getOrElse(Map.empty)
+    seq.metadata      = sc.downField("metadata").as[Map[String, Json]].getOrElse(Map.empty)
+    seq.schemaVersion = sc.get[String]("schemaVersion").toOption
+    seq.deprecatedAt  = sc.get[String]("deprecatedAt").toOption
+    seq.replacedBy    = sc.get[String]("replacedBy").toOption
 
     val vectorsJson = sc.downField("vectors").as[Vector[Json]].getOrElse(Vector.empty)
 
@@ -119,10 +127,16 @@ object MachineLoader {
 
   def saveToJson(machine: Machine, pretty: Boolean = true): String = {
     val seqs = machine.getAllSequences.map { seq =>
-      Json.obj(
+      val lifecycleFields: Seq[(String, Json)] = Seq(
+        seq.schemaVersion.map("schemaVersion" -> Json.fromString(_)),
+        seq.deprecatedAt.map("deprecatedAt"   -> Json.fromString(_)),
+        seq.replacedBy.map("replacedBy"       -> Json.fromString(_))
+      ).flatten
+      Json.fromFields(Seq(
         "id"       -> Json.fromString(seq.id),
         "name"     -> Json.fromString(seq.name),
-        "metadata" -> seq.metadata.asJson,
+        "metadata" -> seq.metadata.asJson
+      ) ++ lifecycleFields ++ Seq(
         "vectors"  -> Json.arr(seq.getAllVectors.map { vec =>
           val elements = vec.getElements.map { elem =>
             val base = Map("value" -> Json.fromDoubleOrNull(elem.value))
@@ -149,7 +163,7 @@ object MachineLoader {
             }: _*)
           )
         }: _*)
-      )
+      ))
     }
 
     val metaWithoutInputSeqs = machine.metadata - "inputSequences"
@@ -157,8 +171,9 @@ object MachineLoader {
 
     val mappingJson = machine.perceptualMapping.map { m =>
       Json.obj(
-        "input"  -> Json.obj("offset" -> Json.fromInt(m.input.offset), "length" -> Json.fromInt(m.input.length)),
-        "output" -> Json.obj("offset" -> Json.fromInt(m.output.offset), "length" -> Json.fromInt(m.output.length))
+        "input"          -> Json.obj("offset" -> Json.fromInt(m.input.offset), "length" -> Json.fromInt(m.input.length)),
+        "output"         -> Json.obj("offset" -> Json.fromInt(m.output.offset), "length" -> Json.fromInt(m.output.length)),
+        "bitsPerElement" -> Json.fromInt(m.bitsPerElement)
       )
     }
 

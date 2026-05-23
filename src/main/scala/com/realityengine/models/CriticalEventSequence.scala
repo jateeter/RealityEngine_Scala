@@ -19,7 +19,10 @@ class CriticalEventSequence(
   private var vectors:        Map[String, RealityVector] = Map.empty
   private var initialVectorIds: Set[String]              = Set.empty
   private var outputVectorIds:  Set[String]              = Set.empty
-  var metadata: Map[String, Json] = Map.empty
+  var metadata:      Map[String, Json] = Map.empty
+  var schemaVersion: Option[String]    = None
+  var deprecatedAt:  Option[String]    = None
+  var replacedBy:    Option[String]    = None
 
   // Pre-allocated transition buffers — cleared and reused each transition() call
   // to avoid allocating new ListBuffers on every hot-path invocation.
@@ -132,7 +135,10 @@ class CriticalEventSequence(
   override def clone(): CriticalEventSequence = {
     val c = new CriticalEventSequence(name, id)
     vectors.values.foreach(v => c.addVector(v.clone()))
-    c.metadata = metadata
+    c.metadata      = metadata
+    c.schemaVersion = schemaVersion
+    c.deprecatedAt  = deprecatedAt
+    c.replacedBy    = replacedBy
     c
   }
 
@@ -140,14 +146,19 @@ class CriticalEventSequence(
 
   def toJson: Json = {
     import io.circe.syntax._
-    Json.obj(
-      "id"             -> Json.fromString(id),
-      "name"           -> Json.fromString(name),
-      "vectors"        -> Json.arr(getAllVectors.map(_.toJson): _*),
+    val lifecycleFields: Seq[(String, Json)] = Seq(
+      schemaVersion.map("schemaVersion" -> Json.fromString(_)),
+      deprecatedAt.map("deprecatedAt"   -> Json.fromString(_)),
+      replacedBy.map("replacedBy"       -> Json.fromString(_))
+    ).flatten
+    Json.fromFields(Seq(
+      "id"               -> Json.fromString(id),
+      "name"             -> Json.fromString(name),
+      "vectors"          -> Json.arr(getAllVectors.map(_.toJson): _*),
       "initialVectorIds" -> Json.arr(initialVectorIds.toList.map(Json.fromString): _*),
       "outputVectorIds"  -> Json.arr(outputVectorIds.toList.map(Json.fromString): _*),
-      "metadata"       -> metadata.asJson
-    )
+      "metadata"         -> metadata.asJson
+    ) ++ lifecycleFields)
   }
 }
 
@@ -159,7 +170,10 @@ object CriticalEventSequence {
     val seq       = new CriticalEventSequence(name, id)
     val vectorsJs = c.downField("vectors").as[Vector[Json]].getOrElse(Vector.empty)
     vectorsJs.foreach(vj => seq.addVector(RealityVector.fromJson(vj)))
-    seq.metadata = c.downField("metadata").as[Map[String, Json]].getOrElse(Map.empty)
+    seq.metadata      = c.downField("metadata").as[Map[String, Json]].getOrElse(Map.empty)
+    seq.schemaVersion = c.get[String]("schemaVersion").toOption
+    seq.deprecatedAt  = c.get[String]("deprecatedAt").toOption
+    seq.replacedBy    = c.get[String]("replacedBy").toOption
     seq
   }
 }

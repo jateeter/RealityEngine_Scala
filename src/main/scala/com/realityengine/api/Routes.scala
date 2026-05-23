@@ -163,10 +163,7 @@ class Routes(
     var hist1 = 0; var hist2 = 0; var hist4 = 0; var hist8 = 0
     val perMachine = mappedMachines.map { m =>
       val mapping   = m.perceptualMapping.get
-      val bits      = m.metadata.get("bitsPerElement")
-        .flatMap(_.asNumber.flatMap(_.toInt))
-        .filter(Set(1, 2, 4, 8).contains)
-        .getOrElse(8)
+      val bits      = m.perceptualMapping.map(_.bitsPerElement).getOrElse(8)
       val cells     = mapping.input.length + mapping.output.length
       val f64Bytes  = cells * 8L
       val packBytes = math.ceil(cells.toDouble * bits / 8).toInt
@@ -911,7 +908,7 @@ class Routes(
               "requiredDimension"         -> Json.fromInt(reqDim),
               "encoding"                  -> Json.fromString("dense-float64-clamped-0-1"),
               "mappingVersion"            -> Json.fromInt(100),
-              "eventBusSubscriptionCount" -> Json.fromInt(0)
+              "eventBusSubscriptionCount" -> Json.fromInt(simulator.eventBusSubscriptionCount)
             ))
           } },
           path("storage-footprint") { get { complete(storageFootprintJson()) } },

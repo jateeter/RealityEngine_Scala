@@ -124,8 +124,9 @@ class Machine(
   override def clone(): Machine = {
     val clonedMapping = perceptualMapping.map(m =>
       PerceptualMapping(
-        input  = RegionMapping(m.input.offset,  m.input.length),
-        output = RegionMapping(m.output.offset, m.output.length)
+        input          = RegionMapping(m.input.offset,  m.input.length),
+        output         = RegionMapping(m.output.offset, m.output.length),
+        bitsPerElement = m.bitsPerElement
       )
     )
     val c = new Machine(name, description, metadata, arbiter.getRule, clonedMapping, id)
@@ -141,8 +142,9 @@ class Machine(
     import io.circe.syntax._
     val mappingJson = perceptualMapping.map { m =>
       Json.obj(
-        "input"  -> Json.obj("offset" -> Json.fromInt(m.input.offset),  "length" -> Json.fromInt(m.input.length)),
-        "output" -> Json.obj("offset" -> Json.fromInt(m.output.offset), "length" -> Json.fromInt(m.output.length))
+        "input"          -> Json.obj("offset" -> Json.fromInt(m.input.offset),  "length" -> Json.fromInt(m.input.length)),
+        "output"         -> Json.obj("offset" -> Json.fromInt(m.output.offset), "length" -> Json.fromInt(m.output.length)),
+        "bitsPerElement" -> Json.fromInt(m.bitsPerElement)
       )
     }.getOrElse(Json.Null)
 
@@ -190,7 +192,12 @@ object Machine {
           iLen <- mc.downField("input").get[Int]("length").toOption
           oOff <- mc.downField("output").get[Int]("offset").toOption
           oLen <- mc.downField("output").get[Int]("length").toOption
-        } yield PerceptualMapping(RegionMapping(iOff, iLen), RegionMapping(oOff, oLen))
+        } yield {
+          val bpe = mc.get[Int]("bitsPerElement").toOption
+            .filter(Set(1, 2, 4, 8).contains)
+            .getOrElse(8)
+          PerceptualMapping(RegionMapping(iOff, iLen), RegionMapping(oOff, oLen), bpe)
+        }
       }
     }
 

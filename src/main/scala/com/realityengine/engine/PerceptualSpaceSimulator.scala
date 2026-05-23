@@ -9,6 +9,10 @@ import io.circe.Json
  * Manages a shared PerceptualSpace and orchestrates the 3-phase
  * snapshot → process → merge loop over all registered machines.
  */
+// Compose event-bus subscription: one record per (producerMachineId|producerSequenceId) → subscriber.
+private case class ComposeSubscription(subscriberMachineId: String, bitOffset: Int,
+                                       producerMachineId: String, producerSequenceId: String)
+
 class PerceptualSpaceSimulator(dimension: Int = sys.env.getOrElse("VECTOR_DIMENSION", "768").toIntOption.getOrElse(768)) {
   private val perceptualSpace    = new PerceptualSpace(dimension)
   private var machines:          Map[String, Machine] = Map.empty
@@ -23,6 +27,65 @@ class PerceptualSpaceSimulator(dimension: Int = sys.env.getOrElse("VECTOR_DIMENS
   // instance the engine holds, so /api/perceive and /api/process-universal
   // bump the same counters that /api/metrics emits.
   private var coverageRegistry:  Option[com.realityengine.services.CesCoverageRegistry] = None
+
+  // Compose / meta-CES event bus — mirrors C++ PerceptualSpaceSimulator.
+  // Keyed by "producerMachineId|producerSequenceId" → list of subscribers.
+  private var eventBusSubscriptions: Map[String, List[ComposeSubscription]] = Map.empty
+  private var latchedEventBits:      Set[Int]                               = Set.empty
+
+  private def composeKey(machineId: String, seqId: String): String = s"$machineId|$seqId"
+
+  def eventBusSubscriptionCount: Int = eventBusSubscriptions.values.map(_.size).sum
+
+  private def registerComposeSubscriptions(machine: Machine): Unit = {
+    machine.metadata.get("compose").foreach { composeJson =>
+      composeJson.hcursor.downField("subscriptions").as[Vector[io.circe.Json]]
+        .getOrElse(Vector.empty)
+        .foreach { sub =>
+          val c = sub.hcursor
+          for {
+            pmId  <- c.get[String]("producerMachineId").toOption if pmId.nonEmpty
+            psId  <- c.get[String]("producerSequenceId").toOption if psId.nonEmpty
+            bit   <- c.get[Int]("bitOffset").toOption if bit >= 0
+          } {
+            val key  = composeKey(pmId, psId)
+            val sub  = ComposeSubscription(machine.id, bit, pmId, psId)
+            eventBusSubscriptions = eventBusSubscriptions +
+              (key -> (sub :: eventBusSubscriptions.getOrElse(key, Nil)))
+            perceptualSpace.growTo(bit + 1)
+          }
+        }
+    }
+  }
+
+  private def unregisterComposeSubscriptions(machineId: String): Unit = {
+    eventBusSubscriptions = eventBusSubscriptions.flatMap { case (key, subs) =>
+      val remaining = subs.filterNot(_.subscriberMachineId == machineId)
+      if (remaining.isEmpty) None else Some(key -> remaining)
+    }
+  }
+
+  private def applyEventBus(firedSequences: Seq[(String, String)]): Unit = {
+    if (eventBusSubscriptions.isEmpty || firedSequences.isEmpty) return
+    val seen = scala.collection.mutable.Set.empty[String]
+    for ((machineId, seqId) <- firedSequences) {
+      val key = composeKey(machineId, seqId)
+      eventBusSubscriptions.getOrElse(key, Nil).foreach { sub =>
+        val dedup = s"${sub.subscriberMachineId}|${sub.bitOffset}|$machineId|$seqId"
+        if (seen.add(dedup)) {
+          perceptualSpace.growTo(sub.bitOffset + 1)
+          perceptualSpace.updateRegion(sub.bitOffset, Vector(1.0))
+          latchedEventBits = latchedEventBits + sub.bitOffset
+        }
+      }
+    }
+  }
+
+  private def applyLatchedEventBits(): Unit =
+    latchedEventBits.foreach { bit =>
+      perceptualSpace.growTo(bit + 1)
+      perceptualSpace.updateRegion(bit, Vector(1.0))
+    }
 
   // ── Configuration ─────────────────────────────────────────────────────────
 
@@ -41,11 +104,14 @@ class PerceptualSpaceSimulator(dimension: Int = sys.env.getOrElse("VECTOR_DIMENS
       mapping.output.offset + mapping.output.length,
     )
     perceptualSpace.growTo(required)
+    unregisterComposeSubscriptions(machine.id)
     machines = machines + (machine.id -> machine)
+    registerComposeSubscriptions(machine)
     rebuildEdgeCache()
   }
 
   def removeMachine(machineId: String): Unit = {
+    unregisterComposeSubscriptions(machineId)
     machines = machines - machineId
     rebuildEdgeCache()
   }
@@ -81,6 +147,7 @@ class PerceptualSpaceSimulator(dimension: Int = sys.env.getOrElse("VECTOR_DIMENS
     perceptualSpace.reset()
     history = Nil
     currentStep = 0
+    latchedEventBits = Set.empty
     machines.values.foreach(_.reset())
   }
 
@@ -118,13 +185,15 @@ class PerceptualSpaceSimulator(dimension: Int = sys.env.getOrElse("VECTOR_DIMENS
   private def runPhases(stepNum: Int, matchOverride: Option[ComparatorType] = None): SimulationStep = {
     val mappedMachines = machines.values.filter(_.perceptualMapping.isDefined).toList
 
-    // Phase 1: snapshot
+    // Phase 1: snapshot + re-apply latched event bits
+    applyLatchedEventBits()
     val inputSnapshots: Map[String, Vector[Double]] =
       mappedMachines.map(m => m.id -> perceptualSpace.extractMachineInput(m.perceptualMapping.get)).toMap
 
     // Phase 2: process
     val machineResults    = scala.collection.mutable.Map.empty[String, MachineStepResult]
     val pendingOutputs    = scala.collection.mutable.ListBuffer.empty[(Machine, Vector[Double])]
+    val firedSequences    = scala.collection.mutable.ListBuffer.empty[(String, String)]
 
     for (machine <- mappedMachines) {
       val snapshot     = inputSnapshots(machine.id)
@@ -134,8 +203,11 @@ class PerceptualSpaceSimulator(dimension: Int = sys.env.getOrElse("VECTOR_DIMENS
       val mapping      = machine.perceptualMapping.get
 
       if (transition.arbiterMetadata.shouldOutput) {
-        transition.sequenceResults.values.foreach { sr =>
-          sr.assertedOutputs.foreach { ao => pendingOutputs += ((machine, ao.vector)) }
+        transition.sequenceResults.foreach { case (seqId, sr) =>
+          if (sr.assertedOutputs.nonEmpty) {
+            firedSequences += ((machine.id, seqId))
+            sr.assertedOutputs.foreach { ao => pendingOutputs += ((machine, ao.vector)) }
+          }
         }
       }
 
@@ -150,10 +222,11 @@ class PerceptualSpaceSimulator(dimension: Int = sys.env.getOrElse("VECTOR_DIMENS
       )
     }
 
-    // Phase 3: merge
+    // Phase 3: merge outputs, then apply compose event-bus subscriptions
     pendingOutputs.foreach { case (machine, vec) =>
       perceptualSpace.mergeMachineOutput(vec, machine.perceptualMapping.get)
     }
+    applyEventBus(firedSequences.toSeq)
 
     val activeRegions = machineResults.values.flatMap { mr =>
       val inp = ActiveRegion(mr.inputRegion.offset, mr.inputRegion.length, mr.machineId, "input")
