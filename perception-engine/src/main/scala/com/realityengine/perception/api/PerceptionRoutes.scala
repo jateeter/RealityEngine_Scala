@@ -74,11 +74,12 @@ class PerceptionRoutes(
   private val acpAgentId         = sys.env.getOrElse("ACP_AGENT_ID",      "openclaw")
   private val hkBridgeToken      = sys.env.get("HEALTHKIT_BRIDGE_TOKEN")
   private val hkBridgeId         = sys.env.getOrElse("HEALTHKIT_BRIDGE_ID", "healthkit-ios-bridge")
+  private val hkDefaultMappingId = sys.env.getOrElse("HEALTHKIT_DEFAULT_SOURCE_MAPPING_ID", "healthkit-activity")
   private val hkEnabled          = sys.env.get("HEALTHKIT_ENABLED").exists(v => v == "true" || v == "1")
   private val ckBridgeToken      = sys.env.get("CAREKIT_BRIDGE_TOKEN")
   private val ckBridgeId         = sys.env.getOrElse("CAREKIT_BRIDGE_ID", "carekit-ios-bridge")
   private val ckEnabled          = sys.env.get("CAREKIT_ENABLED").exists(v => v == "true" || v == "1")
-  private val ckDefaultMappingId = sys.env.getOrElse("CAREKIT_DEFAULT_SOURCE_MAPPING_ID", "carekit-activity")
+  private val ckDefaultMappingId = sys.env.getOrElse("CAREKIT_DEFAULT_SOURCE_MAPPING_ID", "carekit-task")
   private val localAiApiUrl      = sys.env.getOrElse("LOCAL_AI_API_URL",  "http://localhost:8080")
   private val localAiMachinesDir = sys.env.get("LOCAL_AI_MACHINES_DIR")
 
@@ -603,6 +604,7 @@ class PerceptionRoutes(
       get { complete(Json.obj(
         "bridgeId"              -> hkBridgeId.asJson,
         "enabled"               -> hkEnabled.asJson,
+        "defaultSourceMappingId" -> hkDefaultMappingId.asJson,
         "tokenConfigured"       -> hkBridgeToken.isDefined.asJson,
         "nativeAppRequired"     -> true.asJson,
         "nativeWorkOutsideRepo" -> true.asJson,
