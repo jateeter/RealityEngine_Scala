@@ -190,7 +190,10 @@ class PerceptionRoutes(
           case _ =>
         }
 
-        val stepJson = Some(parsed)
+        val machineResults = parsed.hcursor.downField("machineResults").focus.getOrElse(Json.Null)
+        val stepJson = Some(parsed.deepMerge(Json.obj(
+          "mergeBatch" -> Json.arr(VectorAggregator.mergeBatch(machineResults): _*)
+        )))
 
         val result = PushResult(
           success    = true,
@@ -670,11 +673,12 @@ class PerceptionRoutes(
                       "sourceName" -> sourceName.asJson,
                       "reason" -> s"no registry mapping (declare healthkit:$tpe[:<sourceName>])".asJson)
                     (res, unm :+ u)
-                  case Some(m) if m.hcursor.downField("region").as[Json].isLeft =>
+                  case Some(m) if m.hcursor.get[Region]("region").isLeft =>
                     val u = Json.obj("unmapped" -> true.asJson, "type" -> tpe.asJson,
                       "reason" -> "mapping is missing region.offset/region.length".asJson)
                     (res, unm :+ u)
                   case Some(m) =>
+                    val region = m.hcursor.get[Region]("region").toOption.get
                     val sensorId = m.hcursor.get[String]("sensorId").toOption.filter(_.nonEmpty)
                       .orElse(m.hcursor.get[String]("sensorIdTemplate").toOption.filter(_.nonEmpty).map { tpl =>
                         resolveTemplate(tpl, Map("type" -> tpe, "sampleType" -> tpe,
@@ -684,8 +688,20 @@ class PerceptionRoutes(
                     val ttlMs = m.hcursor.get[Long]("ttlMs").getOrElse(3600000L)
                     val name  = m.hcursor.get[String]("name").getOrElse(s"healthkit:$tpe")
                     val mapId = m.hcursor.get[String]("id").getOrElse(explicitId.getOrElse(""))
-                    engine.updateSensorValue(sensorId, values)
-                    val regionJson = m.hcursor.downField("region").as[Json].getOrElse(Json.Null)
+                    val source = if (engine.updateSensorValue(sensorId, values)) {
+                      engine.findSensorBySensorId(sensorId)
+                    } else {
+                      Some(engine.addSource(SensorSourceConfig(
+                        id          = "",
+                        name        = name,
+                        region      = region,
+                        active      = true,
+                        sensorId    = sensorId,
+                        lastValue   = values.take(region.length),
+                        lastUpdated = Some(System.currentTimeMillis()),
+                        ttlMs       = ttlMs,
+                      )))
+                    }
                     val r = Json.obj(
                       "resolved"        -> true.asJson,
                       "sensorId"        -> sensorId.asJson,
@@ -693,9 +709,9 @@ class PerceptionRoutes(
                       "type"            -> tpe.asJson,
                       "sourceName"      -> sourceName.asJson,
                       "sourceMappingId" -> mapId.asJson,
-                      "region"          -> regionJson,
+                      "region"          -> region.asJson,
                       "values"          -> values.asJson,
-                      "source"          -> Json.obj("lastValue" -> values.asJson),
+                      "source"          -> source.map(_.asJson).getOrElse(Json.obj("lastValue" -> values.asJson)),
                       "ttlMs"           -> ttlMs.asJson)
                     (res :+ r, unm)
                 }

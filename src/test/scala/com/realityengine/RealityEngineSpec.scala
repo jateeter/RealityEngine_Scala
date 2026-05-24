@@ -180,10 +180,10 @@ class RealityEngineSpec extends AnyFlatSpec with Matchers {
     ps.getRegion(5, 2) shouldBe Vector(9.0, 8.0)
   }
 
-  // ── PreceptionEngine ──────────────────────────────────────────────────────
+  // ── PerceptionEngine ──────────────────────────────────────────────────────
 
-  "PreceptionEngine" should "resolve machine input from universal space" in {
-    val pe      = new PreceptionEngine(10)
+  "PerceptionEngine" should "resolve machine input from universal space" in {
+    val pe      = new PerceptionEngine(10)
     val mapping = PerceptualMapping(RegionMapping(2, 3), RegionMapping(6, 2))
     val space   = Vector(0.0, 0.0, 1.0, 2.0, 3.0, 0.0, 0.0, 0.0, 0.0, 0.0)
     val resolved = pe.resolveInputEventVector(space, mapping)

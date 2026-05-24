@@ -28,10 +28,8 @@ object VectorAggregator {
   // Merge gated machine CES output vectors into a copy of `baseVector` and
   // return the merged nextInputSpaceVector.  `machineResults` is the
   // `machineResults` field from RE's SimulationStep JSON response.
-  def aggregate(baseVector: Vector[Double], machineResults: Json): Vector[Double] = {
-    val obj = machineResults.asObject.getOrElse(return baseVector)
-
-    val records: List[MergeRecord] = obj.toList.flatMap { case (machineId, result) =>
+  private def mergeRecords(machineResults: Json): List[MergeRecord] = {
+    machineResults.asObject.toList.flatMap(_.toList).flatMap { case (machineId, result) =>
       val shouldOutput = result.hcursor
         .downField("transitionResult")
         .downField("arbiterMetadata")
@@ -47,6 +45,10 @@ object VectorAggregator {
         if vec.nonEmpty
       } yield MergeRecord(machineId, offset, length, vec)
     }
+  }
+
+  def aggregate(baseVector: Vector[Double], machineResults: Json): Vector[Double] = {
+    val records = mergeRecords(machineResults)
 
     if (records.isEmpty) return baseVector
 
@@ -64,4 +66,16 @@ object VectorAggregator {
     }
     buf.toVector
   }
+
+  def mergeBatch(machineResults: Json): Vector[Json] =
+    mergeRecords(machineResults).sortBy(_.machineId).toVector.map { rec =>
+      Json.obj(
+        "machineId" -> Json.fromString(rec.machineId),
+        "region" -> Json.obj(
+          "offset" -> Json.fromInt(rec.outputOffset),
+          "length" -> Json.fromInt(rec.outputLength),
+        ),
+        "vector" -> Json.arr(rec.outputVector.map(Json.fromDoubleOrNull): _*),
+      )
+    }
 }

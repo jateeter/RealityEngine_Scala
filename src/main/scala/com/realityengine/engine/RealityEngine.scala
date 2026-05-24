@@ -28,7 +28,7 @@ case class MachineCheckpoint(
  * Responsibilities:
  *  - Manage Machines and CriticalEventSequences
  *  - Route inputs through the 3-phase Reality Engine workflow
- *  - Coordinate PreceptionEngine (universal input resolution)
+ *  - Coordinate PerceptionEngine (universal input resolution)
  *  - Checkpoint / what-if analytic workflows
  *  - Interface with VectorStore for persistence
  *
@@ -63,7 +63,7 @@ class RealityEngine(
   private val transitionHistory = new ConcurrentLinkedDeque[TransitionResult]()
   private val historySize       = new AtomicInteger(0)
 
-  val preceptionEngine = new PreceptionEngine(universalDimension)
+  val perceptionEngine = new PerceptionEngine(universalDimension)
 
   // CES coverage counters bump on every non-speculative transition.  Read
   // from Routes.scala /api/metrics; what-if paths use machine.clone() and
@@ -139,7 +139,7 @@ class RealityEngine(
       case None => Future.failed(new NoSuchElementException(s"Machine not found: $machineId"))
       case Some(machine) =>
         val actor        = machineActors(machineId)
-        val machineInput = preceptionEngine.resolveInputEventVectorForMachine(universalInputSpace, machine)
+        val machineInput = perceptionEngine.resolveInputEventVectorForMachine(universalInputSpace, machine)
 
         val tagMachineId   = Json.fromString(machineId)
         val tagMachineName = Json.fromString(machine.name)
@@ -159,7 +159,7 @@ class RealityEngine(
             if (result.arbiterMetadata.shouldOutput) {
               result.sequenceResults.values.foreach { sr =>
                 sr.assertedOutputs.foreach { ao =>
-                  preceptionEngine.mergeOutputIntoPerceptualSpace(ao.vector, mapping)
+                  perceptionEngine.mergeOutputIntoPerceptualSpace(ao.vector, mapping)
                 }
               }
             }
@@ -170,7 +170,7 @@ class RealityEngine(
             ov.copy(metadata = ov.metadata ++
               Map("machineId"                     -> tagMachineId,
                   "machineName"                   -> tagMachineName,
-                  "preceptionUsed"                -> RealityEngine.JsonTrue,
+                  "perceptionUsed"                -> RealityEngine.JsonTrue,
                   "universalSpaceDimension"       -> tagDim,
                   "outputMergedToPerceptualSpace" -> tagMerged))
           })
@@ -188,7 +188,7 @@ class RealityEngine(
    *          (sequential — preserves deterministic merge order within a cycle).
    */
   def processUniversalInputForAllMachines(universalInputSpace: Vector[Double]): Future[Map[String, MachineTransitionResult]] = {
-    val resolvedInputs = preceptionEngine.resolveInputsForMachines(universalInputSpace, machines)
+    val resolvedInputs = perceptionEngine.resolveInputsForMachines(universalInputSpace, machines)
     val tagDim         = Json.fromInt(universalInputSpace.length)
 
     val askFutures: List[Future[(Machine, String, MachineTransitionResult)]] =
@@ -211,7 +211,7 @@ class RealityEngine(
                   ov.copy(metadata = ov.metadata ++
                     Map("machineId"               -> tagMachineId,
                         "machineName"             -> tagMachineName,
-                        "preceptionUsed"          -> RealityEngine.JsonTrue,
+                        "perceptionUsed"          -> RealityEngine.JsonTrue,
                         "universalSpaceDimension" -> tagDim))
                 })
                 if (!tagged.arbiterMetadata.shouldOutput) inputCache.put(machineId, (inputHash, tagged))
@@ -230,7 +230,7 @@ class RealityEngine(
       for ((machine, machineId, result) <- triples if result.arbiterMetadata.shouldOutput) {
         machine.perceptualMapping.foreach { mapping =>
           result.sequenceResults.valuesIterator.flatMap(_.assertedOutputs).foreach { ao =>
-            try preceptionEngine.mergeOutputIntoPerceptualSpace(ao.vector, mapping)
+            try perceptionEngine.mergeOutputIntoPerceptualSpace(ao.vector, mapping)
             catch { case e: Exception =>
               System.err.println(s"Failed to merge output for machine $machineId: ${e.getMessage}")
             }
@@ -242,7 +242,7 @@ class RealityEngine(
   }
 
   def getDiagnosticMapping(universalInputSpace: Vector[Double]): io.circe.Json =
-    preceptionEngine.getDiagnosticMapping(universalInputSpace, machines)
+    perceptionEngine.getDiagnosticMapping(universalInputSpace, machines)
 
   // ── What-if ───────────────────────────────────────────────────────────────
 
@@ -253,7 +253,7 @@ class RealityEngine(
 
   def processUniversalWhatIf(universalInputSpace: Vector[Double], machineId: String): MachineTransitionResult = {
     val machine      = machines.getOrElse(machineId, throw new NoSuchElementException(s"Machine not found: $machineId"))
-    val machineInput = preceptionEngine.resolveInputEventVectorForMachine(universalInputSpace, machine)
+    val machineInput = perceptionEngine.resolveInputEventVectorForMachine(universalInputSpace, machine)
     machine.clone().processInput(machineInput)
   }
 

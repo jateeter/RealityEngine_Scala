@@ -9,6 +9,7 @@ REALITY_ENGINE_E2E_PORT="${REALITY_ENGINE_E2E_PORT:-3399}"
 PERCEPTION_ENGINE_E2E_PORT="${PERCEPTION_ENGINE_E2E_PORT:-3401}"
 VECTOR_DIMENSION="${VECTOR_DIMENSION:-5120}"
 HEALTHKIT_BRIDGE_TOKEN="${HEALTHKIT_BRIDGE_TOKEN:-spezi-e2e-token}"
+JAVA_OPTS="${JAVA_OPTS:--Xms64m -Xmx512m}"
 
 # Reality Engine jar from the Scala runtime. Override only to test a different
 # Scala RE build artifact; this e2e must not depend on another implementation.
@@ -133,7 +134,8 @@ echo "  Reality Engine jar:     $REALITY_ENGINE_JAR"
 
 PORT="$REALITY_ENGINE_E2E_PORT" \
   VECTOR_DIMENSION="$VECTOR_DIMENSION" \
-  java -jar "$REALITY_ENGINE_JAR" >/tmp/reality_engine_healthkit_spezi_scala_e2e.log 2>&1 &
+  ALLOW_MISSING_QDRANT=true \
+  java $JAVA_OPTS -jar "$REALITY_ENGINE_JAR" >/tmp/reality_engine_healthkit_spezi_scala_e2e.log 2>&1 &
 REALITY_PID="$!"
 wait_for_http "http://localhost:${REALITY_ENGINE_E2E_PORT}/api/health" "Reality Engine"
 
@@ -141,7 +143,7 @@ PORT="$PERCEPTION_ENGINE_E2E_PORT" \
   REALITY_ENGINE_URL="http://localhost:${REALITY_ENGINE_E2E_PORT}" \
   INTEGRATIONS_CONFIG="config/integrations.healthkit-spezi.example.json" \
   HEALTHKIT_BRIDGE_TOKEN="$HEALTHKIT_BRIDGE_TOKEN" \
-  java -jar "$JAR" >/tmp/perception_engine_healthkit_spezi_scala_e2e.log 2>&1 &
+  java $JAVA_OPTS -jar "$JAR" >/tmp/perception_engine_healthkit_spezi_scala_e2e.log 2>&1 &
 PERCEPTION_PID="$!"
 wait_for_http "http://localhost:${PERCEPTION_ENGINE_E2E_PORT}/api/health" "Perception Engine"
 

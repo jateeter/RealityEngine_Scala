@@ -3,13 +3,13 @@ package com.realityengine.engine
 import com.realityengine.models._
 
 /**
- * PreceptionEngine — resolves the universal input space to machine-specific event vectors.
+ * PerceptionEngine — resolves the universal input space to machine-specific event vectors.
  *
  * Flow:
  *   Universal Input Space → per-machine extraction via PerceptualMapping
  *   → Machine processes its specific view of reality
  */
-class PreceptionEngine(val universalDimension: Int = sys.env.getOrElse("VECTOR_DIMENSION", "768").toIntOption.getOrElse(768)) {
+class PerceptionEngine(val universalDimension: Int = sys.env.getOrElse("VECTOR_DIMENSION", "768").toIntOption.getOrElse(768)) {
   private val perceptualSpace = new PerceptualSpace(universalDimension)
 
   // ── Core resolution ───────────────────────────────────────────────────────

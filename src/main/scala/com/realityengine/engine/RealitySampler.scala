@@ -4,7 +4,7 @@ import com.realityengine.models.OutputVector
 
 /**
  * RealitySampler — samples observations from reality and feeds them to the engine.
- * Manages buffering and coordinates between PreceptionOfReality and RealityEngine.
+ * Manages buffering and coordinates between PerceptionOfReality and RealityEngine.
  *
  * Note: CONTINUOUS and PERIODIC strategies require an external scheduler
  * (e.g. Akka scheduler) in the JVM context. This implementation is manual/event-driven.
@@ -32,7 +32,7 @@ case class TransitionResult(
 )
 
 class RealitySampler(
-  perception: PreceptionOfReality,
+  perception: PerceptionOfReality,
   engine:     RealityEngine,
   config:     SamplingConfig
 ) {
@@ -68,7 +68,7 @@ class RealitySampler(
   }
 
   def generateQuantumFoamSample(dimension: Int): RawObservation =
-    PreceptionOfReality.createObservation(
+    PerceptionOfReality.createObservation(
       data     = Vector.fill(dimension)(scala.util.Random.nextDouble()),
       source   = Some("quantum-foam"),
       metadata = Map("type" -> io.circe.Json.fromString("stochastic"))

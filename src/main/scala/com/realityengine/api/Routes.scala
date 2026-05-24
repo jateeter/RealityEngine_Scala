@@ -34,7 +34,7 @@ class Routes(
   machinesDir: String = sys.env.getOrElse("MACHINES_DIR", "examples/machines")
 )(implicit system: ActorSystem, ec: ExecutionContext) {
 
-  private val perception = new PreceptionOfReality(
+  private val perception = new PerceptionOfReality(
     sys.env.getOrElse("VECTOR_DIMENSION", "768").toIntOption.getOrElse(768))
   private val sampler = new AtomicReference[Option[RealitySampler]](None)
 
@@ -608,7 +608,7 @@ class Routes(
           val data     = body.hcursor.downField("data").as[Vector[Double]].getOrElse(Vector.empty)
           val source   = body.hcursor.get[String]("source").toOption
           val meta     = body.hcursor.downField("metadata").as[Map[String, Json]].getOrElse(Map.empty)
-          val obs      = PreceptionOfReality.createObservation(data, source, meta)
+          val obs      = PerceptionOfReality.createObservation(data, source, meta)
           val perceived = perception.perceive(obs)
           complete(Json.obj(
             "success"            -> Json.fromBoolean(true),
@@ -642,7 +642,7 @@ class Routes(
               val data   = body.hcursor.downField("data").as[Vector[Double]].getOrElse(Vector.empty)
               val source = body.hcursor.get[String]("source").toOption
               val meta   = body.hcursor.downField("metadata").as[Map[String, Json]].getOrElse(Map.empty)
-              val obs    = PreceptionOfReality.createObservation(data, source, meta)
+              val obs    = PerceptionOfReality.createObservation(data, source, meta)
               if (sampler.get().isEmpty) sampler.compareAndSet(None, Some(new RealitySampler(perception, engine, SamplingConfig(SamplingStrategy.MANUAL))))
               val result = sampler.get().get.sample(obs)
               complete(Json.obj("success" -> Json.fromBoolean(true), "result" -> result.asJson))
@@ -887,8 +887,8 @@ class Routes(
           val vec      = body.hcursor.downField("vector").as[Vector[Double]].getOrElse(Vector.empty)
           val matchOvr = body.hcursor.get[String]("matchAlgorithmOverride").toOption.map(ComparatorType.fromString)
           val step     = simulator.processImmediate(vec, matchOvr)
-          // Sync PreceptionEngine's space with post-merge state
-          engine.preceptionEngine.getPerceptualSpace.setPerceptualVector(step.perceptualSpace)
+          // Sync PerceptionEngine's space with post-merge state
+          engine.perceptionEngine.getPerceptualSpace.setPerceptualVector(step.perceptualSpace)
           // Non-blocking push to the SSE broadcast hub so observers never stall the caller
           sseQueue.offer(step)
           complete(step.asJson)

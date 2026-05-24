@@ -1,7 +1,7 @@
 package com.realityengine.engine
 
 /**
- * PreceptionOfReality — transforms raw observations into normalized InputRealityVectors.
+ * PerceptionOfReality — transforms raw observations into normalized InputRealityVectors.
  */
 
 case class RawObservation(
@@ -18,7 +18,7 @@ case class ProcessedPerception(
   transformations:       List[String]
 )
 
-class PreceptionOfReality(
+class PerceptionOfReality(
   val vectorDimension:       Int,
   val preprocessingEnabled:  Boolean = true
 ) {
@@ -83,7 +83,7 @@ class PreceptionOfReality(
   )
 }
 
-object PreceptionOfReality {
+object PerceptionOfReality {
   def createObservation(
     data:     Vector[Double],
     source:   Option[String]             = None,

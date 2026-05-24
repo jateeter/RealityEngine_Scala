@@ -22,18 +22,29 @@ class VectorStore(
 
   private implicit val ec: ExecutionContext = system.dispatcher
   private val sttpBackend                  = AkkaHttpBackend.usingActorSystem(system)
+  private val allowMissingQdrant           =
+    sys.env.get("ALLOW_MISSING_QDRANT").exists(_.equalsIgnoreCase("true"))
+  @volatile private var qdrantUnavailableAllowed = false
 
   private val seqCollection = s"${collectionName}_sequences"
 
   // ── Initialization ────────────────────────────────────────────────────────
 
   def initialize(): Future[Unit] =
-    ensureCollection(collectionName)
-      .map { _ => println("VectorStore initialized successfully") }
-      .recover { case e: Exception =>
-        System.err.println(s"Failed to initialize VectorStore: ${e.getMessage}")
-        throw e
-      }
+    if (qdrantUnavailableAllowed) Future.unit
+    else
+      ensureCollection(collectionName)
+        .map { _ => println("VectorStore initialized successfully") }
+        .recover { case e: Exception =>
+          if (allowMissingQdrant) {
+            qdrantUnavailableAllowed = true
+            System.err.println(s"VectorStore unavailable; continuing because ALLOW_MISSING_QDRANT=true: ${e.getMessage}")
+            ()
+          } else {
+            System.err.println(s"Failed to initialize VectorStore: ${e.getMessage}")
+            throw e
+          }
+        }
 
   private def ensureCollection(name: String): Future[Unit] =
     basicRequest

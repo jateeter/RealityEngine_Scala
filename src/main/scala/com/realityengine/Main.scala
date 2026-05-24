@@ -56,7 +56,7 @@ object Main extends App {
   val simulator    = new PerceptualSpaceSimulator(sys.env.getOrElse("VECTOR_DIMENSION", "768").toIntOption.getOrElse(768))
 
   simulator.setOnStepComplete { (_, spaceVector) =>
-    engine.preceptionEngine.getPerceptualSpace.setPerceptualVector(spaceVector)
+    engine.perceptionEngine.getPerceptualSpace.setPerceptualVector(spaceVector)
   }
   // Share the engine's coverage registry so /api/perceive transitions
   // route through to /api/metrics without a second instance drifting.
