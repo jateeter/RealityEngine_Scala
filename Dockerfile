@@ -35,7 +35,7 @@ EXPOSE 3000
 ENV PORT=3000 \
     QDRANT_URL=http://qdrant:6333 \
     COLLECTION_NAME=reality-vectors \
-    VECTOR_DIMENSION=256 \
+    VECTOR_DIMENSION=7680 \
     MACHINES_DIR=/app/examples/machines
 
 CMD ["java", "-jar", "/app/reality-engine.jar"]
