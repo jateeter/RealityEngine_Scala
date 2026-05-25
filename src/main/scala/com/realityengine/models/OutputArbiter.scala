@@ -97,7 +97,7 @@ class OutputArbiter(private var rule: ArbiterRule = ArbiterRule.AND) {
     ) ++ (if (descriptions.nonEmpty) Map("descriptions" -> Json.arr(descriptions.map(Json.fromString): _*)) else Map.empty)
 
     OutputVector(
-      id        = s"machine-output-${System.currentTimeMillis()}-${UUID.randomUUID().toString.take(9)}",
+      id        = s"machine-output-${System.currentTimeMillis()}-${UUID.randomUUID().toString.take(8)}",
       vector    = outputs.head.vector,
       metadata  = meta,
       timestamp = System.currentTimeMillis()

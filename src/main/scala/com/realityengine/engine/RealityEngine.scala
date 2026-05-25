@@ -261,7 +261,7 @@ class RealityEngine(
 
   def createCheckpoint(machineId: String, label: Option[String] = None): String = {
     val machine = machines.getOrElse(machineId, throw new NoSuchElementException(s"Machine not found: $machineId"))
-    val cpId    = s"cp-${System.currentTimeMillis()}-${java.util.UUID.randomUUID().toString.take(9)}"
+    val cpId    = s"cp-${System.currentTimeMillis()}-${java.util.UUID.randomUUID().toString.take(8)}"
     val cp      = MachineCheckpoint(cpId, machineId, machine.name, label, System.currentTimeMillis(), machine.clone())
     checkpoints.getOrElseUpdate(machineId, TrieMap.empty).put(cpId, cp)
     cpId

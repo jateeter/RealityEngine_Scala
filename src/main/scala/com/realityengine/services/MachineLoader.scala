@@ -56,7 +56,7 @@ object MachineLoader {
     val metadata     = metadataBase + ("inputSequences" -> inputSeqsJson)
 
     val machine = new Machine(name, description, metadata, arbiterRule, mapping,
-      id.getOrElse(s"machine-${System.currentTimeMillis()}-${UUID.randomUUID().toString.take(9)}"))
+      id.getOrElse(s"machine-${System.currentTimeMillis()}-${UUID.randomUUID().toString.take(8)}"))
     machine.matchAlgorithm = matchAlgo
 
     m.downField("sequences").as[Vector[Json]].getOrElse(Vector.empty).foreach { sj =>

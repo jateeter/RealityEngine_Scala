@@ -16,7 +16,7 @@ class Machine(
   val metadata:         Map[String, Json]         = Map.empty,
   arbiterRule:          ArbiterRule               = ArbiterRule.PASSTHROUGH,
   var perceptualMapping: Option[PerceptualMapping] = None,
-  val id:               String                    = s"machine-${System.currentTimeMillis()}-${java.util.UUID.randomUUID().toString.take(9)}"
+  val id:               String                    = s"machine-${System.currentTimeMillis()}-${java.util.UUID.randomUUID().toString.take(8)}"
 ) {
   var matchAlgorithm: ComparatorType = ComparatorType.GTE
 
