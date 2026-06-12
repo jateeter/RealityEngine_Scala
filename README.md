@@ -43,9 +43,9 @@ sbt run
 
 Defaults:
 
-- Reality Engine: `http://localhost:5000`
-- Machine directory: `../RealityEngine_AI/examples/machines`
-- Vector dimension: `768` (configurable floor; grows elastically to span all machine mappings)
+- Reality Engine: `http://localhost:5001`
+- Machine directory: `../RealityEngine_Machines/machines`
+- Vector dimension: `7680` (configurable floor; grows elastically to span all machine mappings)
 
 ## Documentation
 

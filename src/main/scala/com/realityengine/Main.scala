@@ -19,7 +19,7 @@ object Main extends App {
   implicit val system: ActorSystem    = ActorSystem("reality-engine")
   implicit val ec: ExecutionContext   = system.dispatcher
 
-  val port    = sys.env.getOrElse("PORT", "3000").toIntOption.getOrElse(3000)
+  val port    = sys.env.getOrElse("PORT", "5001").toIntOption.getOrElse(5001)
   val host    = sys.env.getOrElse("HOST", "0.0.0.0")
 
   val auditCfg = AuditConfig.fromEnv("reality-engine")

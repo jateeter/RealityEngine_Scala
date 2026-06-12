@@ -23,9 +23,9 @@ object PerceptionMain extends App {
   implicit val mat: Materializer    = Materializer(system)
   implicit val ec: ExecutionContext  = system.dispatcher
 
-  val port               = sys.env.getOrElse("PORT", "3004").toIntOption.getOrElse(3004)
+  val port               = sys.env.getOrElse("PORT", "5000").toIntOption.getOrElse(5000)
   val host               = sys.env.getOrElse("HOST", "0.0.0.0")
-  val realityEngineUrl   = sys.env.getOrElse("REALITY_ENGINE_URL",   "https://localhost:3000")
+  val realityEngineUrl   = sys.env.getOrElse("REALITY_ENGINE_URL",   "http://localhost:5001")
   val dataPath           = sys.env.getOrElse("DATA_PATH", "./data")
   val isFresh            = args.contains("--fresh") || sys.env.getOrElse("FRESH_START", "false") == "true"
 

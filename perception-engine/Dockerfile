@@ -27,11 +27,11 @@ WORKDIR /app
 
 COPY --from=build /build/target/scala-2.13/perception-engine.jar ./perception-engine.jar
 
-EXPOSE 3004
+EXPOSE 5000
 
-ENV PORT=3004 \
+ENV PORT=5000 \
     PERCEPTION_TARGET_URL=http://visualizer-backend:3001 \
-    REALITY_ENGINE_URL=http://reality-engine:3000 \
+    REALITY_ENGINE_URL=http://reality-engine:5001 \
     DATA_PATH=/app/data
 
 CMD ["java", "-jar", "/app/perception-engine.jar"]

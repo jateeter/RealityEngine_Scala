@@ -13,7 +13,7 @@ Runtimes: `CPP` = RealityEngine_CPP · `LSP` = RealityEngine_LSP · `Scala` = Re
 ## Reality Engine (RE) Surface
 
 Served by `reality_engine_server` (CPP), `reality-service` (LSP), `Routes` (Scala).  
-Default ports: CPP 3000 · LSP 3299 · Scala 5001
+Default ports: Scala 5001 · CPP 5301 · LSP 5601
 
 ### Info & Health
 
@@ -158,7 +158,7 @@ Default ports: CPP 3000 · LSP 3299 · Scala 5001
 ## Perception Engine (PE) Surface
 
 Served by `perception_engine_server` (CPP), `perception-service` (LSP), `PerceptionRoutes` (Scala).  
-Default ports: CPP 3003 · LSP 4000 · Scala 5000
+Default ports: Scala 5000 · CPP 5300 · LSP 5600
 
 ### Info & Health
 

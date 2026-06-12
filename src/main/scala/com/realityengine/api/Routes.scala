@@ -31,7 +31,7 @@ class Routes(
   engine:      RealityEngine,
   simulator:   PerceptualSpaceSimulator,
   auditCfg:    AuditConfig,
-  machinesDir: String = sys.env.getOrElse("MACHINES_DIR", "examples/machines")
+  machinesDir: String = sys.env.getOrElse("MACHINES_DIR", "../RealityEngine_Machines/machines")
 )(implicit system: ActorSystem, ec: ExecutionContext) {
 
   private val perception = new PerceptionOfReality(
