@@ -80,7 +80,7 @@ class PerceptionRoutes(
   private val ckBridgeId         = sys.env.getOrElse("CAREKIT_BRIDGE_ID", "carekit-ios-bridge")
   private val ckEnabled          = sys.env.get("CAREKIT_ENABLED").exists(v => v == "true" || v == "1")
   private val ckDefaultMappingId = sys.env.getOrElse("CAREKIT_DEFAULT_SOURCE_MAPPING_ID", "carekit-task")
-  private val localAiApiUrl      = sys.env.getOrElse("LOCAL_AI_API_URL",  "http://localhost:8080")
+  private val localAiApiUrl      = sys.env.getOrElse("LOCAL_AI_API_URL",  "http://localhost:4000")
   private val localAiMachinesDir = sys.env.get("LOCAL_AI_MACHINES_DIR")
 
   // ── Source mapping registry ───────────────────────────────────────────────

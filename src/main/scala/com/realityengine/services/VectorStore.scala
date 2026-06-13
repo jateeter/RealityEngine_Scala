@@ -15,9 +15,9 @@ import scala.concurrent.{ExecutionContext, Future}
  * All calls are natively async: send() returns Future[Response[...]] directly.
  */
 class VectorStore(
-  qdrantUrl:       String  = sys.env.getOrElse("QDRANT_URL", "http://localhost:6333"),
+  qdrantUrl:       String  = sys.env.getOrElse("QDRANT_URL", "http://localhost:4333"),
   collectionName:  String  = sys.env.getOrElse("COLLECTION_NAME", "reality-vectors"),
-  vectorDimension: Int     = sys.env.getOrElse("VECTOR_DIMENSION", "768").toIntOption.getOrElse(768)
+  vectorDimension: Int     = sys.env.getOrElse("VECTOR_DIMENSION", "7680").toIntOption.getOrElse(7680)
 )(implicit system: ActorSystem) {
 
   private implicit val ec: ExecutionContext = system.dispatcher

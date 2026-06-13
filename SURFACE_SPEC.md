@@ -46,22 +46,22 @@ Default ports: Scala 5001 · CPP 5301 · LSP 5601
 
 | Method | Path | CPP | LSP | Scala |
 |--------|------|-----|-----|-------|
-| POST | `/api/vectors/search` | ✓ | **GAP** | ✓ |
-| POST | `/api/vectors` | ✓ | **GAP** | ✓ |
-| GET | `/api/vectors/:id` | ✓ | **GAP** | ✓ |
-| DELETE | `/api/vectors/:id` | ✓ | **GAP** | ✓ |
+| POST | `/api/vectors/search` | ✓ | ✓ | ✓ |
+| POST | `/api/vectors` | ✓ | ✓ | ✓ |
+| GET | `/api/vectors/:id` | ✓ | ✓ | ✓ |
+| DELETE | `/api/vectors/:id` | ✓ | ✓ | ✓ |
 
 ### Sequences
 
 | Method | Path | CPP | LSP | Scala |
 |--------|------|-----|-----|-------|
-| GET | `/api/sequences` | ✓ | **GAP** | ✓ |
-| POST | `/api/sequences` | ✓ | **GAP** | ✓ |
-| GET | `/api/sequences/:id` | ✓ | **GAP** | ✓ |
+| GET | `/api/sequences` | ✓ | ✓ | ✓ |
+| POST | `/api/sequences` | ✓ | ✓ | ✓ |
+| GET | `/api/sequences/:id` | ✓ | ✓ | ✓ |
 | DELETE | `/api/sequences/:id` | ✓ | ✓ | ✓ |
 | POST | `/api/sequences/:id/reset` | ✓ | ✓ | ✓ |
 | POST | `/api/sequences/:id/vectors` | ✓ | ✓ | ✓ |
-| POST | `/api/sequences/persist` | ✓ | **GAP** | ✓ |
+| POST | `/api/sequences/persist` | ✓ | ✓ | ✓ |
 
 ### Engine
 

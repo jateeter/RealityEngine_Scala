@@ -23,9 +23,12 @@ object PerceptionMain extends App {
   implicit val mat: Materializer    = Materializer(system)
   implicit val ec: ExecutionContext  = system.dispatcher
 
-  val port               = sys.env.getOrElse("PORT", "5000").toIntOption.getOrElse(5000)
+  val port               = sys.env.get("PERCEPTION_ENGINE_PORT").orElse(sys.env.get("PORT")).getOrElse("5000").toIntOption.getOrElse(5000)
   val host               = sys.env.getOrElse("HOST", "0.0.0.0")
-  val realityEngineUrl   = sys.env.getOrElse("REALITY_ENGINE_URL",   "http://localhost:5001")
+  val realityEngineUrl   = sys.env
+    .get("REALITY_ENGINE_URL")
+    .orElse(sys.env.get("REALITY_ENGINE_PORT").map(port => s"http://localhost:$port"))
+    .getOrElse("http://localhost:5001")
   val dataPath           = sys.env.getOrElse("DATA_PATH", "./data")
   val isFresh            = args.contains("--fresh") || sys.env.getOrElse("FRESH_START", "false") == "true"
 
@@ -58,7 +61,7 @@ object PerceptionMain extends App {
 
   // ── Engine bootstrap ──────────────────────────────────────────────────────
 
-  val vectorDimension = sys.env.getOrElse("VECTOR_DIMENSION", "768").toIntOption.getOrElse(768)
+  val vectorDimension = sys.env.getOrElse("VECTOR_DIMENSION", "7680").toIntOption.getOrElse(7680)
   val store   = new SourceStore(dataPath)
   val engine  = new PerceptionEngine(vectorDimension)
 

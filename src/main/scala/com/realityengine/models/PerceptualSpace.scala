@@ -20,7 +20,7 @@ package com.realityengine.models
  *   setPerceptualVector — accepts vectors of any length: shorter vectors zero-fill
  *                         the tail; longer vectors auto-grow the space first.
  */
-class PerceptualSpace(initialDimension: Int = sys.env.getOrElse("VECTOR_DIMENSION", "768").toIntOption.getOrElse(768)) {
+class PerceptualSpace(initialDimension: Int = sys.env.getOrElse("VECTOR_DIMENSION", "7680").toIntOption.getOrElse(7680)) {
   private var _dimension:     Int            = initialDimension
   private var perceptualArray: Array[Double] = new Array[Double](initialDimension)
 
@@ -115,7 +115,7 @@ class PerceptualSpace(initialDimension: Int = sys.env.getOrElse("VECTOR_DIMENSIO
 object PerceptualSpace {
   def fromJson(json: io.circe.Json): PerceptualSpace = {
     val c    = json.hcursor
-    val dim  = c.get[Int]("dimension").getOrElse(sys.env.getOrElse("VECTOR_DIMENSION", "768").toIntOption.getOrElse(768))
+    val dim  = c.get[Int]("dimension").getOrElse(sys.env.getOrElse("VECTOR_DIMENSION", "7680").toIntOption.getOrElse(7680))
     val ps   = new PerceptualSpace(dim)
     val vec  = c.downField("perceptualVector").as[Vector[Double]].getOrElse(Vector.fill(dim)(0.0))
     ps.setPerceptualVector(vec)

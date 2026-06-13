@@ -67,15 +67,17 @@ Use `config/healthkit-spezi-app.example.env` as the bridge app configuration
 template:
 
 ```text
-PE_BASE_URL=http://<mac-lan-ip>:3300
+PE_BASE_URL=http://<mac-lan-ip>:5000
 PE_HEALTHKIT_ENDPOINT=/api/integrations/healthkit/ingest
 HEALTHKIT_BRIDGE_ID=healthkit-ios-bridge
 HEALTHKIT_BRIDGE_TOKEN=<dev-token>
 ```
 
 Do not use `localhost` from the simulator or iPhone unless PE runs inside that
-same runtime. For simulator-to-Mac, `http://127.0.0.1:3300` may work. For a
-physical iPhone, use the Mac's LAN IP.
+same runtime. For simulator-to-Mac with the Scala PE, `http://127.0.0.1:5000`
+may work. For a physical iPhone, use the Mac's LAN IP. The deprecated
+compatibility example is `http://<mac-lan-ip>:3300` only when PE is explicitly
+started on that compatibility port.
 
 The full ingest URL is:
 

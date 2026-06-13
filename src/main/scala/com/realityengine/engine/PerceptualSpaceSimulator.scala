@@ -13,7 +13,7 @@ import io.circe.Json
 private case class ComposeSubscription(subscriberMachineId: String, bitOffset: Int,
                                        producerMachineId: String, producerSequenceId: String)
 
-class PerceptualSpaceSimulator(dimension: Int = sys.env.getOrElse("VECTOR_DIMENSION", "768").toIntOption.getOrElse(768)) {
+class PerceptualSpaceSimulator(dimension: Int = sys.env.getOrElse("VECTOR_DIMENSION", "7680").toIntOption.getOrElse(7680)) {
   private val perceptualSpace    = new PerceptualSpace(dimension)
   private var machines:          Map[String, Machine] = Map.empty
   private var history:           List[SimulationStep] = Nil

@@ -5,4 +5,4 @@ project/project/target/
 .metals/
 .idea/
 *.class
-src/main/scala/com/realityengine/.DS_Store
+.DS_Store

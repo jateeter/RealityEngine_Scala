@@ -13,7 +13,7 @@ import scala.util.Random
  *
  * Signal generation lives in the companion object as pure functions.
  */
-class PerceptionEngine(initialDimension: Int = sys.env.getOrElse("VECTOR_DIMENSION", "768").toIntOption.getOrElse(768)) {
+class PerceptionEngine(initialDimension: Int = sys.env.getOrElse("VECTOR_DIMENSION", "7680").toIntOption.getOrElse(7680)) {
   private val uuidGen = Generators.timeBasedReorderedGenerator()
 
   private var sources: Map[String, SourceConfig]        = Map.empty

@@ -9,7 +9,7 @@ import com.realityengine.models._
  *   Universal Input Space → per-machine extraction via PerceptualMapping
  *   → Machine processes its specific view of reality
  */
-class PerceptionEngine(val universalDimension: Int = sys.env.getOrElse("VECTOR_DIMENSION", "768").toIntOption.getOrElse(768)) {
+class PerceptionEngine(val universalDimension: Int = sys.env.getOrElse("VECTOR_DIMENSION", "7680").toIntOption.getOrElse(7680)) {
   private val perceptualSpace = new PerceptualSpace(universalDimension)
 
   // ── Core resolution ───────────────────────────────────────────────────────

@@ -19,7 +19,7 @@ object Main extends App {
   implicit val system: ActorSystem    = ActorSystem("reality-engine")
   implicit val ec: ExecutionContext   = system.dispatcher
 
-  val port    = sys.env.getOrElse("PORT", "5001").toIntOption.getOrElse(5001)
+  val port    = sys.env.get("REALITY_ENGINE_PORT").orElse(sys.env.get("PORT")).getOrElse("5001").toIntOption.getOrElse(5001)
   val host    = sys.env.getOrElse("HOST", "0.0.0.0")
 
   val auditCfg = AuditConfig.fromEnv("reality-engine")
@@ -95,7 +95,7 @@ object Main extends App {
         case Success(b) =>
           val scheme = if (tlsEnabled) "https" else "http"
           println(s"\n✅ Reality Engine running on $scheme://$host:$port")
-          println(s"🗄️  Qdrant URL: ${sys.env.getOrElse("QDRANT_URL", "https://localhost:6333")}")
+          println(s"🗄️  Qdrant URL: ${sys.env.getOrElse("QDRANT_URL", "http://localhost:4333")}")
 
           sys.addShutdownHook {
             println("\nShutting down gracefully...")
