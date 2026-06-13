@@ -11,6 +11,14 @@ corpus, governance contracts, and Prometheus metrics shape.
 - `perception-engine/` — Perception Engine Scala implementation
 - `build.sbt` — SBT build configuration for the Reality Engine
 
+## Integrated Specification
+
+Cross-repository deployment rules are owned by
+[`RealityEngine_CI/DEPLOYMENT_CONTRACT.md`](../RealityEngine_CI/DEPLOYMENT_CONTRACT.md)
+and [`RealityEngine_CI/INTEGRATED_SPECIFICATION.md`](../RealityEngine_CI/INTEGRATED_SPECIFICATION.md).
+The active machine and RE/PE operations contract is described in
+[`RealityEngine_Machines/docs/REALITY_PERCEPTION_OPERATIONS.md`](../RealityEngine_Machines/docs/REALITY_PERCEPTION_OPERATIONS.md).
+
 ## Machine Model
 
 The Reality Engine executes **machines** — deterministic finite automata (DFAs) that

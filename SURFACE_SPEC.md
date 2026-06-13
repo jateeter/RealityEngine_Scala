@@ -8,6 +8,8 @@ This document is the authoritative HTTP API contract for the RealityEngine platf
 
 Runtimes: `CPP` = RealityEngine_CPP · `LSP` = RealityEngine_LSP · `Scala` = RealityEngine_Scala
 
+Consumers/tooling: `Manager` = RealityEngine_Manager · `CI` = RealityEngine_CI
+
 ---
 
 ## Reality Engine (RE) Surface
@@ -446,7 +448,9 @@ HTTP status: `200` (all ok) · `207` (partial failures).
 
 ## Out of Scope
 
-The following routes appeared in RealityEngine_AI but are not part of the canonical surface and must not be implemented in CPP, LSP, Scala, or the Manager:
+The following routes appeared in the locked historical RealityEngine_AI surface
+that has been replaced by Scala, but are not part of the canonical surface and
+must not be implemented in CPP, LSP, Scala, or the Manager:
 
 - `POST /api/mqtt/enable`
 - `POST /api/mqtt/disable`
