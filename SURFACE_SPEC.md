@@ -246,6 +246,8 @@ Default ports: Scala 5000 · CPP 5300 · LSP 5600
 | GET | `/api/mqtt/status` | ✓ | ✓ | ✓ |
 | GET | `/api/mqtt/mappings` | ✓ | ✓ | ✓ |
 | PUT | `/api/mqtt/mappings` | ✓ | ✓ | ✓ |
+| POST | `/api/mqtt/enable` | ✗ | ✗ | ✗ |
+| POST | `/api/mqtt/disable` | ✗ | ✗ | ✗ |
 
 ### Streaming
 
@@ -269,7 +271,12 @@ Default ports: Scala 5000 · CPP 5300 · LSP 5600
 
 ### Open gaps
 
-None. All routes listed in this spec are implemented by all three runtimes.
+| Route | CPP | LSP | Scala |
+|-------|-----|-----|-------|
+| `POST /api/mqtt/enable` | planned | planned | planned |
+| `POST /api/mqtt/disable` | planned | planned | planned |
+
+The Manager returns HTTP 501 for these routes until the active runtime implements them.
 
 ---
 
@@ -450,10 +457,8 @@ HTTP status: `200` (all ok) · `207` (partial failures).
 
 The following routes appeared in the locked historical RealityEngine_AI surface
 that has been replaced by Scala, but are not part of the canonical surface and
-must not be implemented in CPP, LSP, Scala, or the Manager:
+must not be implemented in CPP, LSP, or Scala:
 
-- `POST /api/mqtt/enable`
-- `POST /api/mqtt/disable`
 - `GET /api/mqtt/example`
 - `GET /api/integrations/healthkit/example`
 - `GET /api/integrations/carekit/example`
