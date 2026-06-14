@@ -53,8 +53,13 @@ class PerceptionRoutes(
   private val pushHistory      = new AtomicReference[Vector[Json]](Vector.empty)
 
   // MQTT bridge config — enabled when MQTT_BROKER_HOST is set at startup
-  private val mqttBrokerHost  = sys.env.get("MQTT_BROKER_HOST")
-  private val mqttMappingsRef = new AtomicReference[Json](Json.arr())
+  // or when POST /api/mqtt/enable is called at runtime.
+  private val mqttBrokerHost   = sys.env.get("MQTT_BROKER_HOST")
+  private val mqttDefaultPort  = sys.env.getOrElse("MQTT_BROKER_PORT", "1883")
+  private val mqttEnabledRef   = new AtomicReference[Boolean](mqttBrokerHost.isDefined)
+  private val mqttBrokerUrlRef = new AtomicReference[Option[String]](
+    mqttBrokerHost.map(h => s"mqtt://$h:$mqttDefaultPort"))
+  private val mqttMappingsRef  = new AtomicReference[Json](Json.arr())
 
   // SSE broadcast hub — mirrors /ws but as Server-Sent Events for /api/events
   private val (ssePEQueue, ssePEBroadcast) = {
@@ -956,48 +961,90 @@ class PerceptionRoutes(
       )) }
     },
 
-    // ── MQTT bridge (set MQTT_BROKER_HOST at startup to enable) ──────────────
+    // ── MQTT bridge ───────────────────────────────────────────────────────────
     path("api" / "mqtt" / "status") {
       get { complete(Json.obj(
-        "enabled"    -> mqttBrokerHost.isDefined.asJson,
-        "configured" -> mqttBrokerHost.isDefined.asJson,
-        "broker"     -> mqttBrokerHost.map(_.asJson).getOrElse(Json.Null)
+        "enabled"   -> mqttEnabledRef.get().asJson,
+        "configured"-> mqttEnabledRef.get().asJson,
+        "brokerUrl" -> mqttBrokerUrlRef.get().map(_.asJson).getOrElse(Json.Null)
       )) }
     },
     path("api" / "mqtt" / "mappings") {
       concat(
         get { complete(Json.obj(
-          "enabled"  -> mqttBrokerHost.isDefined.asJson,
+          "enabled"  -> mqttEnabledRef.get().asJson,
           "mappings" -> mqttMappingsRef.get()
         )) },
         put { entity(as[Json]) { body =>
-          mqttBrokerHost match {
-            case None =>
-              complete(StatusCodes.Conflict ->
-                Json.obj("error" -> "no broker config — set MQTT_BROKER_HOST at PE startup before reloading mappings".asJson))
-            case Some(_) =>
-              val mappings = body.hcursor.downField("mappings").as[Json].getOrElse(Json.arr())
-              val count    = mappings.asArray.map(_.length).getOrElse(0)
-              if (count == 0)
-                complete(StatusCodes.BadRequest ->
-                  Json.obj("error" -> "mappings array is empty — at least one rule is required".asJson))
-              else {
-                mqttMappingsRef.set(mappings)
-                broadcast(Json.obj(
-                  "type"     -> "mqtt-mappings-updated".asJson,
-                  "mappings" -> mappings,
-                  "count"    -> count.asJson
-                ))
-                complete(Json.obj(
-                  "success"  -> true.asJson,
-                  "enabled"  -> true.asJson,
-                  "mappings" -> count.asJson,
-                  "warnings" -> Json.arr()
-                ))
-              }
+          if (!mqttEnabledRef.get())
+            complete(StatusCodes.Conflict ->
+              Json.obj("error" -> "MQTT bridge not enabled — call POST /api/mqtt/enable first".asJson))
+          else {
+            val mappings = body.hcursor.downField("mappings").as[Json].getOrElse(Json.arr())
+            val count    = mappings.asArray.map(_.length).getOrElse(0)
+            if (count == 0)
+              complete(StatusCodes.BadRequest ->
+                Json.obj("error" -> "mappings array is empty — at least one rule is required".asJson))
+            else {
+              mqttMappingsRef.set(mappings)
+              broadcast(Json.obj(
+                "type"     -> "mqtt-mappings-updated".asJson,
+                "mappings" -> mappings,
+                "count"    -> count.asJson
+              ))
+              complete(Json.obj(
+                "success"  -> true.asJson,
+                "enabled"  -> true.asJson,
+                "mappings" -> count.asJson,
+                "warnings" -> Json.arr()
+              ))
+            }
           }
         } }
       )
+    },
+    path("api" / "mqtt" / "enable") {
+      post { entity(as[Json]) { body =>
+        val brokerUrl = body.hcursor.downField("brokerUrl").as[String].getOrElse("")
+        if (brokerUrl.isEmpty)
+          complete(StatusCodes.BadRequest ->
+            Json.obj("error" -> "brokerUrl is required".asJson))
+        else {
+          val mappingsBody = body.hcursor.downField("mappings").as[Json].getOrElse(Json.obj())
+          val mappings     = mappingsBody.hcursor.downField("mappings").as[Json].getOrElse(Json.arr())
+          val count        = mappings.asArray.map(_.length).getOrElse(0)
+          if (count == 0)
+            complete(StatusCodes.BadRequest ->
+              Json.obj("error" -> "mappings array is empty — at least one rule is required".asJson))
+          else {
+            mqttBrokerUrlRef.set(Some(brokerUrl))
+            mqttEnabledRef.set(true)
+            mqttMappingsRef.set(mappings)
+            broadcast(Json.obj(
+              "type"      -> "mqtt-enabled".asJson,
+              "brokerUrl" -> brokerUrl.asJson,
+              "mappings"  -> count.asJson
+            ))
+            complete(Json.obj(
+              "success"  -> true.asJson,
+              "enabled"  -> true.asJson,
+              "mappings" -> count.asJson,
+              "warnings" -> Json.arr()
+            ))
+          }
+        }
+      } }
+    },
+    path("api" / "mqtt" / "disable") {
+      post {
+        mqttEnabledRef.set(false)
+        mqttBrokerUrlRef.set(None)
+        broadcast(Json.obj("type" -> "mqtt-disabled".asJson))
+        complete(Json.obj(
+          "success" -> true.asJson,
+          "enabled" -> false.asJson
+        ))
+      }
     },
 
     // ── Bootstrap sources from Reality Engine machines ────────────────────────

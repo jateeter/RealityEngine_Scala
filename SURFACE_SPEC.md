@@ -246,8 +246,8 @@ Default ports: Scala 5000 · CPP 5300 · LSP 5600
 | GET | `/api/mqtt/status` | ✓ | ✓ | ✓ |
 | GET | `/api/mqtt/mappings` | ✓ | ✓ | ✓ |
 | PUT | `/api/mqtt/mappings` | ✓ | ✓ | ✓ |
-| POST | `/api/mqtt/enable` | ✗ | ✗ | ✗ |
-| POST | `/api/mqtt/disable` | ✗ | ✗ | ✗ |
+| POST | `/api/mqtt/enable` | ✓ | ✓ | ✓ |
+| POST | `/api/mqtt/disable` | ✓ | ✓ | ✓ |
 
 ### Streaming
 
@@ -271,12 +271,7 @@ Default ports: Scala 5000 · CPP 5300 · LSP 5600
 
 ### Open gaps
 
-| Route | CPP | LSP | Scala |
-|-------|-----|-----|-------|
-| `POST /api/mqtt/enable` | planned | planned | planned |
-| `POST /api/mqtt/disable` | planned | planned | planned |
-
-The Manager returns HTTP 501 for these routes until the active runtime implements them.
+None. All routes listed in this spec are implemented by all three runtimes.
 
 ---
 
