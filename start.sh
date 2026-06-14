@@ -13,6 +13,7 @@ REALITY_ENGINE_PORT="${REALITY_ENGINE_PORT:-5001}"
 PERCEPTION_ENGINE_PORT="${PERCEPTION_ENGINE_PORT:-5000}"
 VECTOR_DIMENSION="${VECTOR_DIMENSION:-7680}"
 MACHINES_DIR="${MACHINES_DIR:-../RealityEngine_Machines/machines}"
+RE_LOAD_MACHINES="${RE_LOAD_MACHINES:-1}"
 QDRANT_URL="${QDRANT_URL:-http://localhost:4333}"
 LOCAL_AI_API_URL="${LOCAL_AI_API_URL:-http://localhost:4000}"
 LOCAL_AI_MACHINES_DIR="${LOCAL_AI_MACHINES_DIR:-../localAIStack/data/machines}"
@@ -77,7 +78,16 @@ if [ ! -f "$PE_JAR" ]; then
 fi
 [ -f "$RE_JAR" ] || die "missing $RE_JAR after assembly"
 [ -f "$PE_JAR" ] || die "missing $PE_JAR after assembly"
-[ -d "$MACHINES_DIR" ] || die "machine directory not found: $MACHINES_DIR"
+
+# When RE_LOAD_MACHINES=0 the RE starts with no corpus (CI will seed separately).
+# Use a temp empty directory so the binary still receives a valid path argument.
+if [ "${RE_LOAD_MACHINES}" = "0" ]; then
+    _machines_load_dir=$(mktemp -d)
+    trap 'rm -rf "$_machines_load_dir"' EXIT
+else
+    [ -d "$MACHINES_DIR" ] || die "machine directory not found: $MACHINES_DIR"
+    _machines_load_dir="$MACHINES_DIR"
+fi
 
 check_port_free "$REALITY_ENGINE_PORT" "$RE_PID_FILE"
 check_port_free "$PERCEPTION_ENGINE_PORT" "$PE_PID_FILE"
@@ -87,7 +97,7 @@ HOST="$HOST" \
 PORT="$REALITY_ENGINE_PORT" \
 REALITY_ENGINE_PORT="$REALITY_ENGINE_PORT" \
 VECTOR_DIMENSION="$VECTOR_DIMENSION" \
-MACHINES_DIR="$MACHINES_DIR" \
+MACHINES_DIR="$_machines_load_dir" \
 QDRANT_URL="$QDRANT_URL" \
 LOCAL_AI_API_URL="$LOCAL_AI_API_URL" \
   nohup java -jar "$RE_JAR" > "$RE_LOG_FILE" 2>&1 &
