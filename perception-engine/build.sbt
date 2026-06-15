@@ -30,6 +30,9 @@ lazy val root = (project in file("."))
 
       // UUID
       "com.fasterxml.uuid" % "java-uuid-generator" % "4.3.0",
+
+      // MQTT — Eclipse Paho Java client
+      "org.eclipse.paho" % "org.eclipse.paho.client.mqttv3" % "1.2.5",
     ),
 
     assembly / mainClass        := Some("com.realityengine.perception.PerceptionMain"),

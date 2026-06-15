@@ -21,7 +21,7 @@ import akka.stream.scaladsl.{BroadcastHub, Keep, Source}
 import akka.stream.OverflowStrategy
 import scala.concurrent.{ExecutionContext, Future}
 import scala.concurrent.duration._
-import scala.util.{Failure, Success}
+import scala.util.{Failure, Success, Try}
 import java.util.concurrent.atomic.{AtomicBoolean, AtomicReference}
 import com.realityengine.perception.logging.{AuditConfig, AuditLogger}
 
@@ -52,14 +52,35 @@ class PerceptionRoutes(
   private val pushHistoryLimit = sys.env.get("PUSH_HISTORY_LIMIT").flatMap(_.toIntOption).getOrElse(100)
   private val pushHistory      = new AtomicReference[Vector[Json]](Vector.empty)
 
-  // MQTT bridge config — enabled when MQTT_BROKER_HOST is set at startup
-  // or when POST /api/mqtt/enable is called at runtime.
-  private val mqttBrokerHost   = sys.env.get("MQTT_BROKER_HOST")
-  private val mqttDefaultPort  = sys.env.getOrElse("MQTT_BROKER_PORT", "1883")
-  private val mqttEnabledRef   = new AtomicReference[Boolean](mqttBrokerHost.isDefined)
-  private val mqttBrokerUrlRef = new AtomicReference[Option[String]](
-    mqttBrokerHost.map(h => s"mqtt://$h:$mqttDefaultPort"))
-  private val mqttMappingsRef  = new AtomicReference[Json](Json.arr())
+  // MQTT bridge — nil when not active; set via POST /api/mqtt/enable.
+  // mqttBrokerUrlRef is kept separately for the status endpoint display.
+  import com.realityengine.perception.mqtt.{MqttBridge, MqttMappingRule}
+  private val mqttBridgeRef    = new AtomicReference[Option[MqttBridge]](None)
+  private val mqttBrokerUrlRef = new AtomicReference[Option[String]](None)
+
+  private def mqttIngest(sensorId: String, offset: Int, length: Int,
+                          values: Vector[Double], ttlMs: Long,
+                          topic: String, mappingId: String): Unit = {
+    if (engine.findSensorBySensorId(sensorId).isEmpty)
+      engine.addSource(com.realityengine.perception.models.SensorSourceConfig(
+        id          = sensorId,
+        name        = s"mqtt:$sensorId",
+        region      = com.realityengine.perception.models.Region(offset, length),
+        active      = true,
+        sensorId    = sensorId,
+        lastValue   = Vector.empty,
+        lastUpdated = None,
+        ttlMs       = ttlMs,
+      ))
+    engine.updateSensorValue(sensorId, values)
+    broadcast(Json.obj(
+      "type"      -> "mqtt-ingest".asJson,
+      "sensorId"  -> sensorId.asJson,
+      "topic"     -> topic.asJson,
+      "mappingId" -> mappingId.asJson,
+    ))
+    broadcastState()
+  }
 
   // SSE broadcast hub — mirrors /ws but as Server-Sent Events for /api/events
   private val (ssePEQueue, ssePEBroadcast) = {
@@ -963,42 +984,69 @@ class PerceptionRoutes(
 
     // ── MQTT bridge ───────────────────────────────────────────────────────────
     path("api" / "mqtt" / "status") {
-      get { complete(Json.obj(
-        "enabled"   -> mqttEnabledRef.get().asJson,
-        "configured"-> mqttEnabledRef.get().asJson,
-        "brokerUrl" -> mqttBrokerUrlRef.get().map(_.asJson).getOrElse(Json.Null)
-      )) }
+      get {
+        val bridge = mqttBridgeRef.get()
+        complete(bridge match {
+          case None => Json.obj("enabled" -> false.asJson)
+          case Some(b) =>
+            val s = b.stats
+            Json.obj(
+              "enabled"   -> true.asJson,
+              "connected" -> b.isConnected.asJson,
+              "brokerUrl" -> mqttBrokerUrlRef.get().map(_.asJson).getOrElse(Json.Null),
+              "clientId"  -> b.clientId.asJson,
+              "mappings"  -> b.rules.length.asJson,
+              "bridge"    -> Json.obj(
+                "messagesReceived"  -> s.messagesReceived.get().asJson,
+                "messagesMapped"    -> s.messagesMapped.get().asJson,
+                "messagesRejected"  -> s.messagesRejected.get().asJson,
+                "messagesUnmatched" -> s.messagesUnmatched.get().asJson,
+                "pushesTriggered"   -> s.pushesTriggered.get().asJson,
+              )
+            )
+        })
+      }
     },
     path("api" / "mqtt" / "mappings") {
       concat(
-        get { complete(Json.obj(
-          "enabled"  -> mqttEnabledRef.get().asJson,
-          "mappings" -> mqttMappingsRef.get()
-        )) },
+        get {
+          val bridge = mqttBridgeRef.get()
+          complete(bridge match {
+            case None    => Json.obj("enabled" -> false.asJson, "mappings" -> Json.arr())
+            case Some(b) => Json.obj(
+              "enabled"  -> true.asJson,
+              "mappings" -> b.rules.length.asJson
+            )
+          })
+        },
         put { entity(as[Json]) { body =>
-          if (!mqttEnabledRef.get())
-            complete(StatusCodes.Conflict ->
-              Json.obj("error" -> "MQTT bridge not enabled — call POST /api/mqtt/enable first".asJson))
-          else {
-            val mappings = body.hcursor.downField("mappings").as[Json].getOrElse(Json.arr())
-            val count    = mappings.asArray.map(_.length).getOrElse(0)
-            if (count == 0)
-              complete(StatusCodes.BadRequest ->
-                Json.obj("error" -> "mappings array is empty — at least one rule is required".asJson))
-            else {
-              mqttMappingsRef.set(mappings)
-              broadcast(Json.obj(
-                "type"     -> "mqtt-mappings-updated".asJson,
-                "mappings" -> mappings,
-                "count"    -> count.asJson
-              ))
-              complete(Json.obj(
-                "success"  -> true.asJson,
-                "enabled"  -> true.asJson,
-                "mappings" -> count.asJson,
-                "warnings" -> Json.arr()
-              ))
-            }
+          mqttBridgeRef.get() match {
+            case None =>
+              complete(StatusCodes.Conflict ->
+                Json.obj("error" -> "MQTT bridge not enabled — call POST /api/mqtt/enable first".asJson))
+            case Some(current) =>
+              MqttBridge.parseRegistry(body) match {
+                case Left(err) =>
+                  complete(StatusCodes.BadRequest -> Json.obj("error" -> err.asJson))
+                case Right(rules) =>
+                  current.stop()
+                  val bridge = new MqttBridge(current.brokerUrl, current.clientId, rules, mqttIngest, () => doPush())
+                  Try(bridge.start()) match {
+                    case scala.util.Failure(e) =>
+                      mqttBridgeRef.set(None)
+                      complete(StatusCodes.InternalServerError ->
+                        Json.obj("error" -> s"MQTT bridge failed to restart: ${e.getMessage}".asJson))
+                    case scala.util.Success(_) =>
+                      mqttBridgeRef.set(Some(bridge))
+                      broadcast(Json.obj("type" -> "mqtt-mappings-reloaded".asJson, "mappings" -> rules.length.asJson))
+                      complete(Json.obj(
+                        "success"  -> true.asJson,
+                        "enabled"  -> true.asJson,
+                        "mappings" -> rules.length.asJson,
+                        "warnings" -> Json.arr()
+                      ))
+                  }
+              }
           }
         } }
       )
@@ -1007,43 +1055,43 @@ class PerceptionRoutes(
       post { entity(as[Json]) { body =>
         val brokerUrl = body.hcursor.downField("brokerUrl").as[String].getOrElse("")
         if (brokerUrl.isEmpty)
-          complete(StatusCodes.BadRequest ->
-            Json.obj("error" -> "brokerUrl is required".asJson))
+          complete(StatusCodes.BadRequest -> Json.obj("error" -> "brokerUrl is required".asJson))
         else {
-          val mappingsBody = body.hcursor.downField("mappings").as[Json].getOrElse(Json.obj())
-          val mappings     = mappingsBody.hcursor.downField("mappings").as[Json].getOrElse(Json.arr())
-          val count        = mappings.asArray.map(_.length).getOrElse(0)
-          if (count == 0)
-            complete(StatusCodes.BadRequest ->
-              Json.obj("error" -> "mappings array is empty — at least one rule is required".asJson))
-          else {
-            mqttBrokerUrlRef.set(Some(brokerUrl))
-            mqttEnabledRef.set(true)
-            mqttMappingsRef.set(mappings)
-            broadcast(Json.obj(
-              "type"      -> "mqtt-enabled".asJson,
-              "brokerUrl" -> brokerUrl.asJson,
-              "mappings"  -> count.asJson
-            ))
-            complete(Json.obj(
-              "success"  -> true.asJson,
-              "enabled"  -> true.asJson,
-              "mappings" -> count.asJson,
-              "warnings" -> Json.arr()
-            ))
+          val registryBody = body.hcursor.downField("mappings").as[Json].getOrElse(Json.obj())
+          MqttBridge.parseRegistry(registryBody) match {
+            case Left(err) =>
+              complete(StatusCodes.BadRequest -> Json.obj("error" -> err.asJson))
+            case Right(rules) =>
+              mqttBridgeRef.get().foreach(_.stop())
+              val clientId = "reality-engine-pe-scala"
+              val bridge = new MqttBridge(brokerUrl, clientId, rules, mqttIngest, () => doPush())
+              Try(bridge.start()) match {
+                case scala.util.Failure(e) =>
+                  mqttBridgeRef.set(None)
+                  mqttBrokerUrlRef.set(None)
+                  complete(StatusCodes.InternalServerError ->
+                    Json.obj("error" -> s"MQTT bridge failed to start: ${e.getMessage}".asJson))
+                case scala.util.Success(_) =>
+                  mqttBridgeRef.set(Some(bridge))
+                  mqttBrokerUrlRef.set(Some(brokerUrl))
+                  broadcast(Json.obj("type" -> "mqtt-enabled".asJson, "brokerUrl" -> brokerUrl.asJson))
+                  complete(Json.obj(
+                    "success"  -> true.asJson,
+                    "enabled"  -> true.asJson,
+                    "mappings" -> rules.length.asJson,
+                    "warnings" -> Json.arr()
+                  ))
+              }
           }
         }
       } }
     },
     path("api" / "mqtt" / "disable") {
       post {
-        mqttEnabledRef.set(false)
+        mqttBridgeRef.getAndSet(None).foreach(_.stop())
         mqttBrokerUrlRef.set(None)
         broadcast(Json.obj("type" -> "mqtt-disabled".asJson))
-        complete(Json.obj(
-          "success" -> true.asJson,
-          "enabled" -> false.asJson
-        ))
+        complete(Json.obj("success" -> true.asJson, "enabled" -> false.asJson))
       }
     },
 
