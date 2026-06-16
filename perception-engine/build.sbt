@@ -43,6 +43,12 @@ lazy val root = (project in file("."))
       case PathList("reference.conf")                            => MergeStrategy.concat
       case PathList("META-INF", "io.netty.versions.properties")  => MergeStrategy.first
       case PathList("module-info.class")                         => MergeStrategy.discard
+      // Strip signature files from signed dependency jars (e.g. Eclipse Paho).
+      // Keeping them makes the JVM verifier reject the repackaged uber-jar,
+      // surfacing as a bogus ClassNotFoundException for the main class.
+      case PathList("META-INF", xs @ _*) if xs.lastOption.exists { n =>
+        val u = n.toUpperCase; u.endsWith(".SF") || u.endsWith(".RSA") || u.endsWith(".DSA")
+      } => MergeStrategy.discard
       case _                                                     => MergeStrategy.first
     }
   )
