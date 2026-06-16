@@ -460,3 +460,10 @@ must not be implemented in CPP, LSP, or Scala:
 - `POST /api/triggers/replay/:dispatchId`
 - `GET /api/logs/ingest` (Loki-specific, Manager visualizer backend only)
 - `GET /api/viz/*` (Manager visualizer backend only)
+
+The Manager visualizer backend exposes `/api/pe/mqtt/*` proxy routes that
+forward to the active Perception Engine (`GET /api/pe/mqtt/status`,
+`GET /api/pe/mqtt/mappings`, `PUT /api/pe/mqtt/mappings`,
+`POST /api/pe/mqtt/enable`, `POST /api/pe/mqtt/disable`). These are
+Manager-internal forwarding routes and are not part of the runtime contract;
+CPP, LSP, and Scala must not implement them.
