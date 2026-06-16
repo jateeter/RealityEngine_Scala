@@ -6,3 +6,6 @@ project/project/target/
 .idea/
 *.class
 .DS_Store
+data/
+logs/
+run/
