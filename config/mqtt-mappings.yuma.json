@@ -1,0 +1,125 @@
+{
+  "_comment": "Demonstration MQTT mapping registry for the live broker at yuma.lateraledge.cloud:1883 (Lateral Edge sensor mesh).  Topics observed: LATERAL/{Suite}/{DevId}/SensorReadings/v1 with {\"data\":{...field:value...}} payloads.  Each device gets its own region; min/max normalization scales raw readings into [0,1] for the perceptual vector.  Three suites: AmbientSuite (air quality), WaterSuite (water chemistry), DOSuite (dissolved oxygen).",
+  "version": "1.0",
+  "defaults": {
+    "ttlMs": 60000,
+    "qos": 0,
+    "acceptRetained": true,
+    "pushMode": "debounced",
+    "debounceMs": 500
+  },
+  "mappings": [
+
+    {
+      "id": "ambient-dev9-temp",
+      "_comment": "Air temperature in °F (typical range 60-110).",
+      "topicFilter": "LATERAL/AmbientSuite/DEV0000009/SensorReadings/v1",
+      "sensorIdTemplate": "ambient.DEV0000009.temp",
+      "region": { "offset": 0, "length": 1 },
+      "extract": { "type": "json", "pointer": "/data/aTemp" },
+      "normalize": { "mode": "minmax", "min": 0, "max": 150, "clamp": true }
+    },
+    {
+      "id": "ambient-dev9-humidity",
+      "topicFilter": "LATERAL/AmbientSuite/DEV0000009/SensorReadings/v1",
+      "sensorIdTemplate": "ambient.DEV0000009.humidity",
+      "region": { "offset": 1, "length": 1 },
+      "extract": { "type": "json", "pointer": "/data/aHum" },
+      "normalize": { "mode": "minmax", "min": 0, "max": 100, "clamp": true }
+    },
+    {
+      "id": "ambient-dev9-co2",
+      "topicFilter": "LATERAL/AmbientSuite/DEV0000009/SensorReadings/v1",
+      "sensorIdTemplate": "ambient.DEV0000009.co2",
+      "region": { "offset": 2, "length": 1 },
+      "extract": { "type": "json", "pointer": "/data/aCO2" },
+      "normalize": { "mode": "minmax", "min": 400, "max": 5000, "clamp": true }
+    },
+    {
+      "id": "ambient-dev9-voc-idx",
+      "topicFilter": "LATERAL/AmbientSuite/DEV0000009/SensorReadings/v1",
+      "sensorIdTemplate": "ambient.DEV0000009.voc.idx",
+      "region": { "offset": 3, "length": 1 },
+      "extract": { "type": "json", "pointer": "/data/aIDX_VOC" },
+      "normalize": { "mode": "minmax", "min": 0, "max": 500, "clamp": true }
+    },
+    {
+      "id": "ambient-dev9-nox-idx",
+      "topicFilter": "LATERAL/AmbientSuite/DEV0000009/SensorReadings/v1",
+      "sensorIdTemplate": "ambient.DEV0000009.nox.idx",
+      "region": { "offset": 4, "length": 1 },
+      "extract": { "type": "json", "pointer": "/data/aIDX_NOx" },
+      "normalize": { "mode": "minmax", "min": 0, "max": 500, "clamp": true }
+    },
+
+    {
+      "id": "do-dev17-temp",
+      "_comment": "Dissolved-oxygen sensor probe temperature.",
+      "topicFilter": "LATERAL/DOSuite/DEV0000017/SensorReadings/v1",
+      "sensorIdTemplate": "do.DEV0000017.temp",
+      "region": { "offset": 8, "length": 1 },
+      "extract": { "type": "json", "pointer": "/data/wDOTemp" },
+      "normalize": { "mode": "minmax", "min": 0, "max": 150, "clamp": true }
+    },
+    {
+      "id": "do-dev17-do",
+      "_comment": "Dissolved oxygen mg/L.  Typical range 0-25 mg/L.",
+      "topicFilter": "LATERAL/DOSuite/DEV0000017/SensorReadings/v1",
+      "sensorIdTemplate": "do.DEV0000017.do",
+      "region": { "offset": 9, "length": 1 },
+      "extract": { "type": "json", "pointer": "/data/wDO" },
+      "normalize": { "mode": "minmax", "min": 0, "max": 25, "clamp": true }
+    },
+
+    {
+      "id": "water-dev1-temp",
+      "topicFilter": "LATERAL/WaterSuite/DEV0000001/SensorReadings/v1",
+      "sensorIdTemplate": "water.DEV0000001.temp",
+      "region": { "offset": 16, "length": 1 },
+      "extract": { "type": "json", "pointer": "/data/wTemp" },
+      "normalize": { "mode": "minmax", "min": 0, "max": 150, "clamp": true }
+    },
+    {
+      "id": "water-dev1-ph",
+      "_comment": "pH 0-14.  Drinking-water target ~6.5-8.5 — perceptual machines can match clamped ranges via threshold comparators.",
+      "topicFilter": "LATERAL/WaterSuite/DEV0000001/SensorReadings/v1",
+      "sensorIdTemplate": "water.DEV0000001.ph",
+      "region": { "offset": 17, "length": 1 },
+      "extract": { "type": "json", "pointer": "/data/wpH" },
+      "normalize": { "mode": "minmax", "min": 0, "max": 14, "clamp": true }
+    },
+    {
+      "id": "water-dev1-ec",
+      "_comment": "Electrical conductivity mS/cm.",
+      "topicFilter": "LATERAL/WaterSuite/DEV0000001/SensorReadings/v1",
+      "sensorIdTemplate": "water.DEV0000001.ec",
+      "region": { "offset": 18, "length": 1 },
+      "extract": { "type": "json", "pointer": "/data/wEC" },
+      "normalize": { "mode": "minmax", "min": 0, "max": 10, "clamp": true }
+    },
+    {
+      "id": "water-dev1-tds",
+      "topicFilter": "LATERAL/WaterSuite/DEV0000001/SensorReadings/v1",
+      "sensorIdTemplate": "water.DEV0000001.tds",
+      "region": { "offset": 19, "length": 1 },
+      "extract": { "type": "json", "pointer": "/data/wTDS" },
+      "normalize": { "mode": "minmax", "min": 0, "max": 2000, "clamp": true }
+    },
+    {
+      "id": "water-dev1-orp",
+      "topicFilter": "LATERAL/WaterSuite/DEV0000001/SensorReadings/v1",
+      "sensorIdTemplate": "water.DEV0000001.orp",
+      "region": { "offset": 20, "length": 1 },
+      "extract": { "type": "json", "pointer": "/data/wORP" },
+      "normalize": { "mode": "minmax", "min": -1500, "max": 1500, "clamp": true }
+    },
+    {
+      "id": "water-dev1-turbidity",
+      "topicFilter": "LATERAL/WaterSuite/DEV0000001/SensorReadings/v1",
+      "sensorIdTemplate": "water.DEV0000001.turbidity",
+      "region": { "offset": 21, "length": 1 },
+      "extract": { "type": "json", "pointer": "/data/wTurbidity" },
+      "normalize": { "mode": "minmax", "min": 0, "max": 1000, "clamp": true }
+    }
+  ]
+}

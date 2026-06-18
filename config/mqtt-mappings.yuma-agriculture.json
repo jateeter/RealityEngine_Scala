@@ -1,0 +1,148 @@
+{
+  "_comment": "MQTT mappings that thread live yuma.lateraledge.cloud sensors into the agriculture-domain example machines.  Each ag machine consumes a 4-cell status pattern (NORMAL=[1,1,1,1], OPTIMIZE=[0,1,0,1], SERVICE_DUE=[1,0,0,1]).  Bands in the normalize rules emit 1.0 when the raw reading is inside a nominal operating range, 0.0 otherwise — turning a continuous sensor into a status bit that initial events can match.  Machine input offsets come from each machine's perceptualMapping.input.offset; the rules below are the authoritative topic→region projection (per the design rule).  Owner: agriculture-operations.",
+  "version": "1.0",
+  "defaults": {
+    "ttlMs": 60000,
+    "qos": 0,
+    "acceptRetained": true,
+    "pushMode": "debounced",
+    "debounceMs": 500
+  },
+  "mappings": [
+    {
+      "_comment": "AGX001 — Aquaculture Water Quality Stability (input region [40,44)).  Four cells set HIGH when each chemistry parameter is in nominal range.  All four HIGH → agx-001-normal initial event fires.",
+      "id": "agx001-ph-ok",
+      "topicFilter": "LATERAL/WaterSuite/DEV0000001/SensorReadings/v1",
+      "sensorIdTemplate": "agx001.water.ph.ok",
+      "region": { "offset": 40, "length": 1 },
+      "extract": { "type": "json", "pointer": "/data/wpH" },
+      "normalize": { "mode": "band", "min": 6.5, "max": 8.5 }
+    },
+    {
+      "id": "agx001-ec-ok",
+      "topicFilter": "LATERAL/WaterSuite/DEV0000001/SensorReadings/v1",
+      "sensorIdTemplate": "agx001.water.ec.ok",
+      "region": { "offset": 41, "length": 1 },
+      "extract": { "type": "json", "pointer": "/data/wEC" },
+      "normalize": { "mode": "band", "min": 0.5, "max": 3.0 }
+    },
+    {
+      "id": "agx001-orp-ok",
+      "topicFilter": "LATERAL/WaterSuite/DEV0000001/SensorReadings/v1",
+      "sensorIdTemplate": "agx001.water.orp.ok",
+      "region": { "offset": 42, "length": 1 },
+      "extract": { "type": "json", "pointer": "/data/wORP" },
+      "normalize": { "mode": "band", "min": 200, "max": 600 }
+    },
+    {
+      "id": "agx001-turbidity-ok",
+      "topicFilter": "LATERAL/WaterSuite/DEV0000001/SensorReadings/v1",
+      "sensorIdTemplate": "agx001.water.turbidity.ok",
+      "region": { "offset": 43, "length": 1 },
+      "extract": { "type": "json", "pointer": "/data/wTurbidity" },
+      "normalize": { "mode": "band", "min": 0, "max": 100 }
+    },
+
+    {
+      "_comment": "AGX005 — Aquaculture Dissolved Oxygen Control (input region [84,88)).  Cells 84/85 = DO level + DO probe temp in nominal range; 86/87 are derived sub-bands (low-DO and high-temp watch windows).",
+      "id": "agx005-do-ok",
+      "topicFilter": "LATERAL/DOSuite/DEV0000017/SensorReadings/v1",
+      "sensorIdTemplate": "agx005.do.level.ok",
+      "region": { "offset": 84, "length": 1 },
+      "extract": { "type": "json", "pointer": "/data/wDO" },
+      "normalize": { "mode": "band", "min": 5, "max": 25 }
+    },
+    {
+      "id": "agx005-do-temp-ok",
+      "topicFilter": "LATERAL/DOSuite/DEV0000017/SensorReadings/v1",
+      "sensorIdTemplate": "agx005.do.temp.ok",
+      "region": { "offset": 85, "length": 1 },
+      "extract": { "type": "json", "pointer": "/data/wDOTemp" },
+      "normalize": { "mode": "band", "min": 60, "max": 85 }
+    },
+    {
+      "id": "agx005-do-watch",
+      "topicFilter": "LATERAL/DOSuite/DEV0000017/SensorReadings/v1",
+      "sensorIdTemplate": "agx005.do.watch",
+      "region": { "offset": 86, "length": 1 },
+      "extract": { "type": "json", "pointer": "/data/wDO" },
+      "normalize": { "mode": "band", "min": 3, "max": 5 }
+    },
+    {
+      "id": "agx005-temp-watch",
+      "topicFilter": "LATERAL/DOSuite/DEV0000017/SensorReadings/v1",
+      "sensorIdTemplate": "agx005.do.temp.watch",
+      "region": { "offset": 87, "length": 1 },
+      "extract": { "type": "json", "pointer": "/data/wDOTemp" },
+      "normalize": { "mode": "band", "min": 85, "max": 95 }
+    },
+
+    {
+      "_comment": "AGX026 — Indoor Grow House VPD Climate Management (input region [184,188)).  Vapor-pressure-deficit climate machine — temp + humidity gates produce the 4-bit input.",
+      "id": "agx026-temp-ok",
+      "topicFilter": "LATERAL/AmbientSuite/DEV0000009/SensorReadings/v1",
+      "sensorIdTemplate": "agx026.temp.ok",
+      "region": { "offset": 184, "length": 1 },
+      "extract": { "type": "json", "pointer": "/data/aTemp" },
+      "normalize": { "mode": "band", "min": 65, "max": 85 }
+    },
+    {
+      "id": "agx026-humidity-ok",
+      "topicFilter": "LATERAL/AmbientSuite/DEV0000009/SensorReadings/v1",
+      "sensorIdTemplate": "agx026.humidity.ok",
+      "region": { "offset": 185, "length": 1 },
+      "extract": { "type": "json", "pointer": "/data/aHum" },
+      "normalize": { "mode": "band", "min": 40, "max": 70 }
+    },
+    {
+      "id": "agx026-temp-watch",
+      "topicFilter": "LATERAL/AmbientSuite/DEV0000009/SensorReadings/v1",
+      "sensorIdTemplate": "agx026.temp.watch",
+      "region": { "offset": 186, "length": 1 },
+      "extract": { "type": "json", "pointer": "/data/aTemp" },
+      "normalize": { "mode": "band", "min": 85, "max": 95 }
+    },
+    {
+      "id": "agx026-humidity-watch",
+      "topicFilter": "LATERAL/AmbientSuite/DEV0000009/SensorReadings/v1",
+      "sensorIdTemplate": "agx026.humidity.watch",
+      "region": { "offset": 187, "length": 1 },
+      "extract": { "type": "json", "pointer": "/data/aHum" },
+      "normalize": { "mode": "band", "min": 20, "max": 40 }
+    },
+
+    {
+      "_comment": "AGX032 — Indoor Grow House CO2 Enrichment Safety (input region [228,232)).  Life-safety adjacent — CO2 levels gate the 4-bit input.  Band-1 is the canonical enrichment window, band-2 the watch window, band-3 the danger threshold.",
+      "id": "agx032-co2-ok",
+      "topicFilter": "LATERAL/AmbientSuite/DEV0000009/SensorReadings/v1",
+      "sensorIdTemplate": "agx032.co2.ok",
+      "region": { "offset": 228, "length": 1 },
+      "extract": { "type": "json", "pointer": "/data/aCO2" },
+      "normalize": { "mode": "band", "min": 600, "max": 1500 }
+    },
+    {
+      "id": "agx032-co2-watch",
+      "topicFilter": "LATERAL/AmbientSuite/DEV0000009/SensorReadings/v1",
+      "sensorIdTemplate": "agx032.co2.watch",
+      "region": { "offset": 229, "length": 1 },
+      "extract": { "type": "json", "pointer": "/data/aCO2" },
+      "normalize": { "mode": "band", "min": 1500, "max": 3000 }
+    },
+    {
+      "id": "agx032-co2-danger",
+      "topicFilter": "LATERAL/AmbientSuite/DEV0000009/SensorReadings/v1",
+      "sensorIdTemplate": "agx032.co2.danger",
+      "region": { "offset": 230, "length": 1 },
+      "extract": { "type": "json", "pointer": "/data/aCO2" },
+      "normalize": { "mode": "band", "min": 3000, "max": 5000 }
+    },
+    {
+      "id": "agx032-temp-ok",
+      "topicFilter": "LATERAL/AmbientSuite/DEV0000009/SensorReadings/v1",
+      "sensorIdTemplate": "agx032.temp.ok",
+      "region": { "offset": 231, "length": 1 },
+      "extract": { "type": "json", "pointer": "/data/aTemp" },
+      "normalize": { "mode": "band", "min": 65, "max": 85 }
+    }
+  ]
+}
