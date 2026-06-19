@@ -38,6 +38,48 @@ class Routes(
     sys.env.getOrElse("VECTOR_DIMENSION", "7680").toIntOption.getOrElse(7680))
   private val sampler = new AtomicReference[Option[RealitySampler]](None)
 
+  private def stableNumber(value: Double): Json =
+    if (value.isWhole && value >= Int.MinValue && value <= Int.MaxValue) Json.fromInt(value.toInt)
+    else Json.fromDoubleOrNull(value)
+
+  private def stableNumberArray(value: Json): Json =
+    Json.arr(value.asArray.getOrElse(Vector.empty).map { item =>
+      item.asNumber.map(n => stableNumber(n.toDouble)).getOrElse(item)
+    }: _*)
+
+  private def activeVectorJson(vector: RealityVector): Json = {
+    val src = vector.toJson.hcursor
+    val elements = src.downField("elements").as[Vector[Json]].getOrElse(Vector.empty).map { element =>
+      val c = element.hcursor
+      val fields = Vector(
+        c.downField("comparatorType").as[String].toOption.map(v => "comparatorType" -> Json.fromString(v)),
+        c.downField("threshold").as[Double].toOption.map(v => "threshold" -> stableNumber(v)),
+        c.downField("value").as[Double].toOption.map(v => "value" -> stableNumber(v))
+      ).flatten
+      Json.obj(fields: _*)
+    }
+    val outputs = src.downField("outputVectors").as[Vector[Json]].getOrElse(Vector.empty).map { output =>
+      val c = output.hcursor
+      Json.obj(
+        "id"       -> c.downField("id").focus.getOrElse(Json.fromString("")),
+        "metadata" -> c.downField("metadata").focus.getOrElse(Json.obj()),
+        "vector"   -> stableNumberArray(c.downField("vector").focus.getOrElse(Json.arr()))
+      )
+    }
+    Json.obj(
+      "elements"        -> Json.arr(elements: _*),
+      "id"              -> src.downField("id").focus.getOrElse(Json.fromString("")),
+      "isActive"        -> src.downField("isActive").focus.getOrElse(Json.fromBoolean(false)),
+      "isInitial"       -> src.downField("isInitial").focus.getOrElse(Json.fromBoolean(false)),
+      "matchAlgorithm"  -> src.downField("matchAlgorithm").focus.getOrElse(Json.fromString("gte")),
+      "metadata"        -> src.downField("metadata").focus.getOrElse(Json.obj()),
+      "nextVectorIds"   -> src.downField("nextVectorIds").focus.getOrElse(Json.arr()),
+      "outputVectors"   -> Json.arr(outputs: _*),
+      "state"           -> src.downField("state").focus.getOrElse(Json.fromString("inactive")),
+      "wasJustMatched"  -> src.downField("wasJustMatched").focus.getOrElse(Json.fromBoolean(false))
+    )
+  }
+
   // JSON file cache: path -> (lastModified, rawJson).
   // Invalidated automatically when the file's mtime changes.
   private val jsonFileCache = TrieMap.empty[String, (Long, String)]
@@ -443,7 +485,7 @@ class Routes(
       pathPrefix("api") {
         concat(
         // Health
-        path("health") { get { complete(Json.obj("status" -> Json.fromString("healthy"), "timestamp" -> Json.fromLong(System.currentTimeMillis()), "version" -> Json.fromString("1.0.0"))) } },
+        path("health") { get { complete(Json.obj("status" -> Json.fromString("healthy"))) } },
 
         // Prometheus metrics — text/plain exposition format on /api/metrics
         path("metrics") { get {
@@ -594,8 +636,18 @@ class Routes(
             path("reset") { post { engine.resetAllSequences(); complete(Json.obj("success" -> Json.fromBoolean(true))) } },
             path("stats") { get { complete(Json.obj("stats" -> engine.getStats)) } },
             path("active") { get {
-              val active = engine.getAllActiveVectors
-              complete(Json.obj("activeVectors" -> Json.fromFields(active.view.mapValues(vs => Json.arr(vs.map(_.toJson): _*)).toSeq)))
+              val rows = engine.getAllMachines.sortBy(_.id).flatMap { machine =>
+                machine.getAllSequences.sortBy(_.id).flatMap { sequence =>
+                  sequence.getActiveVectors.sortBy(_.id).map { vector =>
+                    Json.obj(
+                      "machineId"  -> Json.fromString(machine.id),
+                      "sequenceId" -> Json.fromString(sequence.id),
+                      "vector"     -> activeVectorJson(vector)
+                    )
+                  }
+                }
+              }
+              complete(Json.obj("activeVectors" -> Json.arr(rows: _*)))
             } },
             path("history") { get { parameter("limit".as[Int].?) { limit =>
               complete(Json.obj("history" -> engine.getHistory(limit).asJson))

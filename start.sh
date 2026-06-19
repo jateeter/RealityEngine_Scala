@@ -18,6 +18,9 @@ QDRANT_URL="${QDRANT_URL:-http://localhost:4333}"
 LOCAL_AI_API_URL="${LOCAL_AI_API_URL:-http://localhost:4000}"
 LOCAL_AI_MACHINES_DIR="${LOCAL_AI_MACHINES_DIR:-../localAIStack/data/machines}"
 REALITY_ENGINE_URL="${REALITY_ENGINE_URL:-http://localhost:${REALITY_ENGINE_PORT}}"
+# PE integration registry — HealthKit / CareKit ingest routing.
+# localAIStack personal-health domain: ../localAIStack/config/pe-integrations.json
+INTEGRATIONS_CONFIG="${INTEGRATIONS_CONFIG:-}"
 HOST="${HOST:-0.0.0.0}"
 INSTANCE_ID="${INSTANCE_ID:-}"
 _INST="${INSTANCE_ID:+-${INSTANCE_ID}}"
@@ -117,6 +120,7 @@ REALITY_ENGINE_URL="$REALITY_ENGINE_URL" \
 VECTOR_DIMENSION="$VECTOR_DIMENSION" \
 LOCAL_AI_API_URL="$LOCAL_AI_API_URL" \
 LOCAL_AI_MACHINES_DIR="$LOCAL_AI_MACHINES_DIR" \
+INTEGRATIONS_CONFIG="$INTEGRATIONS_CONFIG" \
   nohup java -jar "$PE_JAR" > "$PE_LOG_FILE" 2>&1 &
 echo "$!" > "$PE_PID_FILE"
 
@@ -134,3 +138,4 @@ Scala RealityEngine started
   Vector dimension:  ${VECTOR_DIMENSION}
   Qdrant:            ${QDRANT_URL}
 EOF
+[ -n "$INTEGRATIONS_CONFIG" ] && echo "  Integrations:      ${INTEGRATIONS_CONFIG}"

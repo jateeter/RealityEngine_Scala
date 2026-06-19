@@ -1,7 +1,7 @@
 package com.realityengine.perception.api
 
 import akka.actor.{ActorRef, ActorSystem}
-import akka.http.scaladsl.model.StatusCodes
+import akka.http.scaladsl.model.{ContentTypes, HttpEntity, StatusCodes}
 import akka.http.scaladsl.server.Directives._
 import akka.http.scaladsl.server.Route
 import akka.stream.Materializer
@@ -57,6 +57,70 @@ class PerceptionRoutes(
   import com.realityengine.perception.mqtt.{MqttBridge, MqttMappingRule}
   private val mqttBridgeRef    = new AtomicReference[Option[MqttBridge]](None)
   private val mqttBrokerUrlRef = new AtomicReference[Option[String]](None)
+
+  private def bootstrapSummaryJson(created: Int, errors: Vector[String], machinesSeen: Int, skipped: Int): String = {
+    val errorsJson = errors.asJson.noSpaces
+    s"""{"created":$created,"errors":$errorsJson,"machinesSeen":$machinesSeen,"skipped":$skipped,"success":true}"""
+  }
+
+  private def bootstrapSourcesFromMachines(machines: Vector[Json]): (Int, Int) = {
+    val machineIds = machines.flatMap(_.hcursor.get[String]("id").toOption).filter(_.nonEmpty).toSet
+
+    engine.getSources.collect { case t: TestSourceConfig => (t.machineId, t.id) }
+      .groupBy(_._1)
+      .foreach { case (_, entries) =>
+        if (entries.length > 1) entries.foreach { case (_, id) => engine.removeSource(id) }
+      }
+
+    engine.getSources.collect {
+      case s: SensorSourceConfig if machineIds.contains(s.sensorId) && s.name.startsWith("Machine:") => s.id
+    }.foreach(engine.removeSource)
+
+    var created = 0
+    var skipped = 0
+    var existingMachineIds = engine.getSources.collect { case t: TestSourceConfig => t.machineId }.toSet
+
+    machines.foreach { m =>
+      val c = m.hcursor
+      val machineId = c.get[String]("id").getOrElse("")
+      val machineName = c.get[String]("name").getOrElse(machineId)
+      val offsetOpt = c.downField("perceptualMapping").downField("input").get[Int]("offset").toOption
+      val lengthOpt = c.downField("perceptualMapping").downField("input").get[Int]("length").toOption
+      val inputSeqs = c.downField("metadata").downField("inputSequences")
+        .as[Vector[Json]].getOrElse(Vector.empty)
+
+      val segments = inputSeqs.flatMap { seq =>
+        val seqName = seq.hcursor.get[String]("name").getOrElse("Test sequence")
+        val vectors = seq.hcursor.downField("vectors").as[Vector[Vector[Double]]].getOrElse(Vector.empty)
+        if (vectors.nonEmpty) Some((seqName, vectors, seq.hcursor.get[Boolean]("active").getOrElse(false))) else None
+      }
+      val inputs = segments.flatMap(_._2)
+
+      (machineId.nonEmpty, offsetOpt, lengthOpt, existingMachineIds.contains(machineId), inputs.nonEmpty) match {
+        case (true, Some(offset), Some(length), false, true) =>
+          val label =
+            if (segments.length == 1) segments.head._1
+            else s"${segments.length} sequences"
+          engine.addSource(TestSourceConfig(
+            id           = s"test-$machineId",
+            name         = s"$machineName / $label",
+            region       = Region(offset, length),
+            active       = segments.exists(_._3),
+            machineId    = machineId,
+            machineName  = machineName,
+            sequenceName = label,
+            inputs       = inputs,
+            loop         = true,
+          ))
+          existingMachineIds = existingMachineIds + machineId
+          created += 1
+        case _ =>
+          skipped += 1
+      }
+    }
+
+    (created, skipped)
+  }
 
   private def mqttIngest(sensorId: String, offset: Int, length: Int,
                           values: Vector[Double], ttlMs: Long,
@@ -318,7 +382,7 @@ class PerceptionRoutes(
 
     // ── Health ──────────────────────────────────────────────────────────────
     path("api" / "health") {
-      get { complete(Json.obj("status" -> "healthy".asJson, "timestamp" -> System.currentTimeMillis().asJson)) }
+      get { complete(Json.obj("status" -> "healthy".asJson)) }
     },
 
     // ── State ───────────────────────────────────────────────────────────────
@@ -1161,31 +1225,10 @@ class PerceptionRoutes(
               .flatMap(b => io.circe.parser.parse(b).toOption)
               .flatMap(_.hcursor.downField("machines").as[Vector[Json]].toOption)
               .getOrElse(Vector.empty)
-            val created = machines.flatMap { m =>
-              val name     = m.hcursor.get[String]("name").getOrElse("unknown")
-              val machineId = m.hcursor.get[String]("id").getOrElse(s"machine-${System.currentTimeMillis()}")
-              engine.findSensorBySensorId(machineId) match {
-                case Some(_) => None
-                case None =>
-                  val src = engine.addSource(SensorSourceConfig(
-                    id          = machineId,
-                    name        = s"Machine: $name",
-                    region      = com.realityengine.perception.models.Region(0, 1),
-                    active      = true,
-                    sensorId    = machineId,
-                    lastValue   = Vector.empty,
-                    lastUpdated = None,
-                    ttlMs       = 30000L
-                  ))
-                  Some(src.asJson)
-              }
-            }
+            val (created, skipped) = bootstrapSourcesFromMachines(machines)
             onComplete(saveAndBroadcast()) { _ =>
-              complete(Json.obj(
-                "success" -> true.asJson,
-                "created" -> created.length.asJson,
-                "sources" -> Json.arr(created: _*)
-              ))
+              val body = bootstrapSummaryJson(created, Vector.empty, machines.length, skipped)
+              complete(HttpEntity(ContentTypes.`application/json`, body))
             }
           case resp =>
             complete(StatusCodes.BadGateway ->
