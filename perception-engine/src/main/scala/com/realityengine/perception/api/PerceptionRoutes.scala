@@ -1,7 +1,7 @@
 package com.realityengine.perception.api
 
 import akka.actor.{ActorRef, ActorSystem}
-import akka.http.scaladsl.model.StatusCodes
+import akka.http.scaladsl.model.{ContentTypes, HttpEntity, StatusCodes}
 import akka.http.scaladsl.server.Directives._
 import akka.http.scaladsl.server.Route
 import akka.stream.Materializer
@@ -52,11 +52,75 @@ class PerceptionRoutes(
   private val pushHistoryLimit = sys.env.get("PUSH_HISTORY_LIMIT").flatMap(_.toIntOption).getOrElse(100)
   private val pushHistory      = new AtomicReference[Vector[Json]](Vector.empty)
 
-  // MQTT bridge — nil when not active; set via POST /api/mqtt/enable.
+  // MQTT bridge — boots from env vars at construction; also startable via POST /api/mqtt/enable.
   // mqttBrokerUrlRef is kept separately for the status endpoint display.
   import com.realityengine.perception.mqtt.{MqttBridge, MqttMappingRule}
   private val mqttBridgeRef    = new AtomicReference[Option[MqttBridge]](None)
   private val mqttBrokerUrlRef = new AtomicReference[Option[String]](None)
+
+  private def bootstrapSummaryJson(created: Int, errors: Vector[String], machinesSeen: Int, skipped: Int): String = {
+    val errorsJson = errors.asJson.noSpaces
+    s"""{"created":$created,"errors":$errorsJson,"machinesSeen":$machinesSeen,"skipped":$skipped,"success":true}"""
+  }
+
+  private def bootstrapSourcesFromMachines(machines: Vector[Json]): (Int, Int) = {
+    val machineIds = machines.flatMap(_.hcursor.get[String]("id").toOption).filter(_.nonEmpty).toSet
+
+    engine.getSources.collect { case t: TestSourceConfig => (t.machineId, t.id) }
+      .groupBy(_._1)
+      .foreach { case (_, entries) =>
+        if (entries.length > 1) entries.foreach { case (_, id) => engine.removeSource(id) }
+      }
+
+    engine.getSources.collect {
+      case s: SensorSourceConfig if machineIds.contains(s.sensorId) && s.name.startsWith("Machine:") => s.id
+    }.foreach(engine.removeSource)
+
+    var created = 0
+    var skipped = 0
+    var existingMachineIds = engine.getSources.collect { case t: TestSourceConfig => t.machineId }.toSet
+
+    machines.foreach { m =>
+      val c = m.hcursor
+      val machineId = c.get[String]("id").getOrElse("")
+      val machineName = c.get[String]("name").getOrElse(machineId)
+      val offsetOpt = c.downField("perceptualMapping").downField("input").get[Int]("offset").toOption
+      val lengthOpt = c.downField("perceptualMapping").downField("input").get[Int]("length").toOption
+      val inputSeqs = c.downField("metadata").downField("inputSequences")
+        .as[Vector[Json]].getOrElse(Vector.empty)
+
+      val segments = inputSeqs.flatMap { seq =>
+        val seqName = seq.hcursor.get[String]("name").getOrElse("Test sequence")
+        val vectors = seq.hcursor.downField("vectors").as[Vector[Vector[Double]]].getOrElse(Vector.empty)
+        if (vectors.nonEmpty) Some((seqName, vectors, seq.hcursor.get[Boolean]("active").getOrElse(false))) else None
+      }
+      val inputs = segments.flatMap(_._2)
+
+      (machineId.nonEmpty, offsetOpt, lengthOpt, existingMachineIds.contains(machineId), inputs.nonEmpty) match {
+        case (true, Some(offset), Some(length), false, true) =>
+          val label =
+            if (segments.length == 1) segments.head._1
+            else s"${segments.length} sequences"
+          engine.addSource(TestSourceConfig(
+            id           = s"test-$machineId",
+            name         = s"$machineName / $label",
+            region       = Region(offset, length),
+            active       = segments.exists(_._3),
+            machineId    = machineId,
+            machineName  = machineName,
+            sequenceName = label,
+            inputs       = inputs,
+            loop         = true,
+          ))
+          existingMachineIds = existingMachineIds + machineId
+          created += 1
+        case _ =>
+          skipped += 1
+      }
+    }
+
+    (created, skipped)
+  }
 
   private def mqttIngest(sensorId: String, offset: Int, length: Int,
                           values: Vector[Double], ttlMs: Long,
@@ -75,11 +139,31 @@ class PerceptionRoutes(
     engine.updateSensorValue(sensorId, values)
     broadcast(Json.obj(
       "type"      -> "mqtt-ingest".asJson,
-      "sensorId"  -> sensorId.asJson,
-      "topic"     -> topic.asJson,
-      "mappingId" -> mappingId.asJson,
+      "payload"   -> Json.obj(
+        "sensorId"  -> sensorId.asJson,
+        "mappingId" -> mappingId.asJson,
+        "topic"     -> topic.asJson,
+        "offset"    -> offset.asJson,
+        "length"    -> length.asJson,
+        "values"    -> values.asJson,
+        "ttlMs"     -> ttlMs.asJson,
+        "timestamp" -> System.currentTimeMillis().asJson,
+      ),
     ))
     broadcastState()
+  }
+
+  // Env-driven MQTT boot — mirrors RealityEngine_Manager and RealityEngine_CPP startup behaviour.
+  MqttBridge.fromEnvironment().foreach { cfg =>
+    val bridge = new MqttBridge(cfg.brokerUrl, cfg.clientId, cfg.rules, mqttIngest, () => doPush())
+    Try(bridge.start()) match {
+      case scala.util.Failure(e) =>
+        System.err.println(s"[mqtt-bridge] failed to start at boot: ${e.getMessage}")
+      case scala.util.Success(_) =>
+        mqttBridgeRef.set(Some(bridge))
+        mqttBrokerUrlRef.set(Some(cfg.brokerUrl))
+        println(s"[mqtt-bridge] started — broker=${cfg.brokerUrl} mappings=${cfg.rules.size}")
+    }
   }
 
   // SSE broadcast hub — mirrors /ws but as Server-Sent Events for /api/events
@@ -108,6 +192,30 @@ class PerceptionRoutes(
   private val ckDefaultMappingId = sys.env.getOrElse("CAREKIT_DEFAULT_SOURCE_MAPPING_ID", "carekit-task")
   private val localAiApiUrl      = sys.env.getOrElse("LOCAL_AI_API_URL",  "http://localhost:4000")
   private val localAiMachinesDir = sys.env.get("LOCAL_AI_MACHINES_DIR")
+
+  // Bundled yuma-agriculture demo mapping registry — mirrors
+  // RealityEngine_CPP/config/mqtt-mappings.yuma-agriculture.json.
+  // Uses band normalization so each cell emits 1.0 (in range) or 0.0 (out of
+  // range), producing the 4-bit status pattern the agriculture machines expect.
+  private val mqttExampleMappings: Json = io.circe.parser.parse("""
+    {"version":"1.0","defaults":{"ttlMs":60000,"qos":0,"acceptRetained":true,"pushMode":"debounced","debounceMs":500},"mappings":[
+      {"id":"agx001-ph-ok",        "topicFilter":"LATERAL/WaterSuite/DEV0000001/SensorReadings/v1",     "sensorIdTemplate":"agx001.water.ph.ok",        "region":{"offset":40, "length":1},"extract":{"type":"json","pointer":"/data/wpH"},        "normalize":{"mode":"band","min":6.5,  "max":8.5 }},
+      {"id":"agx001-ec-ok",        "topicFilter":"LATERAL/WaterSuite/DEV0000001/SensorReadings/v1",     "sensorIdTemplate":"agx001.water.ec.ok",        "region":{"offset":41, "length":1},"extract":{"type":"json","pointer":"/data/wEC"},         "normalize":{"mode":"band","min":0.5,  "max":3.0 }},
+      {"id":"agx001-orp-ok",       "topicFilter":"LATERAL/WaterSuite/DEV0000001/SensorReadings/v1",     "sensorIdTemplate":"agx001.water.orp.ok",       "region":{"offset":42, "length":1},"extract":{"type":"json","pointer":"/data/wORP"},        "normalize":{"mode":"band","min":200,  "max":600 }},
+      {"id":"agx001-turbidity-ok", "topicFilter":"LATERAL/WaterSuite/DEV0000001/SensorReadings/v1",     "sensorIdTemplate":"agx001.water.turbidity.ok", "region":{"offset":43, "length":1},"extract":{"type":"json","pointer":"/data/wTurbidity"}, "normalize":{"mode":"band","min":0,    "max":100 }},
+      {"id":"agx005-do-ok",        "topicFilter":"LATERAL/DOSuite/DEV0000017/SensorReadings/v1",        "sensorIdTemplate":"agx005.do.level.ok",        "region":{"offset":84, "length":1},"extract":{"type":"json","pointer":"/data/wDO"},         "normalize":{"mode":"band","min":5,    "max":25  }},
+      {"id":"agx005-do-temp-ok",   "topicFilter":"LATERAL/DOSuite/DEV0000017/SensorReadings/v1",        "sensorIdTemplate":"agx005.do.temp.ok",         "region":{"offset":85, "length":1},"extract":{"type":"json","pointer":"/data/wDOTemp"},     "normalize":{"mode":"band","min":60,   "max":85  }},
+      {"id":"agx005-do-watch",     "topicFilter":"LATERAL/DOSuite/DEV0000017/SensorReadings/v1",        "sensorIdTemplate":"agx005.do.watch",           "region":{"offset":86, "length":1},"extract":{"type":"json","pointer":"/data/wDO"},         "normalize":{"mode":"band","min":3,    "max":5   }},
+      {"id":"agx005-temp-watch",   "topicFilter":"LATERAL/DOSuite/DEV0000017/SensorReadings/v1",        "sensorIdTemplate":"agx005.do.temp.watch",      "region":{"offset":87, "length":1},"extract":{"type":"json","pointer":"/data/wDOTemp"},     "normalize":{"mode":"band","min":85,   "max":95  }},
+      {"id":"agx026-temp-ok",      "topicFilter":"LATERAL/AmbientSuite/DEV0000009/SensorReadings/v1",   "sensorIdTemplate":"agx026.temp.ok",            "region":{"offset":184,"length":1},"extract":{"type":"json","pointer":"/data/aTemp"},       "normalize":{"mode":"band","min":65,   "max":85  }},
+      {"id":"agx026-humidity-ok",  "topicFilter":"LATERAL/AmbientSuite/DEV0000009/SensorReadings/v1",   "sensorIdTemplate":"agx026.humidity.ok",        "region":{"offset":185,"length":1},"extract":{"type":"json","pointer":"/data/aHum"},        "normalize":{"mode":"band","min":40,   "max":70  }},
+      {"id":"agx026-temp-watch",   "topicFilter":"LATERAL/AmbientSuite/DEV0000009/SensorReadings/v1",   "sensorIdTemplate":"agx026.temp.watch",         "region":{"offset":186,"length":1},"extract":{"type":"json","pointer":"/data/aTemp"},       "normalize":{"mode":"band","min":85,   "max":95  }},
+      {"id":"agx026-humidity-watch","topicFilter":"LATERAL/AmbientSuite/DEV0000009/SensorReadings/v1",  "sensorIdTemplate":"agx026.humidity.watch",     "region":{"offset":187,"length":1},"extract":{"type":"json","pointer":"/data/aHum"},        "normalize":{"mode":"band","min":20,   "max":40  }},
+      {"id":"agx032-co2-ok",       "topicFilter":"LATERAL/AmbientSuite/DEV0000009/SensorReadings/v1",   "sensorIdTemplate":"agx032.co2.ok",             "region":{"offset":228,"length":1},"extract":{"type":"json","pointer":"/data/aCO2"},        "normalize":{"mode":"band","min":600,  "max":1500}},
+      {"id":"agx032-co2-watch",    "topicFilter":"LATERAL/AmbientSuite/DEV0000009/SensorReadings/v1",   "sensorIdTemplate":"agx032.co2.watch",          "region":{"offset":229,"length":1},"extract":{"type":"json","pointer":"/data/aCO2"},        "normalize":{"mode":"band","min":1500, "max":3000}},
+      {"id":"agx032-co2-danger",   "topicFilter":"LATERAL/AmbientSuite/DEV0000009/SensorReadings/v1",   "sensorIdTemplate":"agx032.co2.danger",         "region":{"offset":230,"length":1},"extract":{"type":"json","pointer":"/data/aCO2"},        "normalize":{"mode":"band","min":3000, "max":5000}},
+      {"id":"agx032-temp-ok",      "topicFilter":"LATERAL/AmbientSuite/DEV0000009/SensorReadings/v1",   "sensorIdTemplate":"agx032.temp.ok",            "region":{"offset":231,"length":1},"extract":{"type":"json","pointer":"/data/aTemp"},       "normalize":{"mode":"band","min":65,   "max":85  }}
+    ]}""").getOrElse(Json.obj())
 
   // ── Source mapping registry ───────────────────────────────────────────────
 
@@ -274,7 +382,7 @@ class PerceptionRoutes(
 
     // ── Health ──────────────────────────────────────────────────────────────
     path("api" / "health") {
-      get { complete(Json.obj("status" -> "healthy".asJson, "timestamp" -> System.currentTimeMillis().asJson)) }
+      get { complete(Json.obj("status" -> "healthy".asJson)) }
     },
 
     // ── State ───────────────────────────────────────────────────────────────
@@ -997,11 +1105,12 @@ class PerceptionRoutes(
               "clientId"  -> b.clientId.asJson,
               "mappings"  -> b.rules.length.asJson,
               "bridge"    -> Json.obj(
-                "messagesReceived"  -> s.messagesReceived.get().asJson,
-                "messagesMapped"    -> s.messagesMapped.get().asJson,
-                "messagesRejected"  -> s.messagesRejected.get().asJson,
-                "messagesUnmatched" -> s.messagesUnmatched.get().asJson,
-                "pushesTriggered"   -> s.pushesTriggered.get().asJson,
+                "messagesReceived"        -> s.messagesReceived.get().asJson,
+                "messagesMapped"          -> s.messagesMapped.get().asJson,
+                "messagesRejected"        -> s.messagesRejected.get().asJson,
+                "messagesUnmatched"       -> s.messagesUnmatched.get().asJson,
+                "messagesRetainedDropped" -> s.messagesRetainedDropped.get().asJson,
+                "pushesTriggered"         -> s.pushesTriggered.get().asJson,
               )
             )
         })
@@ -1013,10 +1122,12 @@ class PerceptionRoutes(
           val bridge = mqttBridgeRef.get()
           complete(bridge match {
             case None    => Json.obj("enabled" -> false.asJson, "mappings" -> Json.arr())
-            case Some(b) => Json.obj(
-              "enabled"  -> true.asJson,
-              "mappings" -> b.rules.length.asJson
-            )
+            case Some(b) =>
+              val body = b.toJson.asObject.map(_.toMap).getOrElse(Map.empty)
+              Json.obj(
+                "enabled"  -> true.asJson,
+                "mappings" -> body.getOrElse("mappings", Json.arr()),
+              )
           })
         },
         put { entity(as[Json]) { body =>
@@ -1094,6 +1205,15 @@ class PerceptionRoutes(
         complete(Json.obj("success" -> true.asJson, "enabled" -> false.asJson))
       }
     },
+    // GET /api/mqtt/example — bundled yuma-agriculture demo mapping registry.
+    // Served inline so the PE visualizer's MqttConfigModal can offer a
+    // "Load example" button without requiring the host filesystem to have
+    // the CPP config files present.  Mirrors mqtt-mappings.yuma-agriculture.json.
+    path("api" / "mqtt" / "example") {
+      get {
+        complete(mqttExampleMappings)
+      }
+    },
 
     // ── Bootstrap sources from Reality Engine machines ────────────────────────
     path("api" / "sources" / "bootstrap-from-machines") {
@@ -1105,31 +1225,10 @@ class PerceptionRoutes(
               .flatMap(b => io.circe.parser.parse(b).toOption)
               .flatMap(_.hcursor.downField("machines").as[Vector[Json]].toOption)
               .getOrElse(Vector.empty)
-            val created = machines.flatMap { m =>
-              val name     = m.hcursor.get[String]("name").getOrElse("unknown")
-              val machineId = m.hcursor.get[String]("id").getOrElse(s"machine-${System.currentTimeMillis()}")
-              engine.findSensorBySensorId(machineId) match {
-                case Some(_) => None
-                case None =>
-                  val src = engine.addSource(SensorSourceConfig(
-                    id          = machineId,
-                    name        = s"Machine: $name",
-                    region      = com.realityengine.perception.models.Region(0, 1),
-                    active      = true,
-                    sensorId    = machineId,
-                    lastValue   = Vector.empty,
-                    lastUpdated = None,
-                    ttlMs       = 30000L
-                  ))
-                  Some(src.asJson)
-              }
-            }
+            val (created, skipped) = bootstrapSourcesFromMachines(machines)
             onComplete(saveAndBroadcast()) { _ =>
-              complete(Json.obj(
-                "success" -> true.asJson,
-                "created" -> created.length.asJson,
-                "sources" -> Json.arr(created: _*)
-              ))
+              val body = bootstrapSummaryJson(created, Vector.empty, machines.length, skipped)
+              complete(HttpEntity(ContentTypes.`application/json`, body))
             }
           case resp =>
             complete(StatusCodes.BadGateway ->
