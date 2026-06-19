@@ -180,8 +180,15 @@ class PerceptionRoutes(
   private val openAiBaseUrl      = sys.env.getOrElse("OPENAI_BASE_URL",   "https://api.openai.com/v1")
   private val openAiApiKey       = sys.env.get("OPENAI_API_KEY")
   private val openAiModel        = sys.env.getOrElse("OPENAI_MODEL",      "gpt-4o")
-  private val acpEndpointUrl     = sys.env.get("ACP_ENDPOINT_URL")
-  private val acpAgentId         = sys.env.getOrElse("ACP_AGENT_ID",      "openclaw")
+  private val acpEnabled         = sys.env.get("ACP_ENABLED").forall(v => Set("true", "1", "yes").contains(v.toLowerCase))
+  private val acpEndpointUrl     = sys.env.get("OPENCLAW_GATEWAY_URL")
+    .orElse(sys.env.get("ACP_GATEWAY_URL"))
+    .orElse(sys.env.get("ACP_ENDPOINT_URL"))
+  private val acpSessionKey      = sys.env.get("OPENCLAW_ACP_SESSION").orElse(sys.env.get("ACP_SESSION_KEY"))
+  private val acpAgentId         = sys.env.get("ACP_TARGET_AGENT")
+    .orElse(sys.env.get("ACP_AGENT_ID"))
+    .getOrElse("openclaw")
+  private val acpCompletionSourceMappingId = sys.env.getOrElse("ACP_COMPLETION_SOURCE_MAPPING_ID", "acp-openclaw-completion")
   private val hkBridgeToken      = sys.env.get("HEALTHKIT_BRIDGE_TOKEN")
   private val hkBridgeId         = sys.env.getOrElse("HEALTHKIT_BRIDGE_ID", "healthkit-ios-bridge")
   private val hkDefaultMappingId = sys.env.getOrElse("HEALTHKIT_DEFAULT_SOURCE_MAPPING_ID", "healthkit-activity")
@@ -710,10 +717,12 @@ class PerceptionRoutes(
     // ── ACP ──────────────────────────────────────────────────────────────────
     path("api" / "integrations" / "acp" / "status") {
       get { complete(Json.obj(
-        "enabled"     -> acpEndpointUrl.isDefined.asJson,
-        "configured"  -> acpEndpointUrl.isDefined.asJson,
-        "endpointUrl" -> acpEndpointUrl.map(_.asJson).getOrElse(Json.Null),
-        "agentId"     -> acpAgentId.asJson
+        "enabled"                   -> acpEnabled.asJson,
+        "configured"                -> acpEndpointUrl.isDefined.asJson,
+        "endpointUrl"               -> acpEndpointUrl.map(_.asJson).getOrElse(Json.Null),
+        "sessionKey"                -> acpSessionKey.map(_.asJson).getOrElse(Json.Null),
+        "agentId"                   -> acpAgentId.asJson,
+        "completionSourceMappingId" -> acpCompletionSourceMappingId.asJson
       )) }
     },
     path("api" / "integrations" / "acp" / "dispatch") {
@@ -727,6 +736,8 @@ class PerceptionRoutes(
           "agentId"   -> agentId.asJson,
           "timestamp" -> ts.asJson,
           "endpoint"  -> acpEndpointUrl.map(_.asJson).getOrElse(Json.Null),
+          "sessionKey" -> acpSessionKey.map(_.asJson).getOrElse(Json.Null),
+          "completionSourceMappingId" -> body.hcursor.get[String]("sourceMappingId").getOrElse(acpCompletionSourceMappingId).asJson,
           "status"    -> "accepted".asJson,
           "body"      -> body
         )

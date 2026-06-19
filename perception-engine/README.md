@@ -33,3 +33,8 @@ The PE exposes `/api/integrations/healthkit/ingest` and `/api/integrations/carek
 | `CAREKIT_DEFAULT_SOURCE_MAPPING_ID` | `carekit-task` | Default CareKit source mapping |
 | `CAREKIT_BRIDGE_TOKEN` | unset | Shared token for CareKit ingest |
 | `INTEGRATIONS_CONFIG` | `config/integrations.json` | Path to PE source mapping registry |
+| `ACP_ENABLED` | `true` | Enable ACP/OpenClaw adapter metadata in PE status |
+| `ACP_GATEWAY_URL` / `OPENCLAW_GATEWAY_URL` | `ws://127.0.0.1:18789` | OpenClaw gateway URL recorded for ACP handoff |
+| `ACP_SESSION_KEY` / `OPENCLAW_ACP_SESSION` | `agent:main:main` | OpenClaw gateway session key for example ACP handoff |
+| `ACP_TARGET_AGENT` | `openclaw` | Default OpenClaw target agent for ACP handoff |
+| `ACP_COMPLETION_SOURCE_MAPPING_ID` | `acp-openclaw-completion` | Default source mapping for ACP/OpenClaw completion commits |
