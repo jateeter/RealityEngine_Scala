@@ -247,15 +247,54 @@ class PerceptionRoutes(
     tokens.foldLeft(template) { case (t, (k, v)) => t.replace(s"{$k}", v) }
 
   private def ingestCompletion(body: Json): Json = {
-    val sensorId = body.hcursor.get[String]("sensorId").getOrElse("completion_agent")
-    val values   = body.hcursor.downField("values").as[Vector[Double]].getOrElse(Vector(1.0))
+    val agentId = body.hcursor.get[String]("agent").toOption
+      .orElse(body.hcursor.get[String]("agentId").toOption)
+      .getOrElse(acpAgentId)
+
+    // Resolve sensorId: explicit field wins, then sourceMappingId template, then fallback.
+    val smId = body.hcursor.get[String]("sourceMappingId").toOption.filter(_.nonEmpty)
+      .orElse(Some(acpCompletionSourceMappingId))
+    val mapping = smId.flatMap(sourceMappings.get)
+
+    val sensorId = body.hcursor.get[String]("sensorId").toOption.filter(_.nonEmpty).getOrElse {
+      mapping.flatMap(_.hcursor.get[String]("sensorIdTemplate").toOption)
+        .map(tpl => resolveTemplate(tpl, Map("agent" -> agentId)))
+        .getOrElse("completion_agent")
+    }
+
+    val values = body.hcursor.downField("values").as[Vector[Double]].getOrElse(Vector(1.0))
+
+    // Register the sensor source with the correct perceptual-space region on first use.
+    if (engine.findSensorBySensorId(sensorId).isEmpty) {
+      mapping.foreach { m =>
+        for {
+          offset <- m.hcursor.downField("region").get[Int]("offset").toOption
+          length <- m.hcursor.downField("region").get[Int]("length").toOption
+        } {
+          val ttl = m.hcursor.get[Long]("ttlMs").getOrElse(300000L)
+          engine.addSource(com.realityengine.perception.models.SensorSourceConfig(
+            id          = sensorId,
+            name        = m.hcursor.get[String]("name").getOrElse(s"acp:$sensorId"),
+            region      = com.realityengine.perception.models.Region(offset, length),
+            active      = true,
+            sensorId    = sensorId,
+            lastValue   = Vector.empty,
+            lastUpdated = None,
+            ttlMs       = ttl,
+          ))
+        }
+      }
+    }
+
     engine.updateSensorValue(sensorId, values)
     val ts     = System.currentTimeMillis()
     val record = Json.obj(
-      "id"        -> s"compl-$ts".asJson,
-      "type"      -> "completion".asJson,
-      "timestamp" -> ts.asJson,
-      "body"      -> body
+      "id"              -> s"compl-$ts".asJson,
+      "type"            -> "completion".asJson,
+      "timestamp"       -> ts.asJson,
+      "sensorId"        -> sensorId.asJson,
+      "sourceMappingId" -> smId.asJson,
+      "body"            -> body
     )
     dispatchLedger.updateAndGet(l => (l :+ record).takeRight(dispatchLedgerLimit))
     broadcast(Json.obj("type" -> "agent.completion.received".asJson, "record" -> record))
