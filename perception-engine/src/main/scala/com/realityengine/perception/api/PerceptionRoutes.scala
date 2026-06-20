@@ -650,7 +650,12 @@ class PerceptionRoutes(
       )) }
     },
     path("api" / "integrations" / "completions") {
-      post { entity(as[Json]) { body => complete(ingestCompletion(body)) } }
+      post { entity(as[Json]) { body =>
+        val result = ingestCompletion(body)
+        onComplete(saveAndBroadcast()) { _ =>
+          complete(result)
+        }
+      } }
     },
 
     // ── Ollama ───────────────────────────────────────────────────────────────
