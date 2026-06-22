@@ -140,6 +140,8 @@ class MqttBridge(
   val rules:      Vector[MqttMappingRule],
   onIngest:       (String, Int, Int, Vector[Double], Long, String, String) => Unit,
   onPushTrigger:  () => Unit,
+  username:       Option[String] = None,
+  password:       Option[String] = None,
 ) {
   val stats:   MqttBridgeStats        = new MqttBridgeStats
   val metrics: Vector[MqttRuleMetrics] = rules.map(_ => new MqttRuleMetrics)
@@ -155,10 +157,16 @@ class MqttBridge(
     new AtomicReference[ScheduledFuture[_]](null.asInstanceOf[ScheduledFuture[_]])
 
   def start(): Unit = {
-    val c    = new MqttClient(brokerUrl, clientId, new MemoryPersistence())
+    // PAHO requires tcp:// or ssl:// — translate the conventional mqtt:// / mqtts:// scheme
+    val pahoBrokerUrl = brokerUrl
+      .replaceFirst("^mqtt://",  "tcp://")
+      .replaceFirst("^mqtts://", "ssl://")
+    val c    = new MqttClient(pahoBrokerUrl, clientId, new MemoryPersistence())
     val opts = new MqttConnectOptions()
     opts.setAutomaticReconnect(true)
     opts.setCleanSession(true)
+    username.foreach(u => opts.setUserName(u))
+    password.foreach(p => opts.setPassword(p.toCharArray))
 
     // Group rules by topicFilter and take the max QoS declared for each filter.
     val filterQos: Map[String, Int] = rules.groupBy(_.topicFilter).map {
@@ -431,7 +439,8 @@ object MqttBridge {
     warnings.toVector
   }
 
-  case class EnvConfig(brokerUrl: String, clientId: String, rules: Vector[MqttMappingRule], allowOverlap: Boolean)
+  case class EnvConfig(brokerUrl: String, clientId: String, rules: Vector[MqttMappingRule], allowOverlap: Boolean,
+                       username: Option[String] = None, password: Option[String] = None)
 
   def fromEnvironment(): Option[EnvConfig] = {
     val env = sys.env
@@ -474,7 +483,9 @@ object MqttBridge {
                 validateOverlaps(rules, allowOverlap).foreach { w =>
                   System.err.println(s"[mqtt-bridge] warning: $w")
                 }
-                Some(EnvConfig(brokerUrl, clientId, rules, allowOverlap))
+                val username = env.get("MQTT_USERNAME").filter(_.nonEmpty)
+                val password = env.get("MQTT_PASSWORD").filter(_.nonEmpty)
+                Some(EnvConfig(brokerUrl, clientId, rules, allowOverlap, username, password))
             }
         }
     }

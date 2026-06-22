@@ -155,7 +155,7 @@ class PerceptionRoutes(
 
   // Env-driven MQTT boot — mirrors RealityEngine_Manager and RealityEngine_CPP startup behaviour.
   MqttBridge.fromEnvironment().foreach { cfg =>
-    val bridge = new MqttBridge(cfg.brokerUrl, cfg.clientId, cfg.rules, mqttIngest, () => doPush())
+    val bridge = new MqttBridge(cfg.brokerUrl, cfg.clientId, cfg.rules, mqttIngest, () => doPush(), cfg.username, cfg.password)
     Try(bridge.start()) match {
       case scala.util.Failure(e) =>
         System.err.println(s"[mqtt-bridge] failed to start at boot: ${e.getMessage}")
@@ -1230,7 +1230,9 @@ class PerceptionRoutes(
             case Right(rules) =>
               mqttBridgeRef.get().foreach(_.stop())
               val clientId = "reality-engine-pe-scala"
-              val bridge = new MqttBridge(brokerUrl, clientId, rules, mqttIngest, () => doPush())
+              val username = body.hcursor.downField("username").as[String].toOption.filter(_.nonEmpty)
+              val password = body.hcursor.downField("password").as[String].toOption.filter(_.nonEmpty)
+              val bridge = new MqttBridge(brokerUrl, clientId, rules, mqttIngest, () => doPush(), username, password)
               Try(bridge.start()) match {
                 case scala.util.Failure(e) =>
                   mqttBridgeRef.set(None)
