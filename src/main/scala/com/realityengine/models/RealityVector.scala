@@ -67,7 +67,7 @@ class RealityVector(
 
       // Inline comparison: returns (matched, score) without allocating a MatchResult per element.
       val (elemMatched, elemScore): (Boolean, Double) = effectiveType match {
-        case ComparatorType.Equals =>
+        case ComparatorType.Equals | ComparatorType.Exact =>
           val m = elem.value == inputValue
           (m, if (m) 1.0 else 0.0)
 

@@ -98,6 +98,8 @@ Default ports: Scala 5001 · CPP 5301 · LSP 5601
 | POST | `/api/machines/:id/checkpoints` | ✓ | ✓ | ✓ |
 | POST | `/api/machines/:machineId/checkpoints/:cpId/restore` | ✓ | ✓ | ✓ |
 | DELETE | `/api/machines/:machineId/checkpoints/:cpId` | ✓ | ✓ | ✓ |
+| GET | `/api/buses/semantic` | ✓ | ✓ | ✓ |
+| GET | `/api/buses/semantic/:id` | ✓ | ✓ | ✓ |
 
 ### Machine Graph
 

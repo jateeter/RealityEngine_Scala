@@ -101,6 +101,23 @@ class Routes(
     }
   }
 
+  private def semanticBusRegistryFile: File = {
+    sys.env.get("SEMANTIC_BUS_REGISTRY").filter(_.nonEmpty).map(new File(_)).getOrElse {
+      val start = new File(machinesDir).getAbsoluteFile
+      val candidates = Iterator.iterate(start)(_.getParentFile).takeWhile(_ != null).take(6).map { dir =>
+        new File(new File(dir, "domains"), "semantic-bus-registry.json")
+      }
+      candidates.find(_.exists()).getOrElse(new File(new File(start.getParentFile, "domains"), "semantic-bus-registry.json"))
+    }
+  }
+
+  private def semanticBusRegistryJson: Try[Json] = Try {
+    val file = semanticBusRegistryFile
+    val parsed = io.circe.parser.parse(readJsonFile(file)).fold(throw _, identity)
+    if (parsed.hcursor.downField("semanticBuses").focus.exists(_.isArray)) parsed
+    else throw new RuntimeException(s"invalid registry shape at ${file.getAbsolutePath}")
+  }
+
   // Staging buffer for chunk-based simulation configure protocol
   private val sequenceBuffer = new AtomicReference[Vector[Vector[Double]]](Vector.empty)
   private val sequenceBufferConfig = new AtomicReference[Option[(RegionMapping, Long, Option[Int])]](None)
@@ -702,6 +719,29 @@ class Routes(
             path("stats") { get {
               val statsJson = sampler.get().map(_.getStats).getOrElse(Json.obj("isRunning" -> Json.fromBoolean(false), "sampleCount" -> Json.fromInt(0), "bufferSize" -> Json.fromInt(0), "strategy" -> Json.fromString("MANUAL")))
               complete(Json.obj("stats" -> statsJson))
+            } }
+          )
+        },
+
+        pathPrefix("buses" / "semantic") {
+          concat(
+            pathEnd { get {
+              semanticBusRegistryJson match {
+                case Success(registry) => complete(registry)
+                case Failure(e)        => complete(StatusCodes.NotFound -> Json.obj("error" -> Json.fromString(s"semantic bus registry unavailable: ${e.getMessage}")))
+              }
+            } },
+            path(Segment) { id => get {
+              semanticBusRegistryJson match {
+                case Failure(e) =>
+                  complete(StatusCodes.NotFound -> Json.obj("error" -> Json.fromString(s"semantic bus registry unavailable: ${e.getMessage}")))
+                case Success(registry) =>
+                  val buses = registry.hcursor.downField("semanticBuses").as[Vector[Json]].getOrElse(Vector.empty)
+                  buses.find(_.hcursor.get[String]("id").contains(id)) match {
+                    case Some(bus) => complete(Json.obj("bus" -> bus))
+                    case None      => complete(StatusCodes.NotFound -> Json.obj("error" -> Json.fromString("Semantic bus not found")))
+                  }
+              }
             } }
           )
         },

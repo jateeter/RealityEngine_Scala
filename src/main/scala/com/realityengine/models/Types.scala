@@ -7,6 +7,7 @@ import io.circe.Json
 sealed trait ComparatorType
 object ComparatorType {
   case object Equals    extends ComparatorType
+  case object Exact     extends ComparatorType
   case object Threshold extends ComparatorType
   case object Pattern   extends ComparatorType
   case object Custom    extends ComparatorType
@@ -14,6 +15,7 @@ object ComparatorType {
 
   def fromString(s: String): ComparatorType = s.toLowerCase match {
     case "equals"    => Equals
+    case "exact"     => Exact
     case "threshold" => Threshold
     case "pattern"   => Pattern
     case "custom"    => Custom
@@ -23,6 +25,7 @@ object ComparatorType {
 
   def serialize(t: ComparatorType): String = t match {
     case Equals    => "equals"
+    case Exact     => "exact"
     case Threshold => "threshold"
     case Pattern   => "pattern"
     case Custom    => "custom"

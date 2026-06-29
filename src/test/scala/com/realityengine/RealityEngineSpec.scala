@@ -51,6 +51,15 @@ class RealityEngineSpec extends AnyFlatSpec with Matchers {
     vector.match_(Vector(0.6)).matched shouldBe false
   }
 
+  it should "match with Exact comparator" in {
+    ComparatorType.fromString("exact") shouldBe ComparatorType.Exact
+    ComparatorType.serialize(ComparatorType.Exact) shouldBe "exact"
+    val vector = new RealityVector(Vector(VectorElement(value = 0.5)), isInitial = true)
+    vector.matchAlgorithm = ComparatorType.Exact
+    vector.match_(Vector(0.5)).matched shouldBe true
+    vector.match_(Vector(0.6)).matched shouldBe false
+  }
+
   it should "match with Threshold comparator within tolerance" in {
     val elem   = VectorElement(value = 0.5, comparatorType = Some(ComparatorType.Threshold), threshold = Some(0.1))
     val vector = new RealityVector(Vector(elem), isInitial = true)

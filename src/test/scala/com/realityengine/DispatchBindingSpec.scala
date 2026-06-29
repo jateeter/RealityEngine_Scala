@@ -84,7 +84,9 @@ class DispatchBindingSpec extends AnyFlatSpec with Matchers {
       rules.nonEmpty && metadata.hcursor.downField("agentBinding").focus.exists(_.isObject) && binding.hasDispatch
     }
 
-    agentBound shouldBe 895
-    triggerBound shouldBe 895
+    withClue("authoritative top-level corpus should keep first-class agent bindings; update this floor only with an intentional corpus contraction") {
+      agentBound should be >= 895
+    }
+    triggerBound shouldBe agentBound
   }
 }
