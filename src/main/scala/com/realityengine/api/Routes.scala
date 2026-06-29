@@ -342,8 +342,8 @@ class Routes(
 
   // ── Prometheus metrics ───────────────────────────────────────────────────
   // Emits text/plain Prometheus exposition format on /api/metrics.  Carries
-  // the runtime="ai" label so a single Grafana dashboard can pivot across
-  // AI / CPP / LSP runtimes without scrape-time relabels.
+  // the runtime="scala" label so a single Grafana dashboard can pivot across
+  // Scala / CPP / LSP runtimes without scrape-time relabels.
   //
   // Metric names match the corpus expected by the existing Grafana
   // dashboards in config/dashboards/ — ces_* and re_runtime_* prefixed.
@@ -351,7 +351,7 @@ class Routes(
   // truth); counter metrics that require per-step instrumentation are
   // emitted as zero for now so dashboards have a series to plot rather
   // than "No Data".
-  private val metricsRuntimeLabel = "ai"
+  private val metricsRuntimeLabel = "scala"
 
   private def renderPrometheusMetrics(): String = {
     val sb = new StringBuilder
