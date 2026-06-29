@@ -102,6 +102,17 @@ class Routes(
     }
   }
 
+  private def collectJsonFiles(dir: File): List[File] = {
+    import java.nio.file.{Files => NioFiles}
+    import scala.jdk.CollectionConverters._
+    NioFiles.walk(dir.toPath)
+      .iterator().asScala
+      .filter(p => p.toFile.isFile && p.toString.toLowerCase.endsWith(".json"))
+      .map(_.toFile)
+      .toList
+      .sortBy(_.getAbsolutePath)
+  }
+
   private def semanticBusRegistryFile: File = {
     sys.env.get("SEMANTIC_BUS_REGISTRY").filter(_.nonEmpty).map(new File(_)).getOrElse {
       val start = new File(machinesDir).getAbsoluteFile
@@ -166,9 +177,7 @@ class Routes(
     // example machines (DC*, AIWellnessCoach, future additions) get loaded
     // without having to edit this list. Sorted for stable, reproducible
     // startup logs.
-    val jsonFiles = Option(dir.listFiles((_, name) => name.toLowerCase.endsWith(".json")))
-      .getOrElse(Array.empty[File])
-      .sortBy(_.getName)
+    val jsonFiles = collectJsonFiles(dir)
 
     if (jsonFiles.isEmpty) {
       println(s"No machine JSON files found in $machinesDir")
