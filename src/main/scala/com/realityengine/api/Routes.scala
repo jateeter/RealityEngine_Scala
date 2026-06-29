@@ -24,6 +24,7 @@ import java.io.File
 import java.nio.file.Files
 import java.util.concurrent.atomic.AtomicReference
 import scala.collection.concurrent.TrieMap
+import akka.http.scaladsl.model.headers.RawHeader
 import com.realityengine.logging.{AuditConfig, AuditLogger}
 
 // Routes — Akka HTTP route definitions mirroring all TypeScript /api/... endpoints.
@@ -492,7 +493,13 @@ class Routes(
     sb.toString
   }
 
-  val routes: Route = AuditLogger.directive(auditCfg) { handleExceptions(exceptionHandler) {
+  private val corsHeaders = List(
+    RawHeader("Access-Control-Allow-Origin", "*"),
+    RawHeader("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS"),
+    RawHeader("Access-Control-Allow-Headers", "Content-Type, Accept, Authorization"),
+  )
+
+  private val innerRoutes: Route = AuditLogger.directive(auditCfg) { handleExceptions(exceptionHandler) {
     concat(
       pathEndOrSingleSlash { get { complete(Json.obj(
         "name"    -> Json.fromString("Reality Engine"),
@@ -1065,4 +1072,8 @@ class Routes(
       }
     )
   } }
+
+  val routes: Route = respondWithHeaders(corsHeaders) {
+    options { complete(StatusCodes.NoContent) } ~ innerRoutes
+  }
 }
