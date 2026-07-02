@@ -135,6 +135,7 @@ class PerceptionRoutes(
         lastValue   = Vector.empty,
         lastUpdated = None,
         ttlMs       = ttlMs,
+        origin      = Some("mqtt"),
       ))
     engine.updateSensorValue(sensorId, values)
     broadcast(Json.obj(
@@ -281,6 +282,7 @@ class PerceptionRoutes(
             lastValue   = Vector.empty,
             lastUpdated = None,
             ttlMs       = ttl,
+            origin      = Some(body.hcursor.get[String]("provider").getOrElse("openclaw")),
           ))
         }
       }
@@ -889,6 +891,7 @@ class PerceptionRoutes(
                         lastValue   = values.take(region.length),
                         lastUpdated = Some(System.currentTimeMillis()),
                         ttlMs       = ttlMs,
+                        origin      = Some("healthkit"),
                       )))
                     }
                     val r = Json.obj(
@@ -1057,7 +1060,8 @@ class PerceptionRoutes(
                 sensorId    = sid,
                 lastValue   = Vector.empty,
                 lastUpdated = None,
-                ttlMs       = 60000L
+                ttlMs       = 60000L,
+                origin      = Some("localai"),
               ))
               Some(src.asJson)
           }

@@ -99,7 +99,7 @@ object PerceptionJsonCodecs {
       "lastValue"   -> src.lastValue.asJson,
       "lastUpdated" -> src.lastUpdated.asJson,
       "ttlMs"       -> src.ttlMs.asJson,
-    )
+    ).deepMerge(src.origin.fold(Json.obj())(o => Json.obj("origin" -> o.asJson)))
 
   implicit val decodeSensorSourceConfig: Decoder[SensorSourceConfig] = (c: HCursor) =>
     for {
@@ -111,7 +111,8 @@ object PerceptionJsonCodecs {
       lastValue   <- c.get[Vector[Double]]("lastValue")
       lastUpdated <- c.get[Option[Long]]("lastUpdated")
       ttlMs       <- c.get[Long]("ttlMs")
-    } yield SensorSourceConfig(id, name, region, active, sensorId, lastValue, lastUpdated, ttlMs)
+      origin      <- c.getOrElse[Option[String]]("origin")(None)
+    } yield SensorSourceConfig(id, name, region, active, sensorId, lastValue, lastUpdated, ttlMs, origin)
 
   // ── SourceConfig (discriminated union) ───────────────────────────────────
 
