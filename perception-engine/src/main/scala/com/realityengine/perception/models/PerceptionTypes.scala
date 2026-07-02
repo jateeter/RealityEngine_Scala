@@ -102,6 +102,9 @@ case class SensorSourceConfig(
   lastValue: Vector[Double],
   lastUpdated: Option[Long],
   ttlMs: Long,
+  // Provenance — which integration feeds this source ("mqtt", "openclaw",
+  // "ollama", "healthkit", "localai", ...). None for manually created sources.
+  origin: Option[String] = None,
 ) extends SourceConfig {
   def withActive(a: Boolean): SourceConfig = copy(active = a)
 }
