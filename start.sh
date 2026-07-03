@@ -67,10 +67,16 @@ die() {
   exit 1
 }
 
+# Health-wait attempt count (1s apart). Configurable so a large machine
+# corpus that takes >45s to load at boot doesn't get the JVM killed before
+# it becomes healthy. Honors RE_HEALTH_ATTEMPTS, then the orchestrator's
+# NATIVE_HEALTH_ATTEMPTS, defaulting to 45. See issue #42.
+RE_HEALTH_ATTEMPTS="${RE_HEALTH_ATTEMPTS:-${NATIVE_HEALTH_ATTEMPTS:-45}}"
+
 wait_for_http() {
   local url="$1" label="$2"
   local n=0
-  while [ "$n" -lt 45 ]; do
+  while [ "$n" -lt "$RE_HEALTH_ATTEMPTS" ]; do
     if curl -sf --max-time 2 "$url" >/dev/null 2>&1; then
       echo "$label ready"
       return 0
