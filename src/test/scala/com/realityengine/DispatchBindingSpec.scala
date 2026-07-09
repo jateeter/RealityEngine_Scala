@@ -25,8 +25,29 @@ class DispatchBindingSpec extends AnyFlatSpec with Matchers {
     try source.mkString finally source.close()
   }
 
+  // Corpus files may live in domain subdirectories — resolve the flat path
+  // first, then fall back to a recursive basename search (filenames are
+  // globally unique across the corpus).
+  private def resolveMachineFile(filename: String): File = {
+    val flat = new File(machineCorpusDir, filename)
+    if (flat.isFile) flat
+    else collectJsonFiles(machineCorpusDir).find(_.getName == filename).getOrElse(flat)
+  }
+
+  private def collectJsonFiles(dir: File): Vector[File] = {
+    import java.nio.file.{Files => NioFiles}
+    import scala.jdk.CollectionConverters._
+    if (!dir.isDirectory) Vector.empty
+    else NioFiles.walk(dir.toPath)
+      .iterator().asScala
+      .filter(p => p.toFile.isFile && p.toString.toLowerCase.endsWith(".json"))
+      .map(_.toFile)
+      .toVector
+      .sortBy(_.getAbsolutePath)
+  }
+
   private def loadMachine(filename: String) =
-    MachineLoader.loadFromJson(read(new File(machineCorpusDir, filename)), Some("machine-" + filename.stripSuffix(".json").toLowerCase.replaceAll("[^a-z0-9]+", "-")))
+    MachineLoader.loadFromJson(read(resolveMachineFile(filename)), Some("machine-" + filename.stripSuffix(".json").toLowerCase.replaceAll("[^a-z0-9]+", "-")))
 
   "DispatchBinding" should "prefer first-class agentBinding over legacy dispatch metadata" in {
     val machine = loadMachine("AGX051_yuma-aqua-maintenance-forecaster.json")
@@ -72,9 +93,7 @@ class DispatchBindingSpec extends AnyFlatSpec with Matchers {
       dir.isDirectory shouldBe true
     }
 
-    val machines = Option(dir.listFiles((_, name) => name.toLowerCase.endsWith(".json")))
-      .getOrElse(Array.empty[File])
-      .toVector
+    val machines = collectJsonFiles(dir)
       .map(file => parse(read(file)).toOption.get.hcursor.downField("machine").downField("metadata").focus.getOrElse(Json.obj()))
 
     val agentBound = machines.count(_.hcursor.downField("agentBinding").focus.exists(_.isObject))
