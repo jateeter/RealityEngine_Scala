@@ -45,10 +45,19 @@ class MachineCorpusRegistrySpec extends AnyFlatSpec with Matchers with BeforeAnd
       dir.isDirectory shouldBe true
     }
 
-    val files = Option(dir.listFiles((_, name) => name.toLowerCase.endsWith(".json")))
-      .getOrElse(Array.empty[File])
-      .sortBy(_.getName)
-      .toVector
+    // Corpus files live in domain subdirectories (machines/domains/<name>/) —
+    // walk recursively so the whole corpus loads.
+    val files = {
+      import java.nio.file.{Files => NioFiles}
+      import scala.jdk.CollectionConverters._
+      if (!dir.isDirectory) Vector.empty[File]
+      else NioFiles.walk(dir.toPath)
+        .iterator().asScala
+        .filter(p => p.toFile.isFile && p.toString.toLowerCase.endsWith(".json"))
+        .map(_.toFile)
+        .toVector
+        .sortBy(_.getName)
+    }
     files should not be empty
 
     val engine = new RealityEngine(new VectorStore(vectorDimension = 7680), universalDimension = 7680)
