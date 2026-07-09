@@ -768,7 +768,8 @@ class Routes(
             // Fixed: /machines/json/...
             path("json" / "list") { get {
               val dir = new File(machinesDir)
-              val files = if (dir.exists()) dir.listFiles().filter(_.getName.endsWith(".json")).toList else Nil
+              val dirPath = dir.getAbsoluteFile.toPath
+              val files = if (dir.exists()) collectJsonFiles(dir) else Nil
               val machineList = files.flatMap { file =>
                 Try {
                   val json = readJsonFile(file)
@@ -776,6 +777,7 @@ class Routes(
                   val m    = root.hcursor.downField("machine")
                   Json.obj(
                     "filename"      -> Json.fromString(file.getName),
+                    "relFile"       -> Json.fromString(dirPath.relativize(file.getAbsoluteFile.toPath).toString.replace(File.separatorChar, '/')),
                     "name"          -> Json.fromString(m.get[String]("name").getOrElse(file.getName)),
                     "description"   -> Json.fromString(m.get[String]("description").getOrElse("")),
                     "version"       -> Json.fromString(root.hcursor.get[String]("version").getOrElse("1.0.0")),
@@ -788,7 +790,13 @@ class Routes(
             } },
             path("json" / Segment) { name =>
               get {
-                val file = new File(machinesDir, if (name.endsWith(".json")) name else s"$name.json")
+                val filename = if (name.endsWith(".json")) name else s"$name.json"
+                val flat = new File(machinesDir, filename)
+                // Corpus files may live in domain subdirectories — fall back to
+                // a recursive basename search (corpus filenames are unique).
+                val file =
+                  if (flat.exists() || name.contains("..")) flat
+                  else collectJsonFiles(new File(machinesDir)).find(_.getName == filename).getOrElse(flat)
                 if (!file.exists()) complete(StatusCodes.NotFound -> Json.obj("error" -> Json.fromString(s"Machine file not found: $name")))
                 else Try {
                   val json    = readJsonFile(file)
