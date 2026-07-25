@@ -809,19 +809,24 @@ class PerceptionRoutes(
           "transport"    -> "https".asJson,
           "singleSample" -> Json.arr("type".asJson, "value".asJson, "sourceName".asJson),
           "batchSamples" -> Json.arr("bridgeId".asJson, "samples[]".asJson),
-          "auth"         -> (if (hkBridgeToken.isDefined) "bridgeToken" else "none").asJson
+          "auth"         -> (if (hkBridgeToken.isDefined) "bridgeToken|bearer" else "none").asJson
         )
       )) }
     },
     path("api" / "integrations" / "healthkit" / "ingest") {
       post {
+        optionalHeaderValueByName("Authorization") { authHeader =>
         entity(as[Json]) { body =>
           // No-token mode: allowed when HEALTHKIT_BRIDGE_TOKEN is unset.
-          // If token is configured, require bridgeToken or token field in body.
+          // If token is configured, require bridgeToken/token in body or
+          // an equivalent Authorization: Bearer header.
+          val bearerToken = authHeader.collect {
+            case h if h.regionMatches(true, 0, "Bearer ", 0, 7) => h.drop(7).trim
+          }
           val tokenOk = hkBridgeToken.forall { expected =>
-            body.hcursor.get[String]("bridgeToken").toOption
+            val bodyToken = body.hcursor.get[String]("bridgeToken").toOption
               .orElse(body.hcursor.get[String]("token").toOption)
-              .contains(expected)
+            bodyToken.contains(expected) || bearerToken.contains(expected)
           }
           if (!tokenOk) {
             complete(StatusCodes.Unauthorized ->
@@ -922,6 +927,7 @@ class PerceptionRoutes(
               "unmapped" -> Json.arr(unmapped: _*)
             ))
           }
+        }
         }
       }
     },

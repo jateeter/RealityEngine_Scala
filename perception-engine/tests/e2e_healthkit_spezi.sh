@@ -155,6 +155,18 @@ bad_status="$(curl -s -o /tmp/healthkit_spezi_scala_unauthorized.json -w "%{http
   -d '{"bridgeId":"healthkit-ios-bridge","bridgeToken":"wrong","type":"HKCorrelationTypeIdentifierBloodPressure","values":[0.72,0.48,0.24,0.99]}')"
 assert_status_code "$bad_status" "401"
 
+bad_bearer_status="$(curl -s -o /tmp/healthkit_spezi_scala_bad_bearer.json -w "%{http_code}" -X POST "$PE_URL/api/integrations/healthkit/ingest" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer wrong" \
+  -d '{"bridgeId":"healthkit-ios-bridge","type":"HKCorrelationTypeIdentifierBloodPressure","values":[0.72,0.48,0.24,0.99]}')"
+assert_status_code "$bad_bearer_status" "401"
+
+bearer_status="$(curl -s -o /tmp/healthkit_spezi_scala_bearer.json -w "%{http_code}" -X POST "$PE_URL/api/integrations/healthkit/ingest" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer ${HEALTHKIT_BRIDGE_TOKEN}" \
+  -d '{"bridgeId":"healthkit-ios-bridge","type":"HKCorrelationTypeIdentifierBloodPressure","unit":"mm[Hg]","values":[0.72,0.48,0.24,0.99]}')"
+assert_status_code "$bearer_status" "200"
+
 bp_payload="$(curl -sf -X POST "$PE_URL/api/integrations/healthkit/ingest" -H "Content-Type: application/json" -d '{"bridgeId":"healthkit-ios-bridge","bridgeToken":"'"$HEALTHKIT_BRIDGE_TOKEN"'","type":"HKCorrelationTypeIdentifierBloodPressure","unit":"mm[Hg]","values":[0.72,0.48,0.24,0.99],"metadata":{"standard":"SpeziHealthKit","fhirCode":"85354-9"}}')"
 assert_ingest "$bp_payload" "healthkit.blood-pressure" "healthkit:HKCorrelationTypeIdentifierBloodPressure" 4320
 
