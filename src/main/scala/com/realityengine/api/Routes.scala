@@ -130,6 +130,32 @@ class Routes(
     else throw new RuntimeException(s"invalid registry shape at ${file.getAbsolutePath}")
   }
 
+  // OWL semantics manifest (RealityEngine_Machines semantics/abox-manifest.json):
+  // per-machine semantic identity — ABox IRI + content hash — used for
+  // cross-engine semantic-equivalence checks (roadmap milestone M4).
+  private def semanticsManifestFile: File = {
+    sys.env.get("SEMANTICS_MANIFEST").filter(_.nonEmpty).map(new File(_)).getOrElse {
+      val start = new File(machinesDir).getAbsoluteFile
+      val candidates = Iterator.iterate(start)(_.getParentFile).takeWhile(_ != null).take(6).map { dir =>
+        new File(new File(dir, "semantics"), "abox-manifest.json")
+      }
+      candidates.find(_.exists()).getOrElse(new File(new File(start.getParentFile, "semantics"), "abox-manifest.json"))
+    }
+  }
+
+  private def semanticsManifestJson: Try[Json] = Try {
+    io.circe.parser.parse(readJsonFile(semanticsManifestFile)).fold(throw _, identity)
+  }
+
+  // machine name -> (manifest key, manifest entry); sorted for determinism.
+  private def semanticsByName: Map[String, (String, Json)] =
+    semanticsManifestJson.toOption
+      .flatMap(_.hcursor.downField("machines").as[Map[String, Json]].toOption)
+      .map(_.toSeq.sortBy(_._1).flatMap { case (key, entry) =>
+        entry.hcursor.get[String]("name").toOption.map(name => name -> (key, entry))
+      }.toMap)
+      .getOrElse(Map.empty)
+
   // Staging buffer for chunk-based simulation configure protocol
   private val sequenceBuffer = new AtomicReference[Vector[Vector[Double]]](Vector.empty)
   private val sequenceBufferConfig = new AtomicReference[Option[(RegionMapping, Long, Option[Int])]](None)
@@ -770,23 +796,51 @@ class Routes(
               val dir = new File(machinesDir)
               val dirPath = dir.getAbsoluteFile.toPath
               val files = if (dir.exists()) collectJsonFiles(dir) else Nil
+              val semantics = semanticsByName
               val machineList = files.flatMap { file =>
                 Try {
                   val json = readJsonFile(file)
                   val root = io.circe.parser.parse(json).getOrElse(io.circe.Json.obj())
                   val m    = root.hcursor.downField("machine")
-                  Json.obj(
+                  val name = m.get[String]("name").getOrElse(file.getName)
+                  val base = Json.obj(
                     "filename"      -> Json.fromString(file.getName),
                     "relFile"       -> Json.fromString(dirPath.relativize(file.getAbsoluteFile.toPath).toString.replace(File.separatorChar, '/')),
-                    "name"          -> Json.fromString(m.get[String]("name").getOrElse(file.getName)),
+                    "name"          -> Json.fromString(name),
                     "description"   -> Json.fromString(m.get[String]("description").getOrElse("")),
                     "version"       -> Json.fromString(root.hcursor.get[String]("version").getOrElse("1.0.0")),
                     "metadata"      -> m.downField("metadata").as[Json].getOrElse(Json.obj()),
                     "sequenceCount" -> Json.fromInt(m.downField("sequences").as[Vector[Json]].map(_.length).getOrElse(0))
                   )
+                  semantics.get(name).fold(base) { case (_, entry) =>
+                    val c = entry.hcursor
+                    base.deepMerge(Json.obj(
+                      "semanticsIri"  -> c.get[String]("iri").toOption.map(Json.fromString).getOrElse(Json.Null),
+                      "semanticsHash" -> c.get[String]("sha256").toOption.map(Json.fromString).getOrElse(Json.Null)
+                    ))
+                  }
                 }.toOption
               }
               complete(Json.obj("machines" -> Json.arr(machineList: _*)))
+            } },
+            // Fixed: /machines/semantics/:name — OWL semantic identity of a
+            // loaded machine (IRI + ABox content hash from the corpus
+            // semantics manifest); keyed by machine name.
+            path("semantics" / Segment) { name => get {
+              semanticsByName.get(name) match {
+                case None =>
+                  complete(StatusCodes.NotFound -> Json.obj("error" -> Json.fromString(s"No semantics manifest entry for machine: $name")))
+                case Some((key, entry)) =>
+                  val c = entry.hcursor
+                  complete(Json.obj(
+                    "name"          -> Json.fromString(name),
+                    "machineKey"    -> Json.fromString(key),
+                    "semanticsIri"  -> c.get[String]("iri").toOption.map(Json.fromString).getOrElse(Json.Null),
+                    "semanticsHash" -> c.get[String]("sha256").toOption.map(Json.fromString).getOrElse(Json.Null),
+                    "sourceFile"    -> c.get[String]("sourceFile").toOption.map(Json.fromString).getOrElse(Json.Null),
+                    "ontology"      -> semanticsManifestJson.toOption.flatMap(_.hcursor.get[String]("ontology").toOption).map(Json.fromString).getOrElse(Json.Null)
+                  ))
+              }
             } },
             path("json" / Segment) { name =>
               get {
