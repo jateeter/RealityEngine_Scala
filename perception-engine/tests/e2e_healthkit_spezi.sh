@@ -164,16 +164,16 @@ assert_status_code "$bad_bearer_status" "401"
 bearer_status="$(curl -s -o /tmp/healthkit_spezi_scala_bearer.json -w "%{http_code}" -X POST "$PE_URL/api/integrations/healthkit/ingest" \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer ${HEALTHKIT_BRIDGE_TOKEN}" \
-  -d '{"bridgeId":"healthkit-ios-bridge","type":"HKCorrelationTypeIdentifierBloodPressure","unit":"mm[Hg]","values":[0.72,0.48,0.24,0.99]}')"
+  -d '{"bridgeId":"healthkit-ios-bridge","type":"HKCorrelationTypeIdentifierBloodPressure","sourceMappingId":"healthkit:HKCorrelationTypeIdentifierBloodPressure","unit":"mm[Hg]","values":[0.72,0.48,0.24,0.99]}')"
 assert_status_code "$bearer_status" "200"
 
-bp_payload="$(curl -sf -X POST "$PE_URL/api/integrations/healthkit/ingest" -H "Content-Type: application/json" -d '{"bridgeId":"healthkit-ios-bridge","bridgeToken":"'"$HEALTHKIT_BRIDGE_TOKEN"'","type":"HKCorrelationTypeIdentifierBloodPressure","unit":"mm[Hg]","values":[0.72,0.48,0.24,0.99],"metadata":{"standard":"SpeziHealthKit","fhirCode":"85354-9"}}')"
+bp_payload="$(curl -sf -X POST "$PE_URL/api/integrations/healthkit/ingest" -H "Content-Type: application/json" -d '{"bridgeId":"healthkit-ios-bridge","bridgeToken":"'"$HEALTHKIT_BRIDGE_TOKEN"'","type":"HKCorrelationTypeIdentifierBloodPressure","sourceMappingId":"healthkit:HKCorrelationTypeIdentifierBloodPressure","unit":"mm[Hg]","values":[0.72,0.48,0.24,0.99],"metadata":{"standard":"SpeziHealthKit","fhirCode":"85354-9"}}')"
 assert_ingest "$bp_payload" "healthkit.blood-pressure" "healthkit:HKCorrelationTypeIdentifierBloodPressure" 4320
 
-exercise_payload="$(curl -sf -X POST "$PE_URL/api/integrations/healthkit/ingest" -H "Content-Type: application/json" -d '{"bridgeId":"healthkit-ios-bridge","bridgeToken":"'"$HEALTHKIT_BRIDGE_TOKEN"'","type":"HKWorkoutTypeIdentifierWorkout","unit":"normalized","values":[0.65,0.58,0.42,0.97],"metadata":{"standard":"SpeziHealthKit","fhirCode":"55411-3"}}')"
+exercise_payload="$(curl -sf -X POST "$PE_URL/api/integrations/healthkit/ingest" -H "Content-Type: application/json" -d '{"bridgeId":"healthkit-ios-bridge","bridgeToken":"'"$HEALTHKIT_BRIDGE_TOKEN"'","type":"HKWorkoutTypeIdentifierWorkout","sourceMappingId":"healthkit:HKWorkoutTypeIdentifierWorkout","unit":"normalized","values":[0.65,0.58,0.42,0.97],"metadata":{"standard":"SpeziHealthKit","fhirCode":"55411-3"}}')"
 assert_ingest "$exercise_payload" "healthkit.exercise" "healthkit:HKWorkoutTypeIdentifierWorkout" 4330
 
-sleep_payload="$(curl -sf -X POST "$PE_URL/api/integrations/healthkit/ingest" -H "Content-Type: application/json" -d '{"bridgeId":"healthkit-ios-bridge","bridgeToken":"'"$HEALTHKIT_BRIDGE_TOKEN"'","type":"HKCategoryTypeIdentifierSleepAnalysis","unit":"normalized","values":[0.82,0.12,0.18,0.96],"metadata":{"standard":"SpeziHealthKit","fhirCode":"93832-4"}}')"
+sleep_payload="$(curl -sf -X POST "$PE_URL/api/integrations/healthkit/ingest" -H "Content-Type: application/json" -d '{"bridgeId":"healthkit-ios-bridge","bridgeToken":"'"$HEALTHKIT_BRIDGE_TOKEN"'","type":"HKCategoryTypeIdentifierSleepAnalysis","sourceMappingId":"healthkit:HKCategoryTypeIdentifierSleepAnalysis","unit":"normalized","values":[0.82,0.12,0.18,0.96],"metadata":{"standard":"SpeziHealthKit","fhirCode":"93832-4"}}')"
 assert_ingest "$sleep_payload" "healthkit.sleep" "healthkit:HKCategoryTypeIdentifierSleepAnalysis" 4340
 
 bp_machine='{"version":"1.0.0","machine":{"name":"HealthKit Spezi BP Consumer","description":"Consumes normalized SpeziHealthKit blood pressure source","arbiterRule":"PASSTHROUGH","perceptualMapping":{"input":{"offset":4320,"length":4},"output":{"offset":4350,"length":2}},"sequences":[{"id":"healthkit-spezi-bp-seq","name":"BP signal accepted","vectors":[{"id":"healthkit-spezi-bp-ready","elements":[{"value":0.72,"comparatorType":"equals"},{"value":0.48,"comparatorType":"equals"},{"value":0.24,"comparatorType":"equals"},{"value":0.99,"comparatorType":"equals"}],"isInitial":true,"outputVectors":[{"id":"healthkit-spezi-bp-out","vector":[1,0]}]}]}]}}'
