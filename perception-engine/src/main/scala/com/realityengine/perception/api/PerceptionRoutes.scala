@@ -52,6 +52,16 @@ class PerceptionRoutes(
   private val pushHistoryLimit = sys.env.get("PUSH_HISTORY_LIMIT").flatMap(_.toIntOption).getOrElse(100)
   private val pushHistory      = new AtomicReference[Vector[Json]](Vector.empty)
 
+  // Semantic audit ring buffer — re:PerceptionEvent records emitted on push
+  // (RealityEngine_Machines docs/SEMANTIC_AUDIT_CONTRACT.md, milestone M5).
+  private val semanticAuditCapacity = 1000
+  private val semanticAudit = new java.util.concurrent.ConcurrentLinkedDeque[Json]()
+
+  private def recordSemanticAudit(record: Json): Unit = {
+    semanticAudit.addLast(record)
+    while (semanticAudit.size() > semanticAuditCapacity) semanticAudit.pollFirst()
+  }
+
   // MQTT bridge — boots from env vars at construction; also startable via POST /api/mqtt/enable.
   // mqttBrokerUrlRef is kept separately for the status endpoint display.
   import com.realityengine.perception.mqtt.{MqttBridge, MqttMappingRule}
@@ -355,6 +365,22 @@ class PerceptionRoutes(
         val ts = System.currentTimeMillis()
         lastPush.set(Some(ts))
 
+        // Semantic audit (SEMANTIC_AUDIT_CONTRACT.md): one re:PerceptionEvent
+        // per active source whose region this push wrote into the universal
+        // reality vector. Machine join is region-based downstream, so
+        // machineName/machineIri stay null in the Scala PE (best-effort v1).
+        engine.getSources.filter(_.active).foreach { src =>
+          recordSemanticAudit(Json.obj(
+            "type"        -> "re:PerceptionEvent".asJson,
+            "at"          -> ts.asJson,
+            "sourceId"    -> src.id.asJson,
+            "machineName" -> Json.Null,
+            "machineIri"  -> Json.Null,
+            "offset"      -> src.region.offset.asJson,
+            "length"      -> src.region.length.asJson,
+          ))
+        }
+
         val parsed = resp.body.toOption
           .flatMap(b => io.circe.parser.parse(b).toOption)
           .getOrElse(Json.Null)
@@ -436,6 +462,18 @@ class PerceptionRoutes(
     // ── State ───────────────────────────────────────────────────────────────
     path("api" / "state") {
       get { complete(engine.getState(lastPush.get(), AutoConfig(isAutoRunning, autoIntervalMs))) }
+    },
+
+    // ── Semantic audit trail (SEMANTIC_AUDIT_CONTRACT.md, milestone M5) ────
+    path("api" / "audit" / "semantics") {
+      get { parameters("limit".as[Int].withDefault(100)) { limit =>
+        val bounded = math.max(0, math.min(limit, semanticAuditCapacity))
+        val records = {
+          import scala.jdk.CollectionConverters._
+          semanticAudit.asScala.toVector.takeRight(bounded)
+        }
+        complete(Json.obj("records" -> Json.arr(records: _*), "count" -> records.length.asJson))
+      } }
     },
 
     // ── Push ────────────────────────────────────────────────────────────────

@@ -59,7 +59,8 @@ class Machine(
    */
   def processInput(
     inputVector:            Vector[Double],
-    matchAlgorithmOverride: Option[ComparatorType] = None
+    matchAlgorithmOverride: Option[ComparatorType] = None,
+    audit:                  Boolean                = true
   ): MachineTransitionResult = {
     val seqResultsBuffer = new scala.collection.mutable.HashMap[String, SequenceResult]
     val seqOutputsBuffer = new scala.collection.mutable.HashMap[String, List[OutputVector]]
@@ -75,6 +76,26 @@ class Machine(
       val sr = ownSeq.transition(inputVector, matchAlgorithmOverride)
       seqResultsBuffer(seqId)  = sr
       seqOutputsBuffer(seqId)  = sr.assertedOutputs
+      // Semantic audit (SEMANTIC_AUDIT_CONTRACT.md): one re:SequenceObservation
+      // per matched step; determination fields from the first asserted output.
+      if (audit && sr.matchedVectors.nonEmpty) {
+        val output = sr.assertedOutputs.headOption
+        val meta   = output.map(_.metadata).getOrElse(Map.empty)
+        sr.matchedVectors.foreach { stepId =>
+          com.realityengine.services.SemanticAuditLog.record(
+            com.realityengine.services.SemanticAuditLog.Observation(
+              at              = System.currentTimeMillis(),
+              machineId       = id,
+              machineName     = name,
+              sequenceId      = seqId,
+              stepId          = stepId,
+              completed       = output.nonEmpty,
+              determinationId = output.map(_.id),
+              actionCode      = meta.get("action").flatMap(_.asString),
+              ragStatus       = meta.get("ragStatusCode").flatMap(_.asString)
+            ))
+        }
+      }
     }
 
     // Once all sequences have been materialised the clone is fully owned.
