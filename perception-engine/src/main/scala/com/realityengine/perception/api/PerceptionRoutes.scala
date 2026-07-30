@@ -188,9 +188,11 @@ class PerceptionRoutes(
 
   private val ollamaBaseUrl      = sys.env.getOrElse("OLLAMA_BASE_URL",   "http://localhost:11434")
   private val ollamaModel        = sys.env.getOrElse("OLLAMA_MODEL",      "llama3.2")
+  private val ollamaCompletionSourceMappingId = sys.env.getOrElse("OLLAMA_COMPLETION_SOURCE_MAPPING_ID", "agent-completion-risk")
   private val openAiBaseUrl      = sys.env.getOrElse("OPENAI_BASE_URL",   "https://api.openai.com/v1")
   private val openAiApiKey       = sys.env.get("OPENAI_API_KEY")
-  private val openAiModel        = sys.env.getOrElse("OPENAI_MODEL",      "gpt-4o")
+  private val openAiModel        = sys.env.getOrElse("OPENAI_MODEL",      "gpt-5")
+  private val openAiCompletionSourceMappingId = sys.env.getOrElse("OPENAI_COMPLETION_SOURCE_MAPPING_ID", "agent-completion-risk")
   private val acpEnabled         = sys.env.get("ACP_ENABLED").forall(v => Set("true", "1", "yes").contains(v.toLowerCase))
   private val acpEndpointUrl     = sys.env.get("OPENCLAW_GATEWAY_URL")
     .orElse(sys.env.get("ACP_GATEWAY_URL"))
@@ -318,6 +320,150 @@ class PerceptionRoutes(
       val resp = basicRequest.get(uri"$url").response(asString).send(sttpBackend)
       (resp.isSuccess, resp.body.fold(identity, identity))
     } catch { case e: Exception => (false, e.getMessage) }
+
+  private def decodePointerToken(token: String): String =
+    token.replace("~1", "/").replace("~0", "~")
+
+  private def evalJsonPointer(doc: Json, pointer: String): Option[Json] = {
+    if (pointer.isEmpty) Some(doc)
+    else if (!pointer.startsWith("/")) None
+    else {
+      pointer.drop(1).split("/", -1).foldLeft(Option(doc)) { (cursor, raw) =>
+        cursor.flatMap { json =>
+          val token = decodePointerToken(raw)
+          json.asObject.flatMap(_.apply(token))
+            .orElse(json.asArray.flatMap { arr =>
+              token.toIntOption.filter(i => i >= 0 && i < arr.length).map(arr)
+            })
+        }
+      }
+    }
+  }
+
+  private def numericLeaf(json: Json): Option[Double] =
+    json.asNumber.map(_.toDouble)
+      .orElse(json.asBoolean.map(if (_) 1.0 else 0.0))
+      .orElse(json.asString.flatMap(s => Try(s.toDouble).toOption))
+      .filter(_.isFinite)
+
+  private def clamp01(value: Double): Double =
+    if (!value.isFinite) 0.0 else math.max(0.0, math.min(1.0, value))
+
+  private def normalizeCompletionValues(values: Vector[Double], mapping: Json): Vector[Double] = {
+    val normalize = mapping.hcursor.downField("normalize")
+    val mode      = normalize.get[String]("mode").getOrElse("passthrough")
+    val clamp     = normalize.get[Boolean]("clamp").getOrElse(false)
+    values.map { value =>
+      val normalized = mode match {
+        case "minmax" =>
+          val min  = normalize.get[Double]("min").getOrElse(0.0)
+          val max  = normalize.get[Double]("max").getOrElse(0.0)
+          val span = max - min
+          if (span == 0.0) 0.0 else (value - min) / span
+        case "linear" =>
+          value * normalize.get[Double]("scale").getOrElse(1.0) + normalize.get[Double]("offset").getOrElse(0.0)
+        case _ => value
+      }
+      if (clamp) clamp01(normalized) else normalized
+    }
+  }
+
+  private def finiteValues(values: Vector[Double]): Either[String, Vector[Double]] =
+    if (values.forall(_.isFinite)) Right(values) else Left("provider completion value is not finite")
+
+  private def fallbackValues(doc: Json): Either[String, Vector[Double]] =
+    doc.hcursor.downField("values").as[Vector[Double]]
+      .orElse(doc.hcursor.downField("completion").downField("values").as[Vector[Double]])
+      .left.map(_ => "provider response did not include completion values")
+      .flatMap(finiteValues)
+
+  private def completionValuesFromContent(doc: Json, mapping: Option[Json]): Either[String, Vector[Double]] =
+    mapping match {
+      case Some(m) if m.hcursor.downField("extract").get[String]("type").toOption.contains("json") =>
+        val extract = m.hcursor.downField("extract")
+        val pointers = extract.downField("pointers").as[Vector[String]].toOption
+          .getOrElse(extract.get[String]("pointer").toOption.toVector)
+        if (pointers.isEmpty) fallbackValues(doc).map(normalizeCompletionValues(_, m))
+        else {
+          pointers.foldLeft(Right(Vector.empty): Either[String, Vector[Double]]) { (acc, pointer) =>
+            for {
+              values <- acc
+              leaf   <- evalJsonPointer(doc, pointer).toRight(s"missing required JSON pointer: $pointer")
+              number <- numericLeaf(leaf).toRight(s"JSON pointer resolved to a non-finite value: $pointer")
+            } yield values :+ number
+          }.map(normalizeCompletionValues(_, m))
+        }
+      case Some(m) => fallbackValues(doc).map(normalizeCompletionValues(_, m))
+      case None    => fallbackValues(doc)
+    }
+
+  private def topLevelPointerKey(pointer: String): String =
+    pointer.stripPrefix("/").split("/", 2).headOption.map(decodePointerToken).filter(_.nonEmpty).getOrElse("value")
+
+  private def completionSchema(mapping: Option[Json]): Json = {
+    val pointers = mapping.toVector.flatMap { m =>
+      val extract = m.hcursor.downField("extract")
+      if (extract.get[String]("type").toOption.contains("json"))
+        extract.downField("pointers").as[Vector[String]].toOption
+          .getOrElse(extract.get[String]("pointer").toOption.toVector)
+      else Vector.empty
+    }
+    if (pointers.nonEmpty) {
+      val keys = pointers.map(topLevelPointerKey)
+      Json.obj(
+        "type" -> "object".asJson,
+        "additionalProperties" -> false.asJson,
+        "properties" -> Json.obj(keys.map(k => k -> Json.obj("type" -> Json.arr("number".asJson, "boolean".asJson))): _*),
+        "required" -> Json.arr(keys.map(_.asJson): _*),
+      )
+    } else {
+      Json.obj(
+        "type" -> "object".asJson,
+        "additionalProperties" -> false.asJson,
+        "properties" -> Json.obj("values" -> Json.obj("type" -> "array".asJson, "items" -> Json.obj("type" -> "number".asJson))),
+        "required" -> Json.arr("values".asJson),
+      )
+    }
+  }
+
+  private def openAiTextFormat(mapping: Option[Json]): Json =
+    Json.obj("format" -> Json.obj(
+      "type"   -> "json_schema".asJson,
+      "name"   -> "reality_engine_completion".asJson,
+      "strict" -> true.asJson,
+      "schema" -> completionSchema(mapping),
+    ))
+
+  private def openAiOutputText(response: Json): String =
+    response.hcursor.get[String]("output_text").getOrElse {
+      response.hcursor.downField("output").downArray.downField("content").downArray.get[String]("text").getOrElse("")
+    }
+
+  private def assertOpenAiReady(response: Json): Either[String, Unit] = {
+    response.hcursor.downField("error").focus.filter(!_.isNull).map(_.noSpaces) match {
+      case Some(error) => Left(error)
+      case None =>
+        val status = response.hcursor.get[String]("status").getOrElse("")
+        if (status.nonEmpty && status != "completed") Left(s"OpenAI response did not complete: $status")
+        else {
+          val refused = response.hcursor.get[String]("refusal").toOption.exists(_.nonEmpty) ||
+            response.hcursor.downField("output").values.toVector.flatten
+              .flatMap(_.hcursor.downField("content").values.toVector.flatten)
+              .exists(part => part.hcursor.get[String]("type").toOption.contains("refusal") || part.hcursor.get[String]("refusal").toOption.exists(_.nonEmpty))
+          if (refused) Left("OpenAI response refused") else Right(())
+        }
+    }
+  }
+
+  private def receipt(provider: String, status: String, model: String, externalRunId: Option[String] = None, error: Option[String] = None): Json =
+    Json.obj(
+      "provider"      -> provider.asJson,
+      "adapter"       -> provider.asJson,
+      "status"        -> status.asJson,
+      "externalRunId" -> externalRunId.asJson,
+      "error"         -> error.asJson,
+      "providerReceipt" -> Json.obj("model" -> model.asJson),
+    )
 
   // ── Auto-push scheduler ───────────────────────────────────────────────────
 
@@ -712,6 +858,7 @@ class PerceptionRoutes(
           "configured" -> true.asJson,
           "baseUrl"    -> ollamaBaseUrl.asJson,
           "model"      -> ollamaModel.asJson,
+          "completionSourceMappingId" -> ollamaCompletionSourceMappingId.asJson,
           "reachable"  -> reachable.asJson,
           "models"     -> Json.arr(models: _*)
         ))
@@ -719,10 +866,15 @@ class PerceptionRoutes(
     },
     path("api" / "integrations" / "ollama" / "dispatch") {
       post { entity(as[Json]) { body =>
-        val model    = body.hcursor.get[String]("model").getOrElse(ollamaModel)
-        val messages = body.hcursor.downField("messages").as[Json].getOrElse(Json.arr())
-        val agentId  = body.hcursor.get[String]("agentId").toOption
-        val reqBody  = Json.obj("model" -> model.asJson, "messages" -> messages, "stream" -> false.asJson).noSpaces
+        val model           = body.hcursor.get[String]("model").getOrElse(ollamaModel)
+        val sourceMappingId = body.hcursor.get[String]("sourceMappingId").getOrElse(ollamaCompletionSourceMappingId)
+        val mapping         = sourceMappings.get(sourceMappingId)
+        val agentId         = body.hcursor.get[String]("agentId").orElse(body.hcursor.get[String]("agent")).getOrElse("ollama")
+        val messages = body.hcursor.downField("messages").as[Json].getOrElse(Json.arr(
+          Json.obj("role" -> "system".asJson, "content" -> "Return one JSON object matching the configured RealityEngine source mapping.".asJson),
+          Json.obj("role" -> "user".asJson, "content" -> body.hcursor.get[String]("prompt").getOrElse("Produce a provider completion.").asJson),
+        ))
+        val reqBody  = Json.obj("model" -> model.asJson, "messages" -> messages, "format" -> "json".asJson, "stream" -> false.asJson).noSpaces
         try {
           val resp = basicRequest
             .post(uri"$ollamaBaseUrl/api/chat")
@@ -734,12 +886,30 @@ class PerceptionRoutes(
             val parsed  = resp.body.toOption.flatMap(b => io.circe.parser.parse(b).toOption).getOrElse(Json.Null)
             val content = parsed.hcursor.downField("message").get[String]("content").getOrElse("")
             val cJson   = io.circe.parser.parse(content).toOption.getOrElse(Json.Null)
-            val sensorId = cJson.hcursor.get[String]("sensorId").toOption
-              .orElse(agentId.map(id => s"agent.$id.completion"))
-              .getOrElse("ollama.completion")
-            val values = cJson.hcursor.downField("values").as[Vector[Double]].getOrElse(Vector(1.0))
-            val record = ingestCompletion(Json.obj("sensorId" -> sensorId.asJson, "values" -> values.asJson))
-            complete(Json.obj("success" -> true.asJson, "content" -> content.asJson, "record" -> record))
+            completionValuesFromContent(cJson, mapping) match {
+              case Right(values) =>
+                val record = ingestCompletion(Json.obj(
+                  "provider" -> "ollama".asJson,
+                  "agent" -> agentId.asJson,
+                  "sourceMappingId" -> sourceMappingId.asJson,
+                  "values" -> values.asJson,
+                  "metadata" -> Json.obj("model" -> model.asJson, "content" -> content.asJson),
+                ))
+                complete(Json.obj(
+                  "success" -> true.asJson,
+                  "provider" -> "ollama".asJson,
+                  "content" -> content.asJson,
+                  "record" -> record,
+                  "receipt" -> receipt("ollama", "sent", model, parsed.hcursor.get[String]("created_at").toOption),
+                ))
+              case Left(error) =>
+                complete(StatusCodes.BadGateway -> Json.obj(
+                  "success" -> false.asJson,
+                  "provider" -> "ollama".asJson,
+                  "error" -> error.asJson,
+                  "receipt" -> receipt("ollama", "failed", model, error = Some(error)),
+                ))
+            }
           } else {
             complete(StatusCodes.BadGateway -> Json.obj("error" -> resp.body.fold(identity, identity).asJson))
           }
@@ -756,7 +926,8 @@ class PerceptionRoutes(
         "configured"    -> openAiApiKey.isDefined.asJson,
         "baseUrl"       -> openAiBaseUrl.asJson,
         "model"         -> openAiModel.asJson,
-        "keyConfigured" -> openAiApiKey.isDefined.asJson
+        "keyConfigured" -> openAiApiKey.isDefined.asJson,
+        "completionSourceMappingId" -> openAiCompletionSourceMappingId.asJson
       )) }
     },
     path("api" / "integrations" / "openai" / "dispatch") {
@@ -765,10 +936,18 @@ class PerceptionRoutes(
           case None =>
             complete(StatusCodes.BadRequest -> Json.obj("error" -> "OPENAI_API_KEY not configured".asJson))
           case Some(key) =>
-            val input   = body.hcursor.get[String]("input").getOrElse("")
-            val model   = body.hcursor.get[String]("model").getOrElse(openAiModel)
-            val agentId = body.hcursor.get[String]("agentId").toOption
-            val reqBody = Json.obj("model" -> model.asJson, "input" -> input.asJson).noSpaces
+            val input           = body.hcursor.get[String]("input").orElse(body.hcursor.get[String]("prompt")).getOrElse("")
+            val model           = body.hcursor.get[String]("model").getOrElse(openAiModel)
+            val sourceMappingId = body.hcursor.get[String]("sourceMappingId").getOrElse(openAiCompletionSourceMappingId)
+            val mapping         = sourceMappings.get(sourceMappingId)
+            val agentId         = body.hcursor.get[String]("agentId").orElse(body.hcursor.get[String]("agent")).getOrElse("openai")
+            val reqBody = Json.obj(
+              "model" -> model.asJson,
+              "input" -> input.asJson,
+              "text" -> openAiTextFormat(mapping),
+              "metadata" -> Json.obj("sourceMappingId" -> sourceMappingId.asJson, "agent" -> agentId.asJson),
+              "stream" -> false.asJson,
+            ).noSpaces
             try {
               val resp = basicRequest
                 .post(uri"$openAiBaseUrl/responses")
@@ -779,15 +958,42 @@ class PerceptionRoutes(
                 .send(sttpBackend)
               if (resp.isSuccess) {
                 val parsed = resp.body.toOption.flatMap(b => io.circe.parser.parse(b).toOption).getOrElse(Json.Null)
-                val outputText = parsed.hcursor.downField("output").downArray
-                  .downField("content").downArray.get[String]("text").toOption.getOrElse("")
-                val cJson    = io.circe.parser.parse(outputText).toOption.getOrElse(Json.Null)
-                val sensorId = cJson.hcursor.get[String]("sensorId").toOption
-                  .orElse(agentId.map(id => s"agent.$id.completion"))
-                  .getOrElse("openai.completion")
-                val values = cJson.hcursor.downField("values").as[Vector[Double]].getOrElse(Vector(1.0))
-                val record = ingestCompletion(Json.obj("sensorId" -> sensorId.asJson, "values" -> values.asJson))
-                complete(Json.obj("success" -> true.asJson, "outputText" -> outputText.asJson, "record" -> record))
+                assertOpenAiReady(parsed) match {
+                  case Left(error) =>
+                    complete(StatusCodes.BadGateway -> Json.obj(
+                      "success" -> false.asJson,
+                      "provider" -> "openai".asJson,
+                      "error" -> error.asJson,
+                      "receipt" -> receipt("openai", "failed", model, parsed.hcursor.get[String]("id").toOption, Some(error)),
+                    ))
+                  case Right(_) =>
+                    val outputText = openAiOutputText(parsed)
+                    val cJson = io.circe.parser.parse(outputText).toOption.getOrElse(Json.Null)
+                    completionValuesFromContent(cJson, mapping) match {
+                      case Right(values) =>
+                        val record = ingestCompletion(Json.obj(
+                          "provider" -> "openai".asJson,
+                          "agent" -> agentId.asJson,
+                          "sourceMappingId" -> sourceMappingId.asJson,
+                          "values" -> values.asJson,
+                          "metadata" -> Json.obj("model" -> model.asJson, "responseId" -> parsed.hcursor.get[String]("id").toOption.asJson),
+                        ))
+                        complete(Json.obj(
+                          "success" -> true.asJson,
+                          "provider" -> "openai".asJson,
+                          "outputText" -> outputText.asJson,
+                          "record" -> record,
+                          "receipt" -> receipt("openai", "sent", model, parsed.hcursor.get[String]("id").toOption),
+                        ))
+                      case Left(error) =>
+                        complete(StatusCodes.BadGateway -> Json.obj(
+                          "success" -> false.asJson,
+                          "provider" -> "openai".asJson,
+                          "error" -> error.asJson,
+                          "receipt" -> receipt("openai", "failed", model, parsed.hcursor.get[String]("id").toOption, Some(error)),
+                        ))
+                    }
+                }
               } else {
                 complete(StatusCodes.BadGateway -> Json.obj("error" -> resp.body.fold(identity, identity).asJson))
               }
