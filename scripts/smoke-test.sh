@@ -265,7 +265,7 @@ if [[ "$SKIP_PE" == "0" ]]; then
   check GET  "$PE_URL" "/api/integrations/ollama/status"
   check POST "$PE_URL" "/api/integrations/ollama/dispatch" '{"model":"llama3","prompt":"test"}'
   check GET  "$PE_URL" "/api/integrations/openai/status"
-  check POST "$PE_URL" "/api/integrations/openai/dispatch" '{"model":"gpt-4o","prompt":"test"}'
+  check POST "$PE_URL" "/api/integrations/openai/dispatch" '{"model":"gpt-5","prompt":"test"}'
   check GET  "$PE_URL" "/api/integrations/acp/status"
   check POST "$PE_URL" "/api/integrations/acp/dispatch" '{"type":"test"}'
   check GET  "$PE_URL" "/api/integrations/healthkit/status"
