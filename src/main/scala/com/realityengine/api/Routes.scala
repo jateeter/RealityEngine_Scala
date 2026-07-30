@@ -788,6 +788,37 @@ class Routes(
           )
         },
 
+        // Semantic audit trail (SEMANTIC_AUDIT_CONTRACT.md, milestone M5):
+        // re:SequenceObservation records emitted by machine processing,
+        // IRI-enriched from the corpus semantics manifest at read time.
+        path("audit" / "semantics") { get { parameters("limit".as[Int].withDefault(100)) { limit =>
+          val semantics = semanticsByName
+          def sanitizeLocal(local: String): String = local.replaceAll("[^A-Za-z0-9_-]", "_")
+          val records = com.realityengine.services.SemanticAuditLog.recent(limit).map { o =>
+            val base = semantics.get(o.machineName).flatMap { case (_, entry) =>
+              entry.hcursor.get[String]("iri").toOption.map(_.stripSuffix("#machine"))
+            }
+            def iri(prefix: String, local: String): Json =
+              base.map(b => Json.fromString(s"$b#$prefix-${sanitizeLocal(local)}")).getOrElse(Json.Null)
+            Json.obj(
+              "type"             -> Json.fromString("re:SequenceObservation"),
+              "at"               -> Json.fromLong(o.at),
+              "machineId"        -> Json.fromString(o.machineId),
+              "machineName"      -> Json.fromString(o.machineName),
+              "machineIri"       -> base.map(b => Json.fromString(s"$b#machine")).getOrElse(Json.Null),
+              "sequenceId"       -> Json.fromString(o.sequenceId),
+              "sequenceIri"      -> iri("seq", o.sequenceId),
+              "stepId"           -> Json.fromString(o.stepId),
+              "stepIri"          -> iri("step", o.stepId),
+              "completed"        -> Json.fromBoolean(o.completed),
+              "determinationIri" -> o.determinationId.map(d => iri("out", d)).getOrElse(Json.Null),
+              "actionCode"       -> o.actionCode.map(Json.fromString).getOrElse(Json.Null),
+              "ragStatus"        -> o.ragStatus.map(Json.fromString).getOrElse(Json.Null)
+            )
+          }
+          complete(Json.obj("records" -> Json.arr(records: _*), "count" -> Json.fromInt(records.length)))
+        } } },
+
         // Machines — fixed paths BEFORE parameterized
         pathPrefix("machines") {
           concat(

@@ -248,13 +248,13 @@ class RealityEngine(
 
   def processWhatIf(machineId: String, inputVector: Vector[Double]): MachineTransitionResult = {
     val machine = machines.getOrElse(machineId, throw new NoSuchElementException(s"Machine not found: $machineId"))
-    machine.clone().processInput(inputVector)
+    machine.clone().processInput(inputVector, audit = false)
   }
 
   def processUniversalWhatIf(universalInputSpace: Vector[Double], machineId: String): MachineTransitionResult = {
     val machine      = machines.getOrElse(machineId, throw new NoSuchElementException(s"Machine not found: $machineId"))
     val machineInput = perceptionEngine.resolveInputEventVectorForMachine(universalInputSpace, machine)
-    machine.clone().processInput(machineInput)
+    machine.clone().processInput(machineInput, audit = false)
   }
 
   // ── Checkpoints ───────────────────────────────────────────────────────────
