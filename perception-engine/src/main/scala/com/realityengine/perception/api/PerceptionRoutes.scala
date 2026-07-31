@@ -7,6 +7,7 @@ import akka.http.scaladsl.server.Route
 import akka.stream.Materializer
 import com.realityengine.perception.VectorAggregator
 import com.realityengine.perception.engine.PerceptionEngine
+import com.realityengine.perception.metrics.SemanticMetrics
 import com.realityengine.perception.models._
 import com.realityengine.perception.models.PerceptionJsonCodecs._
 import com.realityengine.perception.store.SourceStore
@@ -513,17 +514,29 @@ class PerceptionRoutes(
 
         // Semantic audit (SEMANTIC_AUDIT_CONTRACT.md): one re:PerceptionEvent
         // per active source whose region this push wrote into the universal
-        // reality vector. Machine join is region-based downstream, so
-        // machineName/machineIri stay null in the Scala PE (best-effort v1).
+        // reality vector, attributed to the upstream that produced it and
+        // joined to the corpus ABox when the source names a machine.
         engine.getSources.filter(_.active).foreach { src =>
+          val machineName = src match {
+            case t: TestSourceConfig => Option(t.machineName).filter(_.nonEmpty)
+            case _                   => None
+          }
+          val integration = src match {
+            case s: SensorSourceConfig => s.origin.filter(_.nonEmpty).getOrElse("sensor")
+            case _: TestSourceConfig   => "test"
+            case _                     => "unattributed"
+          }
+          val base = SemanticMetrics.baseIriFor(machineName)
+          SemanticMetrics.recordPerceptionEvent(integration, base.isDefined)
           recordSemanticAudit(Json.obj(
             "type"        -> "re:PerceptionEvent".asJson,
             "at"          -> ts.asJson,
             "sourceId"    -> src.id.asJson,
-            "machineName" -> Json.Null,
-            "machineIri"  -> Json.Null,
+            "machineName" -> machineName.map(_.asJson).getOrElse(Json.Null),
+            "machineIri"  -> base.map(b => s"$b#machine".asJson).getOrElse(Json.Null),
             "offset"      -> src.region.offset.asJson,
             "length"      -> src.region.length.asJson,
+            "integration" -> integration.asJson,
           ))
         }
 
@@ -608,6 +621,22 @@ class PerceptionRoutes(
     // ── State ───────────────────────────────────────────────────────────────
     path("api" / "state") {
       get { complete(engine.getState(lastPush.get(), AutoConfig(isAutoRunning, autoIntervalMs))) }
+    },
+
+    // ── Prometheus metrics (PE_METRICS_CONTRACT.md) ────────────────────────
+    // The semantic_* block must stay byte-identical across PE runtimes after
+    // normalizing the runtime label; SemanticMetrics owns the exact wording.
+    path("api" / "metrics") {
+      get {
+        complete(HttpEntity(ContentTypes.`text/plain(UTF-8)`,
+          SemanticMetrics.render(
+            sources            = engine.getSources.length,
+            globalStep         = engine.globalStep,
+            vectorSize         = engine.vectorDimension,
+            lastPushMs         = lastPush.get().getOrElse(0L),
+            auditBufferRecords = semanticAudit.size(),
+          )))
+      }
     },
 
     // ── Semantic audit trail (SEMANTIC_AUDIT_CONTRACT.md, milestone M5) ────
