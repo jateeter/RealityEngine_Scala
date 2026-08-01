@@ -102,11 +102,24 @@ check_port_free() {
   fi
 }
 
-if [ ! -f "$RE_JAR" ]; then
+# Rebuild when the jar is missing OR older than its sources.  Testing only for
+# absence meant a --fresh deployment silently ran a stale binary: endpoints
+# added since the last build answered 405 (Akka matched a route prefix but not
+# the method), which reads like a routing bug rather than an old jar.
+# Set FORCE_ASSEMBLY=1 to rebuild unconditionally.
+_assembly_stale() {
+  local jar="$1"; shift
+  [ ! -f "$jar" ] && return 0
+  [ "${FORCE_ASSEMBLY:-0}" != "0" ] && return 0
+  # -newer is true for any source touched after the jar was written.
+  [ -n "$(find "$@" -newer "$jar" -print -quit 2>/dev/null)" ]
+}
+
+if _assembly_stale "$RE_JAR" "$ROOT_DIR/src" "$ROOT_DIR/build.sbt" "$ROOT_DIR/project"; then
   echo "Building Scala Reality Engine assembly..."
   "$SBT" assembly
 fi
-if [ ! -f "$PE_JAR" ]; then
+if _assembly_stale "$PE_JAR" "$ROOT_DIR/perception-engine/src" "$ROOT_DIR/perception-engine/build.sbt" "$ROOT_DIR/perception-engine/project"; then
   echo "Building Scala Perception Engine assembly..."
   (cd "$ROOT_DIR/perception-engine" && "$SBT" assembly)
 fi
