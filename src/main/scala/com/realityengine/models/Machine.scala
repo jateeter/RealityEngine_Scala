@@ -39,10 +39,17 @@ class Machine(
   def addSequence(seq: CriticalEventSequence): Unit    = { sequences = sequences + (seq.id -> seq) }
   def removeSequence(seqId: String): Unit              = { sequences = sequences - seqId }
   def getSequence(seqId: String): Option[CriticalEventSequence] = effectiveSeqs.get(seqId)
-  def getAllSequences: List[CriticalEventSequence]      = effectiveSeqs.values.toList
+  /** Sequences in canonical order: (name, id).
+    *
+    * effectiveSeqs is keyed by sequence id and ids are generated per runtime,
+    * so map order varied between engines for the same corpus — the
+    * "MEMORY ALERT SET / RESET" divergence in RealityEngine_CI#91. */
+  def getAllSequences: List[CriticalEventSequence] =
+    effectiveSeqs.values.toList.sortBy(s => (s.name, s.id))
   def getSequenceCount: Int                            = effectiveSeqs.size
   def getTotalVectorCount: Int                         = getAllSequences.map(_.getAllVectors.length).sum
-  def getSequenceIds: List[String]                     = effectiveSeqs.keys.toList
+  /** Mirrors getAllSequences so ids and sequences stay positionally aligned. */
+  def getSequenceIds: List[String]                     = getAllSequences.map(_.id)
   def hasSequence(seqId: String): Boolean              = effectiveSeqs.contains(seqId)
 
   def getArbiter: OutputArbiter = arbiter
@@ -159,6 +166,10 @@ class Machine(
 
   // ── Serialisation ─────────────────────────────────────────────────────────
 
+  /** metadata.domain, or "" when absent. */
+  def domain: String =
+    metadata.get("domain").flatMap(_.asString).getOrElse("")
+
   def toJson: Json = {
     import io.circe.syntax._
     val mappingJson = perceptualMapping.map { m =>
@@ -195,6 +206,25 @@ class Machine(
 }
 
 object Machine {
+
+  /** Canonical ordering for machine collections, shared by every runtime.
+    *
+    * Machines are stored in maps keyed by id and ids are generated per runtime,
+    * so iteration order differed between C++, LSP and Scala and the same corpus
+    * serialized to different bytes.  Ordering by content rather than by
+    * identity is what makes the comparison meaningful.
+    *
+    * `(domain, name, id)` — the trailing id keeps the order total when two
+    * machines share a domain and name, and metadata.domain is absent on a
+    * handful of corpus machines, which sort first under an empty key.
+    */
+  val canonicalOrder: Ordering[Machine] =
+    Ordering.by(m => (m.domain, m.name, m.id))
+
+  /** Machines in canonical order. */
+  def inCanonicalOrder(machines: Iterable[Machine]): List[Machine] =
+    machines.toList.sorted(canonicalOrder)
+
   def fromFullJson(json: Json): Machine = {
     val c           = json.hcursor
     val id          = c.get[String]("id").getOrElse(s"machine-${System.currentTimeMillis()}")

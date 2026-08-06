@@ -111,7 +111,8 @@ class RealityEngine(
     }
 
   def getMachine(id: String): Option[Machine]  = machines.get(id)
-  def getAllMachines: List[Machine]             = machines.values.toList
+  /** Canonical order — see Machine.canonicalOrder. */
+  def getAllMachines: List[Machine]             = Machine.inCanonicalOrder(machines.values)
 
   // ── Processing ────────────────────────────────────────────────────────────
 
