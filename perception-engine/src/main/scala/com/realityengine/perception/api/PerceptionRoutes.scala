@@ -122,6 +122,13 @@ class PerceptionRoutes(
             sequenceName = label,
             inputs       = inputs,
             loop         = true,
+            // Canonical source shape (C++ is the definition, #91):
+            // metadata.segments carries one entry per contributing sequence.
+            sequenceMetadata = Json.obj(
+              "segments" -> Json.arr(segments.map { case (segName, vectors, _) =>
+                Json.obj("name" -> Json.fromString(segName), "length" -> Json.fromInt(vectors.length))
+              }: _*)
+            ),
           ))
           existingMachineIds = existingMachineIds + machineId
           created += 1
