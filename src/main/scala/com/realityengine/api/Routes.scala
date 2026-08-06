@@ -9,6 +9,7 @@ import com.realityengine.models._
 import com.realityengine.services.MachineLoader
 import de.heikoseeberger.akkahttpcirce.FailFastCirceSupport._
 import io.circe.Json
+import io.circe.Printer
 import io.circe.syntax._
 import JsonProtocol._
 
@@ -34,6 +35,15 @@ class Routes(
   auditCfg:    AuditConfig,
   machinesDir: String = sys.env.getOrElse("MACHINES_DIR", "../RealityEngine_Machines/machines")
 )(implicit system: ActorSystem, ec: ExecutionContext) {
+
+  // Canonical JSON key order: sorted.  C++ emits every object key-sorted
+  // (its Json::Object is a std::map); Scala and LSP preserved insertion order,
+  // and their orders differed from each other.  Sorting is the rule all
+  // runtimes can honour without declaring a field order per object type
+  // (RealityEngine_CI#91).  FailFastCirceSupport takes the Printer
+  // implicitly, so this covers every `complete(json)` response — including
+  // /api/machines and /api/machine-graph, which are under byte comparison.
+  implicit val canonicalJsonPrinter: Printer = Printer.noSpaces.copy(sortKeys = true)
 
   private val perception = new PerceptionOfReality(
     sys.env.getOrElse("VECTOR_DIMENSION", "7680").toIntOption.getOrElse(7680))

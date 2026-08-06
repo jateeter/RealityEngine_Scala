@@ -13,6 +13,7 @@ import com.realityengine.perception.models.PerceptionJsonCodecs._
 import com.realityengine.perception.store.SourceStore
 import de.heikoseeberger.akkahttpcirce.FailFastCirceSupport._
 import io.circe.Json
+import io.circe.Printer
 import io.circe.syntax._
 import sttp.client3._
 
@@ -36,6 +37,20 @@ class PerceptionRoutes(
 
   // Blocking sttp backend runs on calling thread (routes are already on a
   // dedicated blocking dispatcher when needed — see doPush).
+
+  // Canonical JSON key order: sorted.
+  //
+  // C++ emits every object key-sorted because its Json::Object is a
+  // std::map; Scala and LSP preserved insertion order, and their two
+  // insertion orders differed from each other. Three key orderings for the
+  // same object meant nothing could ever be byte-identical
+  // (RealityEngine_CI#91).
+  //
+  // Sorting is the rule all runtimes can honour without declaring a field
+  // order for every object type. FailFastCirceSupport's marshaller takes the
+  // Printer implicitly, so this covers every `complete(json)` response.
+  implicit val canonicalJsonPrinter: Printer = Printer.noSpaces.copy(sortKeys = true)
+
   private val sttpBackend = HttpURLConnectionBackend()
 
   // RC-5: thread-safe timer and state refs
