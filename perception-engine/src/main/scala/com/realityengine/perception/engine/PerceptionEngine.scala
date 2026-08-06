@@ -37,7 +37,7 @@ class PerceptionEngine(initialDimension: Int = sys.env.getOrElse("VECTOR_DIMENSI
       System.arraycopy(persistentVector, 0, grown, 0, previous)
       persistentVector  = grown
       _vectorDimension  = requiredEnd
-      System.err.println(s"[PerceptionEngine] vectorDimension grew $previous → $requiredEnd")
+      System.err.println(s"[PerceptionEngine] perceptionDimension grew $previous → $requiredEnd")
     }
   }
 
@@ -123,7 +123,22 @@ class PerceptionEngine(initialDimension: Int = sys.env.getOrElse("VECTOR_DIMENSI
     for ((id, src) <- sources if src.active) {
       val values = getSourceValues(id, src)
       val Region(offset, length) = src.region
-      // Skip sources whose region starts at or beyond the vector boundary.
+      // Growth on addSource and on RE sync should make this unreachable; if a
+      // region still does not fit, name the machine that lost its input rather
+      // than dropping it silently.  Silence is how the same defect stayed
+      // invisible in the other runtimes.
+      if (offset < 0 || offset + length > outLen) {
+        // machineId lives on TestSourceConfig, not on the SourceConfig trait.
+        val machineId = src match {
+          case t: TestSourceConfig => t.machineId
+          case _                   => ""
+        }
+        System.err.println(
+          s"[PerceptionEngine] source '${src.name}' region [$offset,${offset + length}) " +
+            s"exceeds perceptionDimension $outLen — region not written " +
+            s"(machineId=$machineId, sourceId=$id)"
+        )
+      }
       if (offset < outLen) {
         var i = 0
         while (i < length && i < values.length && offset + i < outLen) {
@@ -215,6 +230,7 @@ class PerceptionEngine(initialDimension: Int = sys.env.getOrElse("VECTOR_DIMENSI
       auto            = auto,
       lastPush        = lastPush,
       matchAlgorithm  = matchAlgorithm,
+      perceptionDimension = _vectorDimension,
     )
   }
 

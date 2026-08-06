@@ -120,6 +120,10 @@ case class EngineState(
   auto: AutoConfig,
   lastPush: Option[Long],
   matchAlgorithm: MatchAlgorithm,
+  /** Elements this engine will actually read and write.  Grows as sources are
+    * added and as the RE reports a larger space, so it is not necessarily the
+    * configured default.  Same name and meaning on every runtime. */
+  perceptionDimension: Int,
 )
 
 case class PushResult(

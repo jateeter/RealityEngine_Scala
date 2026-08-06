@@ -145,6 +145,7 @@ object PerceptionJsonCodecs {
       "auto"            -> s.auto.asJson,
       "lastPush"        -> s.lastPush.asJson,
       "matchAlgorithm"  -> s.matchAlgorithm.asJson,
+      "perceptionDimension" -> s.perceptionDimension.asJson,
     )
 
   // ── PushResult ────────────────────────────────────────────────────────────
