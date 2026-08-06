@@ -117,7 +117,7 @@ class PerceptualSpaceSimulator(dimension: Int = sys.env.getOrElse("VECTOR_DIMENS
   }
 
   private def rebuildEdgeCache(): Unit = {
-    val machineList = machines.values.toList
+    val machineList = Machine.inCanonicalOrder(machines.values)
     cachedEdges = for {
       sourceM <- machineList if sourceM.perceptualMapping.isDefined
       targetM <- machineList if targetM.id != sourceM.id && targetM.perceptualMapping.isDefined
@@ -134,7 +134,8 @@ class PerceptualSpaceSimulator(dimension: Int = sys.env.getOrElse("VECTOR_DIMENS
       "overlap"      -> Json.fromBoolean(true)
     )
   }
-  def getMachines: List[Machine]             = machines.values.toList
+  /** Canonical order — see Machine.canonicalOrder. */
+  def getMachines: List[Machine]             = Machine.inCanonicalOrder(machines.values)
   def getPerceptualSpace: PerceptualSpace    = perceptualSpace
 
   def configure(cfg: SimulationConfig): Unit = {
@@ -183,7 +184,7 @@ class PerceptualSpaceSimulator(dimension: Int = sys.env.getOrElse("VECTOR_DIMENS
   }
 
   private def runPhases(stepNum: Int, matchOverride: Option[ComparatorType] = None): SimulationStep = {
-    val mappedMachines = machines.values.filter(_.perceptualMapping.isDefined).toList
+    val mappedMachines = Machine.inCanonicalOrder(machines.values.filter(_.perceptualMapping.isDefined))
 
     // Phase 1: snapshot + re-apply latched event bits
     applyLatchedEventBits()
@@ -266,7 +267,7 @@ class PerceptualSpaceSimulator(dimension: Int = sys.env.getOrElse("VECTOR_DIMENS
 
   def getMachineGraphData: Json = {
     import io.circe.syntax._
-    val nodes = machines.values.toList.map { machine =>
+    val nodes = Machine.inCanonicalOrder(machines.values).map { machine =>
       val mapping = machine.perceptualMapping.get
       Json.obj(
         "id"           -> Json.fromString(machine.id),
@@ -295,7 +296,7 @@ class PerceptualSpaceSimulator(dimension: Int = sys.env.getOrElse("VECTOR_DIMENS
     import io.circe.syntax._
     Json.obj(
       "perceptualSpace" -> perceptualSpace.toJson,
-      "machines"        -> Json.arr(machines.values.map(_.toJson).toList: _*),
+      "machines"        -> Json.arr(Machine.inCanonicalOrder(machines.values).map(_.toJson): _*),
       "currentStep"     -> Json.fromInt(currentStep),
       "historyLength"   -> Json.fromInt(history.length),
       "isRunning"       -> Json.fromBoolean(isRunning)

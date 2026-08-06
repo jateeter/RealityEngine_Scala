@@ -86,7 +86,14 @@ class PerceptionEngine(initialDimension: Int = sys.env.getOrElse("VECTOR_DIMENSI
 
   def getSource(id: String): Option[SourceConfig] = synchronized { sources.get(id) }
 
-  def getSources: Vector[SourceConfig] = synchronized { sources.values.toVector }
+  /** Sources in canonical order: (name, id).
+    *
+    * `sources` is a Map keyed by id and ids are generated per runtime, so every
+    * PE listed sources differently — C++ by id, Scala and LSP by hash order,
+    * TypeScript by insertion order.  Four engines, four orderings, on an
+    * endpoint under byte comparison. */
+  def getSources: Vector[SourceConfig] =
+    synchronized { sources.values.toVector.sortBy(s => (s.name, s.id)) }
 
   /** Find an existing sensor source by its logical sensorId (not its UUID). */
   def findSensorBySensorId(sensorId: String): Option[SensorSourceConfig] = synchronized {
