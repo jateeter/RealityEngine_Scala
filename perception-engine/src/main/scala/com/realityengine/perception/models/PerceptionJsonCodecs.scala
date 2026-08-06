@@ -48,6 +48,8 @@ object PerceptionJsonCodecs {
       "sequenceName" -> src.sequenceName.asJson,
       "inputs"       -> src.inputs.map(_.asJson).asJson,
       "loop"         -> src.loop.asJson,
+      "metadata"     -> src.sequenceMetadata,
+      "sequence"     -> src.testSequence,
     )
 
   implicit val decodeTestSourceConfig: Decoder[TestSourceConfig] = (c: HCursor) =>
@@ -61,7 +63,9 @@ object PerceptionJsonCodecs {
       sequenceName <- c.get[String]("sequenceName")
       inputs       <- c.get[Vector[Vector[Double]]]("inputs")
       loop         <- c.get[Boolean]("loop")
-    } yield TestSourceConfig(id, name, region, active, machineId, machineName, sequenceName, inputs, loop)
+      metadata     <- c.getOrElse[Json]("metadata")(Json.obj())
+      sequence     <- c.getOrElse[Json]("sequence")(Json.obj())
+    } yield TestSourceConfig(id, name, region, active, machineId, machineName, sequenceName, inputs, loop, metadata, sequence)
 
   implicit val encodeSimulatedSourceConfig: Encoder[SimulatedSourceConfig] = src =>
     Json.obj(

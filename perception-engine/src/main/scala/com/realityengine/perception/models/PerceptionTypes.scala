@@ -1,5 +1,7 @@
 package com.realityengine.perception.models
 
+import io.circe.Json
+
 // ── Shared primitives ─────────────────────────────────────────────────────────
 
 case class Region(offset: Int, length: Int)
@@ -76,6 +78,12 @@ case class TestSourceConfig(
   sequenceName: String,
   inputs: Vector[Vector[Double]],
   loop: Boolean,
+  /** Canonical source shape (C++ is the definition, RealityEngine_CI#91):
+    * `{"segments":[{"name","length"}, ...]}` — one entry per input sequence
+    * feeding this source. */
+  sequenceMetadata: Json = Json.obj(),
+  /** Reserved by the canonical shape; C++ emits `{}`. */
+  testSequence: Json = Json.obj(),
 ) extends SourceConfig {
   def withActive(a: Boolean): SourceConfig = copy(active = a)
 }
