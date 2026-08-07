@@ -79,10 +79,25 @@ class Routes(
     val src = vector.toJson.hcursor
     val elements = src.downField("elements").as[Vector[Json]].getOrElse(Vector.empty).map { element =>
       val c = element.hcursor
+      // Absent optional fields must be omitted, not emitted as null: C++ is the
+      // canonical shape and writes `if (e.threshold) o["threshold"] = ...`.
+      //
+      // `.as[Double].toOption` is not a sufficient guard.  circe's
+      // Decoder[Double] *succeeds* on JSON null and yields NaN, so a missing
+      // threshold decoded to Some(NaN), the pair was kept, and stableNumber
+      // rendered NaN back through Json.fromDoubleOrNull as null — putting
+      // `"threshold":null` on all 268 elements where C++ emitted the key on
+      // only 68 (RealityEngine_CI#91).  Decoder[String] does reject null, which
+      // is why comparatorType was already correct; both are guarded explicitly
+      // now rather than relying on that asymmetry.
+      def optNumber(field: String): Option[Json] =
+        c.downField(field).focus.filterNot(_.isNull).flatMap(_.as[Double].toOption).map(stableNumber)
+
       val fields = Vector(
-        c.downField("comparatorType").as[String].toOption.map(v => "comparatorType" -> Json.fromString(v)),
-        c.downField("threshold").as[Double].toOption.map(v => "threshold" -> stableNumber(v)),
-        c.downField("value").as[Double].toOption.map(v => "value" -> stableNumber(v))
+        c.downField("comparatorType").focus.filterNot(_.isNull)
+          .flatMap(_.as[String].toOption).map(v => "comparatorType" -> Json.fromString(v)),
+        optNumber("threshold").map("threshold" -> _),
+        optNumber("value").map("value" -> _)
       ).flatten
       Json.obj(fields: _*)
     }
@@ -722,8 +737,12 @@ class Routes(
             path("reset") { post { engine.resetAllSequences(); complete(Json.obj("success" -> Json.fromBoolean(true))) } },
             path("stats") { get { complete(Json.obj("stats" -> engine.getStats)) } },
             path("active") { get {
+              // Sequences order by (name, id), matching C++'s all_sequences().
+              // Sorting by id alone put "Signing Failure" before "Partial
+              // Signing" because their generated ids happen to sort the other
+              // way, which was the last content difference on this endpoint.
               val rows = engine.getAllMachines.sortBy(_.id).flatMap { machine =>
-                machine.getAllSequences.sortBy(_.id).flatMap { sequence =>
+                machine.getAllSequences.sortBy(s => (s.name, s.id)).flatMap { sequence =>
                   sequence.getActiveVectors.sortBy(_.id).map { vector =>
                     Json.obj(
                       "machineId"  -> Json.fromString(machine.id),
