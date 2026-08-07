@@ -50,8 +50,22 @@ class PerceptionEngine(initialDimension: Int = sys.env.getOrElse("VECTOR_DIMENSI
 
   // ── Source CRUD ───────────────────────────────────────────────────────────
 
+  /** Add a source, keeping a caller-supplied id and generating one only when
+    * the config does not carry one.
+    *
+    * This matches C++ (`if (source.id.empty()) source.id = make_id("source")`),
+    * which is the canonical definition. Overwriting unconditionally meant the
+    * deterministic `test-<machineId>` id that bootstrapSourcesFromMachines
+    * builds was discarded, so Scala served random UUIDs where C++ and LSP
+    * served `test-machine-dcmemoryalertff` — the last thing keeping
+    * /api/sources and /api/state off three-way byte equality
+    * (RealityEngine_CI#91).
+    *
+    * The decoders default an absent `id` to "", so sources created through
+    * POST /api/sources are unaffected unless the caller supplies one.
+    */
   def addSource(config: SourceConfig): SourceConfig = synchronized {
-    val id  = uuidGen.generate().toString
+    val id  = if (config.id.nonEmpty) config.id else uuidGen.generate().toString
     val src = applyId(config, id)
     ensureCapacity(src.region.offset + src.region.length)
     sources = sources + (id -> src)
