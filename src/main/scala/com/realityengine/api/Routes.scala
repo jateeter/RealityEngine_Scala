@@ -8,6 +8,8 @@ import com.realityengine.engine._
 import com.realityengine.models._
 import com.realityengine.services.MachineLoader
 import de.heikoseeberger.akkahttpcirce.FailFastCirceSupport._
+import akka.http.scaladsl.marshalling.{Marshaller, ToEntityMarshaller}
+import io.circe.Encoder
 import io.circe.Json
 import io.circe.Printer
 import io.circe.syntax._
@@ -44,6 +46,21 @@ class Routes(
   // implicitly, so this covers every `complete(json)` response — including
   // /api/machines and /api/machine-graph, which are under byte comparison.
   implicit val canonicalJsonPrinter: Printer = Printer.noSpaces.copy(sortKeys = true)
+
+  // Canonical number rendering, applied to the whole document on the way out.
+  // Named `marshaller` deliberately: that is the name FailFastCirceSupport
+  // exports, so this local definition shadows it rather than competing with it
+  // as an equally-specific implicit (which resolves to neither).
+  implicit def marshaller[A](implicit encoder: Encoder[A]): ToEntityMarshaller[A] =
+    Marshaller.StringMarshaller.wrap(MediaTypes.`application/json`)(value =>
+      canonicalJsonPrinter.print(CanonicalJson.canonicalizeNumbers(encoder(value))))
+
+  // BaseCirceSupport also exports a Json-specific `jsonMarshaller`, which is
+  // more specific than the generic one above and would otherwise win for every
+  // `complete(Json.obj(...))` response.
+  implicit def jsonMarshaller(implicit printer: Printer): ToEntityMarshaller[Json] =
+    Marshaller.StringMarshaller.wrap(MediaTypes.`application/json`)(json =>
+      printer.print(CanonicalJson.canonicalizeNumbers(json)))
 
   private val perception = new PerceptionOfReality(
     sys.env.getOrElse("VECTOR_DIMENSION", "7680").toIntOption.getOrElse(7680))

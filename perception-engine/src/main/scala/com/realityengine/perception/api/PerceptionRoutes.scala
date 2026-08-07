@@ -12,6 +12,9 @@ import com.realityengine.perception.models._
 import com.realityengine.perception.models.PerceptionJsonCodecs._
 import com.realityengine.perception.store.SourceStore
 import de.heikoseeberger.akkahttpcirce.FailFastCirceSupport._
+import akka.http.scaladsl.marshalling.{Marshaller, ToEntityMarshaller}
+import akka.http.scaladsl.model.MediaTypes
+import io.circe.Encoder
 import io.circe.Json
 import io.circe.Printer
 import io.circe.syntax._
@@ -50,6 +53,22 @@ class PerceptionRoutes(
   // order for every object type. FailFastCirceSupport's marshaller takes the
   // Printer implicitly, so this covers every `complete(json)` response.
   implicit val canonicalJsonPrinter: Printer = Printer.noSpaces.copy(sortKeys = true)
+
+  // Canonical number rendering, applied to the whole document on the way out.
+  // Named `marshaller` deliberately: that is the name FailFastCirceSupport
+  // exports, so this local definition shadows it rather than competing with it
+  // as an equally-specific implicit (which resolves to neither).
+  implicit def marshaller[A](implicit encoder: Encoder[A]): ToEntityMarshaller[A] =
+    Marshaller.StringMarshaller.wrap(MediaTypes.`application/json`)(value =>
+      canonicalJsonPrinter.print(CanonicalJson.canonicalizeNumbers(encoder(value))))
+
+  // BaseCirceSupport also exports a Json-specific `jsonMarshaller`, which is
+  // more specific than the generic one above and would otherwise win for every
+  // `complete(Json.obj(...))` -- that is how /api/sources kept emitting
+  // "[[0.0,1.0]]" while /api/state, completed with a case class, did not.
+  implicit def jsonMarshaller(implicit printer: Printer): ToEntityMarshaller[Json] =
+    Marshaller.StringMarshaller.wrap(MediaTypes.`application/json`)(json =>
+      printer.print(CanonicalJson.canonicalizeNumbers(json)))
 
   private val sttpBackend = HttpURLConnectionBackend()
 
