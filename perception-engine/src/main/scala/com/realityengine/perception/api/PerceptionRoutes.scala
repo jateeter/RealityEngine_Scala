@@ -529,7 +529,14 @@ class PerceptionRoutes(
 
   // ── Push ──────────────────────────────────────────────────────────────────
 
-  def doPush(): Future[PushResult] = Future {
+  /** @param compact omit the machine results from the emitted step, as
+    *   `POST /api/push {"compact": true}` asks for. Note this deliberately
+    *   does not change what we ask the Reality Engine for: machineResults is
+    *   what VectorAggregator gates the perceptual space and the mergeBatch on
+    *   below, so requesting less would quietly change what a push *does*
+    *   rather than what it reports.
+    */
+  def doPush(compact: Boolean = false): Future[PushResult] = Future {
     val vector  = engine.assembleVector()
     val algoStr = MatchAlgorithm.asString(engine.matchAlgorithm)
 
@@ -599,9 +606,13 @@ class PerceptionRoutes(
         }
 
         val machineResults = parsed.hcursor.downField("machineResults").focus.getOrElse(Json.Null)
-        val stepJson = Some(parsed.deepMerge(Json.obj(
+        val withMergeBatch = parsed.deepMerge(Json.obj(
           "mergeBatch" -> Json.arr(VectorAggregator.mergeBatch(machineResults): _*)
-        )))
+        ))
+        val stepJson = Some(
+          if (compact) PushRequest.redactMachineResults(withMergeBatch)
+          else withMergeBatch
+        )
 
         val result = PushResult(
           success    = true,
@@ -695,14 +706,20 @@ class PerceptionRoutes(
     // ── Push ────────────────────────────────────────────────────────────────
     path("api" / "push") {
       post {
-        onComplete(doPush()) {
-          case Success(r) =>
-            val id     = s"push-${System.currentTimeMillis()}-${java.util.UUID.randomUUID().toString.take(8)}"
-            val record = r.asJson.deepMerge(Json.obj("id" -> id.asJson))
-            pushHistory.updateAndGet(h => (h :+ record).takeRight(pushHistoryLimit))
-            complete(record)
-          case Failure(e) => complete(StatusCodes.InternalServerError ->
-            Json.obj("error" -> e.getMessage.asJson))
+        // as[String], not as[Json]: this route took no entity at all, so
+        // callers may post an empty body or no content type, and as[Json]
+        // would reject both with a 400. Anything unparseable simply means
+        // "not compact", which is the behaviour every existing caller has.
+        entity(as[String]) { raw =>
+          onComplete(doPush(PushRequest.compactFrom(raw))) {
+            case Success(r) =>
+              val id     = s"push-${System.currentTimeMillis()}-${java.util.UUID.randomUUID().toString.take(8)}"
+              val record = r.asJson.deepMerge(Json.obj("id" -> id.asJson))
+              pushHistory.updateAndGet(h => (h :+ record).takeRight(pushHistoryLimit))
+              complete(record)
+            case Failure(e) => complete(StatusCodes.InternalServerError ->
+              Json.obj("error" -> e.getMessage.asJson))
+          }
         }
       }
     },
