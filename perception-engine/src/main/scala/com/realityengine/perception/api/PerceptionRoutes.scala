@@ -706,12 +706,20 @@ class PerceptionRoutes(
     // ── Push ────────────────────────────────────────────────────────────────
     path("api" / "push") {
       post {
-        // as[String], not as[Json]: this route took no entity at all, so
-        // callers may post an empty body or no content type, and as[Json]
-        // would reject both with a 400. Anything unparseable simply means
-        // "not compact", which is the behaviour every existing caller has.
-        entity(as[String]) { raw =>
-          onComplete(doPush(PushRequest.compactFrom(raw))) {
+        // extractStrictEntity, not entity(as[...]): no unmarshaller is
+        // involved, so this cannot be captured by implicit scope. It reads
+        // the bytes whatever the content type, and an absent body is simply
+        // empty — which matters because this route took no entity at all
+        // before, so callers post empty bodies and non-JSON content types.
+        //
+        // as[String] looks like the obvious choice and is a trap here:
+        // FailFastCirceSupport._ is imported at the top of this file and
+        // supplies a FromEntityUnmarshaller for any Decoder, so as[String]
+        // resolves to "decode a JSON string" and answers a JSON *object*
+        // with 400 "Got value '{"compact":true}' with wrong type, expecting
+        // string" — rejecting exactly the request it was added to read.
+        extractStrictEntity(3.seconds) { strict =>
+          onComplete(doPush(PushRequest.compactFrom(strict.data.utf8String))) {
             case Success(r) =>
               val id     = s"push-${System.currentTimeMillis()}-${java.util.UUID.randomUUID().toString.take(8)}"
               val record = r.asJson.deepMerge(Json.obj("id" -> id.asJson))

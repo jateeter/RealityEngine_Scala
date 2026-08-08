@@ -3,9 +3,17 @@ package com.realityengine.perception.api
 import akka.http.scaladsl.model.{ContentTypes, HttpEntity}
 import akka.http.scaladsl.server.Directives._
 import akka.http.scaladsl.testkit.ScalatestRouteTest
+// Imported for the same reason PerceptionRoutes imports it, and it must stay:
+// it puts a FromEntityUnmarshaller for every Decoder into implicit scope, and
+// that is precisely what broke the first attempt at this route. A test route
+// assembled without it exercises a different implicit scope than production
+// and will pass while production returns 400.
+import de.heikoseeberger.akkahttpcirce.FailFastCirceSupport._
 import io.circe.Json
 import org.scalatest.matchers.should.Matchers
 import org.scalatest.wordspec.AnyWordSpec
+
+import scala.concurrent.duration._
 
 /** Covers `POST /api/push {"compact": true}` — RealityEngine_Scala#30.
   *
@@ -61,13 +69,15 @@ class PushRequestSpec extends AnyWordSpec with Matchers with ScalatestRouteTest 
   }
 
   "the push route's entity directive" should {
-    // Mirrors the directive the real route uses. The concern is not the flag
-    // but the 400 that `as[Json]` would return for the bodies below, every one
-    // of which some current caller sends.
+    // Mirrors the real route, including its implicit scope — see the
+    // FailFastCirceSupport import above. The first version of this used
+    // entity(as[String]) and passed here while production answered 400,
+    // because this file did not import the circe support and so resolved
+    // as[String] to akka-http's own unmarshaller rather than circe's.
     val route = path("api" / "push") {
       post {
-        entity(as[String]) { raw =>
-          complete(if (PushRequest.compactFrom(raw)) "compact" else "full")
+        extractStrictEntity(3.seconds) { strict =>
+          complete(if (PushRequest.compactFrom(strict.data.utf8String)) "compact" else "full")
         }
       }
     }
@@ -97,6 +107,21 @@ class PushRequestSpec extends AnyWordSpec with Matchers with ScalatestRouteTest 
       Post("/api/push", HttpEntity(ContentTypes.`application/json`, """{"compact": true}""")) ~> route ~> check {
         handled shouldBe true
         responseAs[String] shouldBe "compact"
+      }
+    }
+
+    "reject the request if written with entity(as[String]) — the trap this avoids" in {
+      // Documents why extractStrictEntity is used. With FailFastCirceSupport
+      // in scope, as[String] means "decode a JSON string", so the very body
+      // the flag lives in is rejected. This shipped once and returned
+      // HTTP 400 from every push the regression suite made.
+      val trap = path("api" / "push") {
+        post { entity(as[String]) { raw =>
+          complete(if (PushRequest.compactFrom(raw)) "compact" else "full")
+        } }
+      }
+      Post("/api/push", HttpEntity(ContentTypes.`application/json`, """{"compact": true}""")) ~> trap ~> check {
+        rejection shouldBe a[akka.http.scaladsl.server.MalformedRequestContentRejection]
       }
     }
   }
