@@ -67,15 +67,74 @@ object VectorAggregator {
     buf.toVector
   }
 
-  def mergeBatch(machineResults: Json): Vector[Json] =
-    mergeRecords(machineResults).sortBy(_.machineId).toVector.map { rec =>
-      Json.obj(
-        "machineId" -> Json.fromString(rec.machineId),
-        "region" -> Json.obj(
-          "offset" -> Json.fromInt(rec.outputOffset),
-          "length" -> Json.fromInt(rec.outputLength),
-        ),
-        "vector" -> Json.arr(rec.outputVector.map(Json.fromDoubleOrNull): _*),
-      )
+  /** One operation per asserted output, which is the canonical merge unit.
+    *
+    * C++ is the definition here (RealityEngine_CI#91): when the arbiter says
+    * shouldOutput, it emits one entry per assertedOutput of each sequence,
+    * carrying the sequenceId and the index within that sequence. This emitted
+    * one entry per *machine* instead, so it lost which sequence fired — and
+    * sequenceId is exactly what the cross-runtime parity check compares, so
+    * every entry read as a mismatch against C++ and LSP.
+    */
+  private case class MergeOp(
+    machineId:    String,
+    sequenceId:   String,
+    outputIndex:  Int,
+    outputOffset: Int,
+    outputLength: Int,
+    values:       Vector[Double],
+  )
+
+  private def mergeOps(machineResults: Json): List[MergeOp] =
+    machineResults.asObject.toList.flatMap(_.toList).flatMap { case (machineId, result) =>
+      val cursor       = result.hcursor
+      val transition   = cursor.downField("transitionResult")
+      val shouldOutput = transition.downField("arbiterMetadata").get[Boolean]("shouldOutput").getOrElse(false)
+
+      val region = for {
+        offset <- cursor.downField("outputRegion").get[Int]("offset").toOption
+        length <- cursor.downField("outputRegion").get[Int]("length").toOption
+        if length > 0
+      } yield (offset, length)
+
+      (shouldOutput, region) match {
+        case (true, Some((offset, length))) =>
+          val sequences = transition.downField("sequenceResults").focus
+            .flatMap(_.asObject).map(_.toList).getOrElse(Nil)
+          sequences.flatMap { case (sequenceId, sequenceResult) =>
+            sequenceResult.hcursor.downField("assertedOutputs").focus
+              .flatMap(_.asArray).getOrElse(Vector.empty)
+              .zipWithIndex
+              .toList
+              .flatMap { case (asserted, index) =>
+                asserted.hcursor.get[Vector[Double]]("vector").toOption
+                  .filter(_.nonEmpty)
+                  .map(MergeOp(machineId, sequenceId, index, offset, length, _))
+              }
+          }
+        case _ => Nil
+      }
     }
+
+  def mergeBatch(machineResults: Json): Vector[Json] =
+    // Canonical merge ordering — (machineId, sequenceId, outputIndex), the
+    // same triple C++ sorts on, so both runtimes emit the same sequence for
+    // the same input.
+    mergeOps(machineResults)
+      .sortBy(op => (op.machineId, op.sequenceId, op.outputIndex))
+      .toVector
+      .map { op =>
+        Json.obj(
+          "machineId"   -> Json.fromString(op.machineId),
+          "sequenceId"  -> Json.fromString(op.sequenceId),
+          "outputIndex" -> Json.fromInt(op.outputIndex),
+          "region" -> Json.obj(
+            "offset" -> Json.fromInt(op.outputOffset),
+            "length" -> Json.fromInt(op.outputLength),
+          ),
+          // "values", not "vector" — C++ and LSP both name it values, and the
+          // C++ PE's trigger dispatch reads op.at("values").
+          "values" -> Json.arr(op.values.map(Json.fromDoubleOrNull): _*),
+        )
+      }
 }
