@@ -33,6 +33,13 @@ lazy val root = (project in file("."))
 
       // MQTT — Eclipse Paho Java client
       "org.eclipse.paho" % "org.eclipse.paho.client.mqttv3" % "1.2.5",
+
+      // Test. This build had no test dependencies and no test sources, so
+      // `make test` completed in 0s and reported success — a green that
+      // asserted nothing.
+      "org.scalatest"     %% "scalatest"          % "3.2.18"        % Test,
+      "com.typesafe.akka" %% "akka-http-testkit"  % AkkaHttpVersion % Test,
+      "com.typesafe.akka" %% "akka-stream-testkit" % AkkaVersion    % Test,
     ),
 
     assembly / mainClass        := Some("com.realityengine.perception.PerceptionMain"),
