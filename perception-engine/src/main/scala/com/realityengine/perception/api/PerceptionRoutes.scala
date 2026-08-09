@@ -5,7 +5,7 @@ import akka.http.scaladsl.model.{ContentTypes, HttpEntity, StatusCodes}
 import akka.http.scaladsl.server.Directives._
 import akka.http.scaladsl.server.Route
 import akka.stream.Materializer
-import com.realityengine.perception.VectorAggregator
+import com.realityengine.perception.{MachineCorpus, VectorAggregator}
 import com.realityengine.perception.engine.PerceptionEngine
 import com.realityengine.perception.metrics.SemanticMetrics
 import com.realityengine.perception.models._
@@ -73,6 +73,13 @@ class PerceptionRoutes(
   private val sttpBackend = HttpURLConnectionBackend()
 
   // RC-5: thread-safe timer and state refs
+  // Machine facts the PE resolves the merge mapping against — provenance and
+  // the governance contract.  Populated from the same machine list that seeds
+  // sources, so whoever seeds also arms the merge batch.
+  private val machineCorpus = new AtomicReference[MachineCorpus](MachineCorpus.empty)
+
+  def setMachineCorpus(corpus: MachineCorpus): Unit = machineCorpus.set(corpus)
+
   private val autoTimer    = new AtomicReference[Option[akka.actor.Cancellable]](None)
   @volatile private var autoIntervalMs: Long = 1000L
   private val lastPush     = new AtomicReference[Option[Long]](None)
@@ -125,48 +132,14 @@ class PerceptionRoutes(
     var skipped = 0
     var existingMachineIds = engine.getSources.collect { case t: TestSourceConfig => t.machineId }.toSet
 
+    // One builder for both seeding paths — see MachineCorpus.testSourceFor.
     machines.foreach { m =>
-      val c = m.hcursor
-      val machineId = c.get[String]("id").getOrElse("")
-      val machineName = c.get[String]("name").getOrElse(machineId)
-      val offsetOpt = c.downField("perceptualMapping").downField("input").get[Int]("offset").toOption
-      val lengthOpt = c.downField("perceptualMapping").downField("input").get[Int]("length").toOption
-      val inputSeqs = c.downField("metadata").downField("inputSequences")
-        .as[Vector[Json]].getOrElse(Vector.empty)
-
-      val segments = inputSeqs.flatMap { seq =>
-        val seqName = seq.hcursor.get[String]("name").getOrElse("Test sequence")
-        val vectors = seq.hcursor.downField("vectors").as[Vector[Vector[Double]]].getOrElse(Vector.empty)
-        if (vectors.nonEmpty) Some((seqName, vectors, seq.hcursor.get[Boolean]("active").getOrElse(false))) else None
-      }
-      val inputs = segments.flatMap(_._2)
-
-      (machineId.nonEmpty, offsetOpt, lengthOpt, existingMachineIds.contains(machineId), inputs.nonEmpty) match {
-        case (true, Some(offset), Some(length), false, true) =>
-          val label =
-            if (segments.length == 1) segments.head._1
-            else s"${segments.length} sequences"
-          engine.addSource(TestSourceConfig(
-            id           = s"test-$machineId",
-            name         = s"$machineName / $label",
-            region       = Region(offset, length),
-            active       = segments.exists(_._3),
-            machineId    = machineId,
-            machineName  = machineName,
-            sequenceName = label,
-            inputs       = inputs,
-            loop         = true,
-            // Canonical source shape (C++ is the definition, #91):
-            // metadata.segments carries one entry per contributing sequence.
-            sequenceMetadata = Json.obj(
-              "segments" -> Json.arr(segments.map { case (segName, vectors, _) =>
-                Json.obj("name" -> Json.fromString(segName), "length" -> Json.fromInt(vectors.length))
-              }: _*)
-            ),
-          ))
-          existingMachineIds = existingMachineIds + machineId
+      MachineCorpus.testSourceFor(m).filterNot(src => existingMachineIds.contains(src.machineId)) match {
+        case Some(src) =>
+          engine.addSource(src)
+          existingMachineIds = existingMachineIds + src.machineId
           created += 1
-        case _ =>
+        case None =>
           skipped += 1
       }
     }
@@ -607,7 +580,7 @@ class PerceptionRoutes(
 
         val machineResults = parsed.hcursor.downField("machineResults").focus.getOrElse(Json.Null)
         val withMergeBatch = parsed.deepMerge(Json.obj(
-          "mergeBatch" -> Json.arr(VectorAggregator.mergeBatch(machineResults): _*)
+          "mergeBatch" -> Json.arr(VectorAggregator.mergeBatch(machineResults, machineCorpus.get()): _*)
         ))
         val stepJson = Some(
           if (compact) PushRequest.redactMachineResults(withMergeBatch)
@@ -1631,6 +1604,7 @@ class PerceptionRoutes(
               .flatMap(b => io.circe.parser.parse(b).toOption)
               .flatMap(_.hcursor.downField("machines").as[Vector[Json]].toOption)
               .getOrElse(Vector.empty)
+            setMachineCorpus(MachineCorpus.build(machines))
             val (created, skipped) = bootstrapSourcesFromMachines(machines)
             onComplete(saveAndBroadcast()) { _ =>
               val body = bootstrapSummaryJson(created, Vector.empty, machines.length, skipped)

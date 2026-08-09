@@ -116,7 +116,14 @@ object VectorAggregator {
       }
     }
 
-  def mergeBatch(machineResults: Json): Vector[Json] =
+  /** @param corpus resolves the two fields the merge batch reports about a
+    *   fired sequence that the machine results themselves do not carry: the
+    *   audit trail (`provenance`) and the governance contract.  Both are the
+    *   PE's to resolve, because the output→next-Reality-Event mapping is the
+    *   PE's responsibility; the RE is never asked.  Defaults to `empty`, which
+    *   degrades to the pre-existing five-key entry rather than failing.
+    */
+  def mergeBatch(machineResults: Json, corpus: MachineCorpus = MachineCorpus.empty): Vector[Json] =
     // Canonical merge ordering — (machineId, sequenceId, outputIndex), the
     // same triple C++ sorts on, so both runtimes emit the same sequence for
     // the same input.
@@ -124,7 +131,7 @@ object VectorAggregator {
       .sortBy(op => (op.machineId, op.sequenceId, op.outputIndex))
       .toVector
       .map { op =>
-        Json.obj(
+        val base = Json.obj(
           "machineId"   -> Json.fromString(op.machineId),
           "sequenceId"  -> Json.fromString(op.sequenceId),
           "outputIndex" -> Json.fromInt(op.outputIndex),
@@ -135,6 +142,15 @@ object VectorAggregator {
           // "values", not "vector" — C++ and LSP both name it values, and the
           // C++ PE's trigger dispatch reads op.at("values").
           "values" -> Json.arr(op.values.map(Json.fromDoubleOrNull): _*),
+          // Unconditional, like C++: an entry with no chain reports an empty
+          // array rather than dropping the key, so a consumer can tell "no
+          // provenance" apart from "this runtime does not report provenance".
+          "provenance" -> Json.arr(
+            corpus.provenance(op.machineId, op.sequenceId).map(Json.fromString): _*
+          ),
         )
+        // Conditional, like C++: present only when a trigger rule matched.
+        corpus.governance(op.machineId, op.sequenceId, op.values)
+          .fold(base)(g => base.mapObject(_.add("governance", g)))
       }
 }

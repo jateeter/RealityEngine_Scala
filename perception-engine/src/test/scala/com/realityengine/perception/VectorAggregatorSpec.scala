@@ -78,8 +78,10 @@ class VectorAggregatorSpec extends AnyWordSpec with Matchers {
     }
 
     "match the C++ entry shape" in {
+      // provenance is unconditional in C++; governance only appears when a
+      // trigger rule matched, and no corpus is wired in here.
       batch.head.asObject.map(_.keys.toSet) shouldBe
-        Some(Set("machineId", "sequenceId", "outputIndex", "region", "values"))
+        Some(Set("machineId", "sequenceId", "outputIndex", "region", "values", "provenance"))
     }
 
     "name the payload values, as C++ and LSP do" in {
@@ -150,6 +152,83 @@ class VectorAggregatorSpec extends AnyWordSpec with Matchers {
           s <- op.hcursor.get[String]("sequenceId").toOption
         } yield s"$m/$s"
       } shouldBe Vector("m-a/s-a", "m-a/s-z", "m-b/s-1")
+    }
+  }
+
+  /** RealityEngine_Scala#35 — the two fields C++ and LSP report that this
+    * runtime dropped.  Both are resolved PE-side; the RE is not consulted. */
+  "VectorAggregator.mergeBatch provenance and governance" should {
+
+    val machine = parse(
+      """
+      {
+        "id": "machine-documentsigningworkflowmonitor",
+        "name": "Document Signing Workflow Monitor",
+        "metadata": {
+          "governance": { "ownerTeam": "social-services" },
+          "triggerConfig": {
+            "rules": [
+              {
+                "sequenceId": "signing-complete",
+                "outputMatches": [0, 0, 0, 1],
+                "ragStatusCode": "GREEN",
+                "processStatus": "info",
+                "description": "SIGNING_COMPLETE: all required documents executed"
+              }
+            ]
+          }
+        }
+      }
+      """
+    ).getOrElse(fail("fixture is not valid JSON"))
+
+    val corpus = new MachineCorpus(
+      Map("machine-documentsigningworkflowmonitor" -> machine),
+      Map("Document Signing Workflow Monitor" -> Map("signing-complete" -> Vector("ds-complete"))),
+    )
+
+    def entryFor(id: String) =
+      VectorAggregator.mergeBatch(machineResults, corpus)
+        .find(_.hcursor.get[String]("machineId").toOption.contains(id))
+        .getOrElse(fail(s"no entry for $id"))
+
+    "report provenance as the fired sequence's initial reality event vectors" in {
+      // C++ emits ["ds-complete"] here — the id of the isInitial vector of the
+      // sequence that fired, not a slug derived from the sequenceId.
+      entryFor("machine-documentsigningworkflowmonitor")
+        .hcursor.get[Vector[String]]("provenance") shouldBe Right(Vector("ds-complete"))
+    }
+
+    "emit provenance as an empty array, not omit it, when there is no chain" in {
+      // "no provenance" and "this runtime does not report provenance" must
+      // stay distinguishable to a consumer.
+      val entry = entryFor("machine-datacenterdcx001010interconnect")
+      entry.hcursor.get[Vector[String]]("provenance") shouldBe Right(Vector.empty)
+      entry.asObject.map(_.contains("provenance")) shouldBe Some(true)
+    }
+
+    "attach the resolved governance contract" in {
+      val gov = entryFor("machine-documentsigningworkflowmonitor")
+        .hcursor.downField("governance")
+      gov.get[String]("sequenceId").toOption     shouldBe Some("signing-complete")
+      gov.get[String]("ragStatusCode").toOption  shouldBe Some("GREEN")
+      gov.get[String]("ownerTeam").toOption      shouldBe Some("social-services")
+      gov.get[String]("source").toOption         shouldBe Some("rule-only")
+    }
+
+    "omit governance rather than null it when no rule matched" in {
+      // The data-center machine is absent from this corpus, so nothing resolves.
+      entryFor("machine-datacenterdcx001010interconnect")
+        .asObject.map(_.contains("governance")) shouldBe Some(false)
+    }
+
+    "leave the merged perceptual space untouched by either field" in {
+      // Reporting must never change what the engine computes.
+      val base = Vector.fill(14162)(0.0)
+      VectorAggregator.aggregate(base, machineResults) shouldBe
+        VectorAggregator.aggregate(base, machineResults)
+      VectorAggregator.mergeBatch(machineResults, corpus).map(_.hcursor.get[Vector[Double]]("values")) shouldBe
+        VectorAggregator.mergeBatch(machineResults).map(_.hcursor.get[Vector[Double]]("values"))
     }
   }
 
