@@ -164,6 +164,10 @@ class VectorAggregatorSpec extends AnyWordSpec with Matchers {
       {
         "id": "machine-documentsigningworkflowmonitor",
         "name": "Document Signing Workflow Monitor",
+        "sequences": [
+          { "id": "signing-complete", "name": "Signing Complete",
+            "initialVectorIds": ["ds-complete"] }
+        ],
         "metadata": {
           "governance": { "ownerTeam": "social-services" },
           "triggerConfig": {
@@ -182,10 +186,7 @@ class VectorAggregatorSpec extends AnyWordSpec with Matchers {
       """
     ).getOrElse(fail("fixture is not valid JSON"))
 
-    val corpus = new MachineCorpus(
-      Map("machine-documentsigningworkflowmonitor" -> machine),
-      Map("Document Signing Workflow Monitor" -> Map("signing-complete" -> Vector("ds-complete"))),
-    )
+    val corpus = MachineCorpus.build(Vector(machine))
 
     def entryFor(id: String) =
       VectorAggregator.mergeBatch(machineResults, corpus)

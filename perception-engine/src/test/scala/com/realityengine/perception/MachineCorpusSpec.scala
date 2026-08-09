@@ -5,7 +5,6 @@ import io.circe.parser.parse
 import org.scalatest.matchers.should.Matchers
 import org.scalatest.wordspec.AnyWordSpec
 
-import java.nio.file.Files
 
 /** Covers the PE-side resolution of the two merge-batch fields the machine
   * results do not carry — RealityEngine_Scala#35 — and the single source
@@ -65,7 +64,7 @@ class MachineCorpusSpec extends AnyWordSpec with Matchers {
   private val machineId  = "machine-datacenterdcx001010interconnect"
   private val stableSeq  = "dcx-001-010-domain-family-stable"
 
-  private val corpus = MachineCorpus.build(Vector(dataCenterMachine), machinesDir = None)
+  private val corpus = MachineCorpus.build(Vector(dataCenterMachine))
 
   private def fields(j: Json) = j.asObject.getOrElse(fail("not an object")).toMap
 
@@ -137,7 +136,7 @@ class MachineCorpusSpec extends AnyWordSpec with Matchers {
           )))
         )).top.getOrElse(fail("could not rebuild the fixture"))
 
-      val g = MachineCorpus.build(Vector(withOverride), machinesDir = None)
+      val g = MachineCorpus.build(Vector(withOverride))
         .governance(machineId, stableSeq, Vector(0, 0, 0, 1))
         .getOrElse(fail("expected a resolved contract"))
 
@@ -154,7 +153,7 @@ class MachineCorpusSpec extends AnyWordSpec with Matchers {
         .withFocus(_.mapObject(_.remove("governance"))).top
         .getOrElse(fail("could not rebuild the fixture"))
 
-      val g = MachineCorpus.build(Vector(noGov), machinesDir = None)
+      val g = MachineCorpus.build(Vector(noGov))
         .governance(machineId, stableSeq, Vector(0, 0, 0, 1))
         .getOrElse(fail("expected a resolved contract"))
 
@@ -171,7 +170,7 @@ class MachineCorpusSpec extends AnyWordSpec with Matchers {
           rules.updated(0, rules(0).mapObject(_.remove("description")))
         )).top.getOrElse(fail("could not rebuild the fixture"))
 
-      val g = MachineCorpus.build(Vector(noDesc), machinesDir = None)
+      val g = MachineCorpus.build(Vector(noDesc))
         .governance(machineId, stableSeq, Vector(0, 0, 0, 1))
         .getOrElse(fail("expected a resolved contract"))
 
@@ -181,66 +180,47 @@ class MachineCorpusSpec extends AnyWordSpec with Matchers {
 
   "MachineCorpus.provenance" should {
 
+    // Shaped as `GET /api/machines` serves it — Machine.toJson carries
+    // initialVectorIds on each sequence summary.  MachineSequenceJsonSpec in
+    // the Reality Engine build asserts the producing end against the real
+    // corpus, so the two together cover the whole chain.
+    val signing = parse(
+      """
+      {
+        "id": "machine-documentsigningworkflowmonitor",
+        "name": "Document Signing Workflow Monitor",
+        "sequences": [
+          { "id": "signing-complete",            "name": "Signing Complete",
+            "initialVectorIds": ["ds-complete"] },
+          { "id": "signing-blocked-escalation",  "name": "Signing Blocked",
+            "initialVectorIds": ["ds-active"] },
+          { "id": "signing-multi",               "name": "Multiple initials",
+            "initialVectorIds": ["ds-a", "ds-b"] }
+        ]
+      }
+      """
+    ).getOrElse(fail("fixture is not valid JSON"))
+
+    val signingCorpus = MachineCorpus.build(Vector(signing))
+    val signingId     = "machine-documentsigningworkflowmonitor"
+
     "return the fired sequence's initial reality event vector ids" in {
-      // Every CES carries at least one initial event vector; the merge batch
-      // reports them as the audit trail behind the assertion.
-      val dir = Files.createTempDirectory("corpus-spec").toFile
-      val file = new java.io.File(dir, "DataCenter.json")
-      Files.write(file.toPath,
-        """
-        { "machine": {
-            "name": "Data Center DCX-001-010 Interconnect",
-            "sequences": [
-              { "id": "dcx-001-010-domain-family-stable",
-                "vectors": [
-                  { "id": "dcx-001-010-domain-family-stable-state", "isInitial": true },
-                  { "id": "dcx-001-010-domain-family-stable-follow", "isInitial": false }
-                ] },
-              { "id": "dcx-001-010-domain-family-review",
-                "vectors": [ { "id": "dcx-review-open", "isInitial": true } ] }
-            ] } }
-        """.getBytes("UTF-8"))
-
-      val c = MachineCorpus.build(Vector(dataCenterMachine), machinesDir = Some(dir.getPath))
-
-      c.provenance(machineId, stableSeq) shouldBe Vector("dcx-001-010-domain-family-stable-state")
-      c.provenance(machineId, "dcx-001-010-domain-family-review") shouldBe Vector("dcx-review-open")
+      // C++ emitted exactly ["ds-complete"] for signing-complete in run
+      // 31263877721 — note it is not derivable from the sequenceId.
+      signingCorpus.provenance(signingId, "signing-complete") shouldBe Vector("ds-complete")
+      signingCorpus.provenance(signingId, "signing-blocked-escalation") shouldBe Vector("ds-active")
     }
 
-    "return empty rather than fail when the corpus is unreachable" in {
+    "carry every initial vector when a CES declares more than one" in {
+      // A CES must have at least one initial event; it may have more.
+      signingCorpus.provenance(signingId, "signing-multi") shouldBe Vector("ds-a", "ds-b")
+    }
+
+    "return empty rather than fail when the machine or sequence is unknown" in {
       // A missing audit trail must not stop the merge itself.
+      signingCorpus.provenance(signingId, "no-such-sequence") shouldBe Vector.empty
+      signingCorpus.provenance("machine-absent", "signing-complete") shouldBe Vector.empty
       corpus.provenance(machineId, stableSeq) shouldBe Vector.empty
-      corpus.provenance("machine-absent", stableSeq) shouldBe Vector.empty
-    }
-
-    "resolve against the real corpus, machine name through to initial vector id" in {
-      // The fixture above proves the lookup; this proves the lookup is wired
-      // to the corpus as it actually ships — the name→file→sequence chain is
-      // where this would silently return empty in production.
-      def findCorpus(from: java.io.File): Option[java.io.File] =
-        Option(from).flatMap { d =>
-          val candidate = new java.io.File(d, "RealityEngine_Machines/machines")
-          if (candidate.isDirectory) Some(candidate) else findCorpus(d.getParentFile)
-        }
-
-      val dir = sys.env.get("MACHINES_DIR").map(new java.io.File(_, "machines"))
-        .filter(_.isDirectory)
-        .orElse(findCorpus(new java.io.File(".").getAbsoluteFile))
-      assume(dir.isDefined, "machine corpus not found in any parent directory")
-
-      val signing = parse(
-        """{ "id": "machine-documentsigningworkflowmonitor",
-              "name": "Document Signing Workflow Monitor" }"""
-      ).getOrElse(fail("fixture is not valid JSON"))
-
-      val c = MachineCorpus.build(Vector(signing), machinesDir = dir.map(_.getPath))
-
-      // C++ emitted exactly this for signing-complete in run 31263877721.
-      c.provenance("machine-documentsigningworkflowmonitor", "signing-complete") shouldBe
-        Vector("ds-complete")
-      // And the invariant every CES upholds: at least one initial event.
-      c.provenance("machine-documentsigningworkflowmonitor", "signing-blocked-escalation") should
-        not be empty
     }
   }
 

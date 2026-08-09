@@ -3,10 +3,6 @@ package com.realityengine.perception
 import io.circe.Json
 import com.realityengine.perception.models.{Region, TestSourceConfig}
 
-import java.io.File
-import scala.io.Source
-import scala.util.Using
-
 /** What the PE needs to know about machines in order to own the mapping from
   * machine outputs to the next Reality Event vector.
   *
@@ -15,28 +11,15 @@ import scala.util.Using
   * contract — is resolved here rather than asked of the Reality Engine.  The
   * RE is a source of machine *facts*; it is not consulted about the merge.
   *
-  * Two inputs, because they carry different things:
-  *
-  *   - `GET /api/machines` supplies id, name, `perceptualMapping`, and the
-  *     full `metadata` block (`triggerConfig`, `governance`, `inputSequences`).
-  *     Governance resolution and source seeding need only this.
-  *   - The machine corpus on disk supplies the CES definitions —
-  *     `sequences[].vectors[].isInitial` — which `/api/machines` does not
-  *     serialize (`Machine.toJson` reduces each sequence to `{id, name}`).
-  *     Provenance needs this, and nothing else does.
-  *
-  * Reading the corpus from `MACHINES_DIR` follows the precedent already set by
-  * `SemanticMetrics`, which resolves corpus identity the same way so both
-  * halves of a runtime agree on what they loaded.
+  * Everything comes from `GET /api/machines`, which carries id, name,
+  * `perceptualMapping`, the `metadata` block (`triggerConfig`, `governance`,
+  * `inputSequences`), and each sequence's `initialVectorIds`.  One request,
+  * and no second view of the corpus that could disagree with what the Reality
+  * Engine actually loaded.
   */
-final class MachineCorpus(
-  machinesById: Map[String, Json],
-  initialVectorIdsByMachineName: Map[String, Map[String, Vector[String]]],
-) {
+final class MachineCorpus(machinesById: Map[String, Json]) {
 
   def size: Int = machinesById.size
-
-  def machine(machineId: String): Option[Json] = machinesById.get(machineId)
 
   private def machineName(machineId: String): Option[String] =
     machinesById.get(machineId).flatMap(_.hcursor.get[String]("name").toOption)
@@ -46,13 +29,14 @@ final class MachineCorpus(
     * Every machine CES carries at least one initial event vector — it may
     * carry more, never fewer — so for a sequence that actually fired this is
     * expected to be non-empty.  It returns empty rather than failing when the
-    * corpus is unreachable, because a missing audit trail must not stop the
+    * machine is unknown, because a missing audit trail must not stop the
     * merge itself.
     */
   def provenance(machineId: String, sequenceId: String): Vector[String] =
-    machineName(machineId)
-      .flatMap(initialVectorIdsByMachineName.get)
-      .flatMap(_.get(sequenceId))
+    machinesById.get(machineId)
+      .flatMap(_.hcursor.downField("sequences").as[Vector[Json]].toOption)
+      .flatMap(_.find(_.hcursor.get[String]("id").toOption.contains(sequenceId)))
+      .flatMap(_.hcursor.get[Vector[String]]("initialVectorIds").toOption)
       .getOrElse(Vector.empty)
 
   /** Resolve the governance contract for a fired sequence, or `None` when the
@@ -150,51 +134,15 @@ final class MachineCorpus(
 
 object MachineCorpus {
 
-  val empty: MachineCorpus = new MachineCorpus(Map.empty, Map.empty)
+  val empty: MachineCorpus = new MachineCorpus(Map.empty)
 
-  /** Build from the RE's machine list, reading CES initial vectors from the
-    * corpus directory when one is reachable. */
-  def build(machines: Vector[Json], machinesDir: Option[String] = corpusDir): MachineCorpus =
+  /** Build from the Reality Engine's machine list. */
+  def build(machines: Vector[Json]): MachineCorpus =
     new MachineCorpus(
-      machinesById = machines.flatMap { m =>
+      machines.flatMap { m =>
         m.hcursor.get[String]("id").toOption.filter(_.nonEmpty).map(_ -> m)
-      }.toMap,
-      initialVectorIdsByMachineName = machinesDir.map(readInitialVectorIds).getOrElse(Map.empty),
+      }.toMap
     )
-
-  private def corpusDir: Option[String] =
-    sys.env.get("MACHINES_DIR").filter(_.nonEmpty).map(d => new File(d, "machines").getPath)
-      .orElse(Some("../RealityEngine_Machines/machines"))
-      .filter(d => new File(d).isDirectory)
-
-  /** machineName → sequenceId → ids of that sequence's `isInitial` vectors. */
-  private def readInitialVectorIds(dir: String): Map[String, Map[String, Vector[String]]] = {
-    def jsonFiles(f: File): Vector[File] =
-      if (f.isDirectory) Option(f.listFiles()).map(_.toVector.flatMap(jsonFiles)).getOrElse(Vector.empty)
-      else if (f.getName.endsWith(".json")) Vector(f)
-      else Vector.empty
-
-    jsonFiles(new File(dir)).flatMap { file =>
-      val parsed = Using(Source.fromFile(file, "UTF-8"))(_.mkString).toOption
-        .flatMap(io.circe.parser.parse(_).toOption)
-      val machine = parsed.map(_.hcursor.downField("machine")).flatMap(_.focus).getOrElse(Json.Null)
-      val name    = machine.hcursor.get[String]("name").toOption.filter(_.nonEmpty)
-
-      name.map { n =>
-        val bySequence = machine.hcursor.downField("sequences").as[Vector[Json]].getOrElse(Vector.empty)
-          .flatMap { seq =>
-            val sc = seq.hcursor
-            sc.get[String]("id").toOption.filter(_.nonEmpty).map { sid =>
-              val initials = sc.downField("vectors").as[Vector[Json]].getOrElse(Vector.empty)
-                .filter(_.hcursor.get[Boolean]("isInitial").getOrElse(false))
-                .flatMap(_.hcursor.get[String]("id").toOption)
-              sid -> initials
-            }
-          }.toMap
-        n -> bySequence
-      }
-    }.toMap
-  }
 
   // ── Shared source construction ────────────────────────────────────────────
 

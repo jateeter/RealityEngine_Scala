@@ -44,6 +44,15 @@ class CriticalEventSequence(
   def getVector(vectorId: String): Option[RealityVector] = vectors.get(vectorId)
   def getAllVectors: List[RealityVector]                  = vectors.values.toList
   def getInitialVectors: List[RealityVector]             = initialVectorIds.flatMap(vectors.get).toList
+
+  /** Ids of this sequence's Initial Reality Event vectors — at least one, by
+    * the CES invariant `validate` enforces.
+    *
+    * Sorted, because these are held in a Set and serialized: C++ iterates its
+    * vectors in a map keyed by id, so ordering by id is what makes the two
+    * runtimes emit the same bytes for the same sequence. */
+  def getInitialVectorIds: List[String]                  = initialVectorIds.toList.sorted
+  def getOutputVectorIds: List[String]                   = outputVectorIds.toList.sorted
   def getActiveVectors: List[RealityVector]              = vectors.values.filter(_.isActive).toList
 
   // ── Validation ───────────────────────────────────────────────────────────
@@ -155,8 +164,8 @@ class CriticalEventSequence(
       "id"               -> Json.fromString(id),
       "name"             -> Json.fromString(name),
       "vectors"          -> Json.arr(getAllVectors.map(_.toJson): _*),
-      "initialVectorIds" -> Json.arr(initialVectorIds.toList.map(Json.fromString): _*),
-      "outputVectorIds"  -> Json.arr(outputVectorIds.toList.map(Json.fromString): _*),
+      "initialVectorIds" -> Json.arr(getInitialVectorIds.map(Json.fromString): _*),
+      "outputVectorIds"  -> Json.arr(getOutputVectorIds.map(Json.fromString): _*),
       "metadata"         -> metadata.asJson
     ) ++ lifecycleFields)
   }
