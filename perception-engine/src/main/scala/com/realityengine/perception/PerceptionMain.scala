@@ -6,7 +6,7 @@ import akka.stream.Materializer
 import com.realityengine.perception.api.{PerceptionRoutes, WsBroadcastActor}
 import com.realityengine.perception.logging.{AuditConfig, AuditLogger}
 import com.realityengine.perception.engine.PerceptionEngine
-import com.realityengine.perception.models.{Region, TestSourceConfig}
+import com.realityengine.perception.models.TestSourceConfig
 import com.realityengine.perception.store.SourceStore
 import sttp.client3._
 
@@ -101,7 +101,7 @@ object PerceptionMain extends App {
       val scheme = if (tlsEnabled) "https" else "http"
       println(s"\n✅ Perception Engine running on $scheme://$host:$port")
       println(s"   Reality Engine : $realityEngineUrl")
-      seedSources(realityEngineUrl, engine, store, mergeOnly = !isFresh)
+      seedSources(realityEngineUrl, engine, store, routes, mergeOnly = !isFresh)
 
       sys.addShutdownHook {
         println("\nShutting down gracefully...")
@@ -116,7 +116,8 @@ object PerceptionMain extends App {
   // mergeOnly=true: only add sources for machines that have no existing test sources
   //                 (preserves user-edited on/off state for known machines)
   // mergeOnly=false: replace all test sources wholesale (FRESH_START)
-  def seedSources(realityEngineUrl: String, engine: PerceptionEngine, store: SourceStore, mergeOnly: Boolean): Unit = {
+  def seedSources(realityEngineUrl: String, engine: PerceptionEngine, store: SourceStore,
+                  routes: PerceptionRoutes, mergeOnly: Boolean): Unit = {
     Future {
       val backend = HttpURLConnectionBackend()
       var machinesJson: io.circe.Json = io.circe.Json.Null
@@ -155,43 +156,30 @@ object PerceptionMain extends App {
           else
             Set.empty
 
+        // The merge mapping is the PE's alone, so the PE holds the machine
+        // facts it resolves against.  Same list that seeds the sources.
+        routes.setMachineCorpus(MachineCorpus.build(machines))
+
         var seeded = 0; var skipped = 0
         machines.foreach { m =>
-          val mc          = m.hcursor
-          val machineId   = mc.get[String]("id").getOrElse("")
-          val machineName = mc.get[String]("name").getOrElse("")
-          val offsetOpt   = mc.downField("perceptualMapping").downField("input").get[Int]("offset").toOption
-          val lengthOpt   = mc.downField("perceptualMapping").downField("input").get[Int]("length").toOption
-          val inputSeqs   = mc.downField("metadata").downField("inputSequences")
-            .as[Vector[io.circe.Json]].getOrElse(Vector.empty)
-          (offsetOpt, lengthOpt) match {
-            case (Some(off), Some(len)) =>
-              if (mergeOnly && seededMachineIds.contains(machineId)) {
-                skipped += 1
-              } else {
-                inputSeqs.foreach { sj =>
-                  val seqName = sj.hcursor.get[String]("name").getOrElse("")
-                  val vectors = sj.hcursor.downField("vectors")
-                    .as[Vector[Vector[Double]]].getOrElse(Vector.empty)
-                  if (seqName.nonEmpty && vectors.nonEmpty) {
-                    engine.addSource(TestSourceConfig(
-                      id           = java.util.UUID.randomUUID().toString,
-                      name         = s"$machineName — $seqName",
-                      region       = Region(off, len),
-                      active       = true,
-                      machineId    = machineId,
-                      machineName  = machineName,
-                      sequenceName = seqName,
-                      inputs       = vectors,
-                      loop         = true,
-                    ))
-                    seeded += 1
-                  }
-                }
-              }
-            case _ =>
-              if (machineId.nonEmpty)
-                println(s"[Seed] Skipping $machineName — no perceptualMapping.input found")
+          val machineId   = m.hcursor.get[String]("id").getOrElse("")
+          val machineName = m.hcursor.get[String]("name").getOrElse("")
+          if (mergeOnly && seededMachineIds.contains(machineId)) {
+            skipped += 1
+          } else {
+            // One source per machine, activation decided in one place — see
+            // MachineCorpus.testSourceFor.  This used to build sources inline,
+            // one per input sequence and unconditionally active, which meant
+            // every corpus scenario played itself forward into the shared
+            // reality vector on every push and machines reached outcomes the
+            // input never asked for (#36).
+            MachineCorpus.testSourceFor(m) match {
+              case Some(src) =>
+                engine.addSource(src)
+                seeded += 1
+              case None =>
+                if (machineId.nonEmpty && machineName.nonEmpty) skipped += 1
+            }
           }
         }
         val mode = if (mergeOnly) "merge" else "fresh"

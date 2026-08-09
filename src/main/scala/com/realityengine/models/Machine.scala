@@ -189,8 +189,20 @@ class Machine(
       "sequenceCount"    -> Json.fromInt(getSequenceCount),
       "totalVectors"     -> Json.fromInt(getTotalVectorCount),
       "sequenceIds"      -> Json.arr(getSequenceIds.map(Json.fromString): _*),
+      // initialVectorIds travels with the shallow summary because the
+      // Perception Engine owns the mapping from a fired sequence to the next
+      // Reality Event vector, and the merge batch reports those ids as the
+      // audit trail behind the assertion.  The PE cannot derive them — the
+      // corpus names them arbitrarily (signing-complete asserts ds-complete)
+      // — and fetching each machine's full detail to read one field would be
+      // a request per machine.  Reporting a corpus fact the engine already
+      // holds is not the same as owning the merge.
       "sequences"        -> Json.arr(getAllSequences.map(seq =>
-        Json.obj("id" -> Json.fromString(seq.id), "name" -> Json.fromString(seq.name))
+        Json.obj(
+          "id"               -> Json.fromString(seq.id),
+          "name"             -> Json.fromString(seq.name),
+          "initialVectorIds" -> Json.arr(seq.getInitialVectorIds.map(Json.fromString): _*),
+        )
       ): _*),
       "metadata"         -> metadata.asJson,
       "perceptualMapping" -> mappingJson
