@@ -1,9 +1,13 @@
 # RealityEngine_Scala
 
-Scala implementation of the Reality Engine (RE) and Perception Engine (PE).
-Black-box equivalent to [`RealityEngine_AI`](../RealityEngine_AI) (TypeScript, default)
-and [`RealityEngine_CPP`](../RealityEngine_CPP) (native C++) on the same machine JSON
+Scala implementation of the Reality Engine (RE) and Perception Engine (PE), and the
+active reference implementation for the suite. Black-box equivalent to
+[`RealityEngine_CPP`](../RealityEngine_CPP) (native C++) and
+[`RealityEngine_LSP`](../RealityEngine_LSP) (Common Lisp) on the same machine JSON
 corpus, governance contracts, and Prometheus metrics shape.
+[`RealityEngine_AI`](../RealityEngine_AI) is the deprecated TypeScript prototype —
+retained as the behavioral reference for core RE/PE semantics, not an active runtime
+target.
 
 ## Structure
 
