@@ -23,6 +23,10 @@ class PerceptualSpaceSimulator(dimension: Int = sys.env.getOrElse("VECTOR_DIMENS
   private var config:            Option[SimulationConfig] = None
   private var onStepComplete:    Option[(SimulationStep, Vector[Double]) => Unit] = None
   private var cachedEdges:       List[Json]           = Nil
+  // Arbitration records for the most recent step. Observability is not optional:
+  // the domain bus exists to make dynamic operation visible, and a resolution
+  // nobody can see is indistinguishable from no resolution at all.
+  private var lastArbitration:   List[Arbiter.ArbitrationRecord] = Nil
   // CES coverage registry — attached at boot in Main.scala to the same
   // instance the engine holds, so /api/perceive and /api/process-universal
   // bump the same counters that /api/metrics emits.
@@ -193,7 +197,13 @@ class PerceptualSpaceSimulator(dimension: Int = sys.env.getOrElse("VECTOR_DIMENS
 
     // Phase 2: process
     val machineResults    = scala.collection.mutable.Map.empty[String, MachineStepResult]
-    val pendingOutputs    = scala.collection.mutable.ListBuffer.empty[(Machine, Vector[Double])]
+    // GATHER — contributions, not writes. Nothing touches the perceptual array
+    // until the arbiter has resolved every contended cell (ARBITER_CONTRACT.md 2).
+    // The contribution carries cesId and the output vector because the
+    // trigger-rule join (4.3.1) needs them; the previous
+    // ListBuffer[(Machine, Vector[Double])] discarded both, which is what made
+    // SEVERITY unimplementable.
+    val contributions     = scala.collection.mutable.ListBuffer.empty[Arbiter.Contribution]
     val firedSequences    = scala.collection.mutable.ListBuffer.empty[(String, String)]
 
     for (machine <- mappedMachines) {
@@ -207,7 +217,22 @@ class PerceptualSpaceSimulator(dimension: Int = sys.env.getOrElse("VECTOR_DIMENS
         transition.sequenceResults.foreach { case (seqId, sr) =>
           if (sr.assertedOutputs.nonEmpty) {
             firedSequences += ((machine.id, seqId))
-            sr.assertedOutputs.foreach { ao => pendingOutputs += ((machine, ao.vector)) }
+            sr.assertedOutputs.foreach { ao =>
+              val rag = Arbiter.joinSeverity(machine.metadata, seqId, ao.vector)
+              var i = 0
+              while (i < ao.vector.length && i < mapping.output.length) {
+                contributions += Arbiter.Contribution(
+                  cell           = mapping.output.offset + i,
+                  value          = ao.vector(i),
+                  provider       = "machine",
+                  originId       = machine.id,
+                  cesId          = Some(seqId),
+                  outputVectorId = Some(ao.id),
+                  ragStatusCode  = rag
+                )
+                i += 1
+              }
+            }
           }
         }
       }
@@ -223,10 +248,47 @@ class PerceptualSpaceSimulator(dimension: Int = sys.env.getOrElse("VECTOR_DIMENS
       )
     }
 
-    // Phase 3: merge outputs, then apply compose event-bus subscriptions
-    pendingOutputs.foreach { case (machine, vec) =>
-      perceptualSpace.mergeMachineOutput(vec, machine.perceptualMapping.get)
-    }
+    // Phase 3: RESOLVE then COMMIT.
+    //
+    // Cells never interact, so the resolve is sharded across cell groups and
+    // joined. That is safe only because every admissible rule is a commutative
+    // monoid (4.1) — a rule that depended on ordering would make the result
+    // depend on the sharding, which the contract forbids and byte equivalence
+    // would catch.
+    val byCell: Map[Int, List[Arbiter.Contribution]] =
+      contributions.toList.groupBy(_.cell)
+
+    val shardCount = math.min(ArbiterParallelism.shards, math.max(1, byCell.size))
+    val shards     = byCell.toVector.grouped(math.max(1, (byCell.size + shardCount - 1) / shardCount)).toVector
+
+    val resolvedShards: Vector[Vector[(Int, Double, Option[Arbiter.ArbitrationRecord])]] =
+      if (shards.length <= 1) {
+        shards.map(_.map { case (cell, cs) =>
+          val (v, rec) = Arbiter.resolve(cell, stepNum, cs, ArbitrationRegistry.entryFor(cell))
+          (cell, v, rec)
+        })
+      } else {
+        import scala.concurrent.{Await, Future}
+        import scala.concurrent.duration._
+        implicit val ec: scala.concurrent.ExecutionContext = ArbiterParallelism.ec
+        val futures = shards.map { shard =>
+          Future {
+            shard.map { case (cell, cs) =>
+              val (v, rec) = Arbiter.resolve(cell, stepNum, cs, ArbitrationRegistry.entryFor(cell))
+              (cell, v, rec)
+            }
+          }
+        }
+        Await.result(Future.sequence(futures), 30.seconds)
+      }
+
+    // COMMIT — exactly one write per cell, into the head of the input event.
+    val records = scala.collection.mutable.ListBuffer.empty[Arbiter.ArbitrationRecord]
+    resolvedShards.foreach(_.foreach { case (cell, value, rec) =>
+      perceptualSpace.updateRegion(cell, Vector(value))
+      rec.foreach(records += _)
+    })
+    lastArbitration = records.toList
     applyEventBus(firedSequences.toSeq)
 
     val activeRegions = machineResults.values.flatMap { mr =>
@@ -256,6 +318,13 @@ class PerceptualSpaceSimulator(dimension: Int = sys.env.getOrElse("VECTOR_DIMENS
   }
 
   def stop(): Unit = { isRunning = false }
+
+  /** Arbitration records from the most recent step — contributors, rule applied,
+    * resolved value, and what was suppressed. Observability is not optional: a
+    * suppressed agent assessment must stay attributable, since "the agent's
+    * answer was discarded" is exactly the operational fact the domain bus exists
+    * to surface. */
+  def getLastArbitration: List[Arbiter.ArbitrationRecord] = lastArbitration
 
   def getCurrentStep: Int = currentStep
   def getHistory: List[SimulationStep] = history
