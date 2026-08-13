@@ -75,6 +75,12 @@ object Main extends App {
       println("✓ Vector store initialized")
       println("✓ Reality Engine initialized")
 
+      // Declares how each contended universal-vector position resolves. Loaded
+      // before the corpus so the first step already arbitrates rather than
+      // falling back (ARBITER_CONTRACT.md §5).
+      com.realityengine.engine.ArbitrationRegistry.load(
+        sys.env.getOrElse("MACHINES_DIR", "../RealityEngine_Machines/machines"))
+
       val routes   = new Routes(engine, simulator, auditCfg)
       routes.loadDefaultMachines()
 

@@ -1062,6 +1062,38 @@ class Routes(
         // Machine graph
         path("machine-graph") { get { complete(simulator.getMachineGraphData) } },
 
+        // Arbitration records for the most recent step (ARBITER_CONTRACT.md 6).
+        // A resolution nobody can observe is indistinguishable from no
+        // resolution, and a suppressed agent assessment has to stay
+        // attributable — "the agent's answer was discarded" is exactly the
+        // operational fact the domain bus exists to surface.
+        path("arbitration") { get {
+          val recs = simulator.getLastArbitration
+          complete(Json.obj(
+            "registryEntries" -> Json.fromInt(com.realityengine.engine.ArbitrationRegistry.size),
+            "registrySource"  -> com.realityengine.engine.ArbitrationRegistry.source
+                                   .map(Json.fromString).getOrElse(Json.Null),
+            "shards"          -> Json.fromInt(com.realityengine.engine.ArbiterParallelism.shards),
+            "count"           -> Json.fromInt(recs.length),
+            "records"         -> Json.arr(recs.map { r =>
+              def contrib(c: com.realityengine.engine.Arbiter.Contribution) = Json.obj(
+                "provider"       -> Json.fromString(c.provider),
+                "determinism"    -> Json.fromString(c.determinism),
+                "originId"       -> Json.fromString(c.originId),
+                "cesId"          -> c.cesId.map(Json.fromString).getOrElse(Json.Null),
+                "outputVectorId" -> c.outputVectorId.map(Json.fromString).getOrElse(Json.Null),
+                "ragStatusCode"  -> c.ragStatusCode.map(Json.fromString).getOrElse(Json.Null),
+                "value"          -> Json.fromDoubleOrNull(c.value))
+              Json.obj(
+                "instant"      -> Json.fromInt(r.instant),
+                "cell"         -> Json.fromInt(r.cell),
+                "rule"         -> Json.fromString(r.rule),
+                "resolved"     -> Json.fromDoubleOrNull(r.resolved),
+                "contributors" -> Json.arr(r.contributors.map(contrib): _*),
+                "suppressed"   -> Json.arr(r.suppressed.map(contrib): _*))
+            }: _*)))
+        } },
+
         // Perceptual simulation
         pathPrefix("perceptual-simulation") {
           concat(
