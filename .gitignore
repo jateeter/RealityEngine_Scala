@@ -10,3 +10,6 @@ data/
 logs/
 run/
 .env
+
+# Local agent/editor configuration
+.claude/
