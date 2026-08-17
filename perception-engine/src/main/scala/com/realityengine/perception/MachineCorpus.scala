@@ -158,7 +158,7 @@ object MachineCorpus {
     * per *machine*, every input sequence concatenated into `inputs`, and the
     * per-sequence boundaries retained in `metadata.segments`.
     */
-  def testSourceFor(machine: Json, activateOnLoad: Boolean = true): Option[TestSourceConfig] = {
+  def testSourceFor(machine: Json, activateOnLoad: Boolean = false): Option[TestSourceConfig] = {
     val c           = machine.hcursor
     val machineId   = c.get[String]("id").getOrElse("")
     val machineName = c.get[String]("name").getOrElse(machineId)
@@ -189,14 +189,14 @@ object MachineCorpus {
           id           = s"test-$machineId",
           name         = s"$machineName / $label",
           region       = Region(offset, length),
-          // Active on successful load. A machine that loaded is a machine the
-          // deployment asked for, and its source describes that machine — so
-          // leaving it inactive makes the PE's account of the corpus differ
-          // from the RE's for no reason the operator expressed.
+          // Inactive by default. Activating every machine source made all three
+          // runtimes replay their concatenated input sequences on every push,
+          // and the divergence went three-way rather than away (#36, and the
+          // measurements on RealityEngine_Scala#43): event-1 agreed across all
+          // three, events 2-5 differed between all three.
           //
-          // The corpus opt-in still forces active when declared; activateOnLoad
-          // is the parameterised override for a caller that wants the old
-          // opt-in-only behaviour.
+          // activateOnLoad (PE_SOURCE_ACTIVATE_ON_LOAD) turns it on for a
+          // deliberate experiment; a corpus opt-in still forces it per sequence.
           active       = activateOnLoad || segments.exists(_._3),
           machineId    = machineId,
           machineName  = machineName,

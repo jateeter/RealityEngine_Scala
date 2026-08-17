@@ -41,6 +41,10 @@ object PerceptionMain extends App {
   // source describing the old one, and nothing in a persisted source says
   // whether its machine still has the same CESs, interconnections or regions.
   val sourceMerge        = sys.env.getOrElse("PE_SOURCE_MERGE", "false") == "true"
+  // Activate every machine source on load. Off by default: turning it on made
+  // all three runtimes replay their input sequences on every push and the
+  // divergence went three-way (#36). Kept as a switch for experiments.
+  val activateOnLoad     = sys.env.getOrElse("PE_SOURCE_ACTIVATE_ON_LOAD", "false") == "true"
 
   val auditCfg = AuditConfig.fromEnv("perception-engine")
 
@@ -114,7 +118,7 @@ object PerceptionMain extends App {
       // Reload every corpus machine, whether or not a persisted source claims
       // to describe it. PE_SOURCE_MERGE=true opts back into skipping.
       seedSources(realityEngineUrl, engine, store, routes, mergeOnly = sourceMerge,
-                  pruneCorpus = pruneCorpus)
+                  pruneCorpus = pruneCorpus, activateOnLoad = activateOnLoad)
 
       sys.addShutdownHook {
         println("\nShutting down gracefully...")
@@ -131,7 +135,8 @@ object PerceptionMain extends App {
   // mergeOnly=false: replace all test sources wholesale (FRESH_START)
   def seedSources(realityEngineUrl: String, engine: PerceptionEngine, store: SourceStore,
                   routes: PerceptionRoutes, mergeOnly: Boolean,
-                  pruneCorpus: Boolean = false): Unit = {
+                  pruneCorpus: Boolean = false,
+                  activateOnLoad: Boolean = false): Unit = {
     Future {
       val backend = HttpURLConnectionBackend()
       var machinesJson: io.circe.Json = io.circe.Json.Null
@@ -199,7 +204,7 @@ object PerceptionMain extends App {
             // every corpus scenario played itself forward into the shared
             // reality vector on every push and machines reached outcomes the
             // input never asked for (#36).
-            MachineCorpus.testSourceFor(m) match {
+            MachineCorpus.testSourceFor(m, activateOnLoad) match {
               case Some(src) =>
                 engine.addSource(src)
                 seeded += 1

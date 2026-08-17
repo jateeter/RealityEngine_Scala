@@ -244,23 +244,20 @@ class MachineCorpusSpec extends AnyWordSpec with Matchers {
         Vector(Some("Interconnect Saturation Drift"), Some("Thermal Excursion"))
     }
 
-    "register active on successful load" in {
-      // A machine that loaded is a machine the deployment asked for, and its
-      // source describes that machine. Leaving it inactive made the PE's
-      // account of the corpus differ from the RE's for no reason the operator
-      // expressed, and differ per runtime.
-      //
-      // This asserted Some(false) — inactive unless a corpus sequence opted in
-      // (#36). The corpus never opts in, so in practice every machine source
-      // was inactive.
-      MachineCorpus.testSourceFor(dataCenterMachine).map(_.active) shouldBe Some(true)
+    "register inactive by default" in {
+      // Activating every machine source made all three runtimes replay their
+      // concatenated input sequences on every push, and the divergence went
+      // three-way rather than away: event-1 agreed across all three, events 2-5
+      // differed between all three (#36, and the measurements on
+      // RealityEngine_Scala#43). Inactive is the default the three runtimes
+      // share.
+      MachineCorpus.testSourceFor(dataCenterMachine).map(_.active) shouldBe Some(false)
     }
 
-    "register inactive when the caller overrides activateOnLoad" in {
-      // The parameterised override, for a caller that wants the old
-      // opt-in-only behaviour.
-      MachineCorpus.testSourceFor(dataCenterMachine, activateOnLoad = false)
-        .map(_.active) shouldBe Some(false)
+    "register active when the caller sets activateOnLoad" in {
+      // PE_SOURCE_ACTIVATE_ON_LOAD, for a deliberate experiment.
+      MachineCorpus.testSourceFor(dataCenterMachine, activateOnLoad = true)
+        .map(_.active) shouldBe Some(true)
     }
 
     "honour an explicit opt-in if a corpus ever declares one" in {
