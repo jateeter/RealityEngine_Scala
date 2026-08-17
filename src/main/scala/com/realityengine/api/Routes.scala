@@ -734,7 +734,33 @@ class Routes(
               val result = engine.processInputLegacy(vec)
               complete(Json.obj("result" -> result.asJson))
             } } },
-            path("reset") { post { engine.resetAllSequences(); complete(Json.obj("success" -> Json.fromBoolean(true))) } },
+            // Full reset, matching C++ and LSP. This called resetAllSequences()
+            // alone, so the endpoint meant "reset sequences" here and "reset
+            // everything" on the other two runtimes: the perceptual space and
+            // history survived it, verified live — 17 non-zero cells and 6
+            // history entries before and after, where C++ and LSP both went to
+            // zero (RealityEngine_Scala#43).
+            //
+            // The cost of that asymmetry is not confined to this endpoint. Any
+            // cross-runtime comparison that resets through it was measuring a
+            // cleared C++ and LSP against an uncleared Scala, which is how two
+            // engine "defects" came to be filed against the wrong runtimes
+            // (RealityEngine_CPP#32, RealityEngine_LSP#38).
+            //
+            // The three calls mirror C++'s handler one for one:
+            //   for (auto& m : machines) m.reset();  -> engine.resetAllSequences()
+            //   simulator.reset();                   -> simulator.reset()
+            //   perception.reset();                  -> perceptionEngine space
+            // simulator.reset() also resets its own machines, history, step
+            // counter and latched event bits; the perception engine keeps a
+            // separate perceptual space, which is the one C++'s PerceptionMapper
+            // ::reset() clears and which nothing here was clearing.
+            path("reset") { post {
+              engine.resetAllSequences()
+              simulator.reset()
+              engine.perceptionEngine.getPerceptualSpace.reset()
+              complete(Json.obj("success" -> Json.fromBoolean(true)))
+            } },
             path("stats") { get { complete(Json.obj("stats" -> engine.getStats)) } },
             path("active") { get {
               // Sequences order by (name, id), matching C++'s all_sequences().
