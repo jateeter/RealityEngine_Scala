@@ -7,6 +7,8 @@ project/project/target/
 *.class
 .DS_Store
 data/
+# Per-instance PE source stores (start.sh PE_DATA_PATH=./data-<instance>)
+data-*/
 logs/
 run/
 .env

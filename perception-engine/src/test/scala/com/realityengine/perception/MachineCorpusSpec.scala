@@ -244,11 +244,23 @@ class MachineCorpusSpec extends AnyWordSpec with Matchers {
         Vector(Some("Interconnect Saturation Drift"), Some("Thermal Excursion"))
     }
 
-    "register inactive, because no corpus sequence opts in" in {
-      // The corpus has no `active` property on an input sequence — the schema
-      // does not define one and no entry sets it — so scenario stimulus stays
-      // out of the shared reality vector until an operator activates it (#36).
-      MachineCorpus.testSourceFor(dataCenterMachine).map(_.active) shouldBe Some(false)
+    "register active on successful load" in {
+      // A machine that loaded is a machine the deployment asked for, and its
+      // source describes that machine. Leaving it inactive made the PE's
+      // account of the corpus differ from the RE's for no reason the operator
+      // expressed, and differ per runtime.
+      //
+      // This asserted Some(false) — inactive unless a corpus sequence opted in
+      // (#36). The corpus never opts in, so in practice every machine source
+      // was inactive.
+      MachineCorpus.testSourceFor(dataCenterMachine).map(_.active) shouldBe Some(true)
+    }
+
+    "register inactive when the caller overrides activateOnLoad" in {
+      // The parameterised override, for a caller that wants the old
+      // opt-in-only behaviour.
+      MachineCorpus.testSourceFor(dataCenterMachine, activateOnLoad = false)
+        .map(_.active) shouldBe Some(false)
     }
 
     "honour an explicit opt-in if a corpus ever declares one" in {

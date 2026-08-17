@@ -31,6 +31,16 @@ object PerceptionMain extends App {
     .getOrElse("http://localhost:5001")
   val dataPath           = sys.env.getOrElse("DATA_PATH", "./data")
   val isFresh            = args.contains("--fresh") || sys.env.getOrElse("FRESH_START", "false") == "true"
+  // Drop persisted sources whose machine is not in the corpus the Reality
+  // Engine actually loaded. Off by default because it deletes state; on, it is
+  // what makes the corpus gate below pass rather than merely report.
+  val pruneCorpus        = args.contains("--prune-corpus") ||
+                           sys.env.getOrElse("PRUNE_CORPUS", "false") == "true"
+  // Override: skip machines that already have a persisted source instead of
+  // reloading them. Off by default — a redefined machine must replace the
+  // source describing the old one, and nothing in a persisted source says
+  // whether its machine still has the same CESs, interconnections or regions.
+  val sourceMerge        = sys.env.getOrElse("PE_SOURCE_MERGE", "false") == "true"
 
   val auditCfg = AuditConfig.fromEnv("perception-engine")
 
@@ -101,7 +111,10 @@ object PerceptionMain extends App {
       val scheme = if (tlsEnabled) "https" else "http"
       println(s"\n✅ Perception Engine running on $scheme://$host:$port")
       println(s"   Reality Engine : $realityEngineUrl")
-      seedSources(realityEngineUrl, engine, store, routes, mergeOnly = !isFresh)
+      // Reload every corpus machine, whether or not a persisted source claims
+      // to describe it. PE_SOURCE_MERGE=true opts back into skipping.
+      seedSources(realityEngineUrl, engine, store, routes, mergeOnly = sourceMerge,
+                  pruneCorpus = pruneCorpus)
 
       sys.addShutdownHook {
         println("\nShutting down gracefully...")
@@ -117,7 +130,8 @@ object PerceptionMain extends App {
   //                 (preserves user-edited on/off state for known machines)
   // mergeOnly=false: replace all test sources wholesale (FRESH_START)
   def seedSources(realityEngineUrl: String, engine: PerceptionEngine, store: SourceStore,
-                  routes: PerceptionRoutes, mergeOnly: Boolean): Unit = {
+                  routes: PerceptionRoutes, mergeOnly: Boolean,
+                  pruneCorpus: Boolean = false): Unit = {
     Future {
       val backend = HttpURLConnectionBackend()
       var machinesJson: io.circe.Json = io.circe.Json.Null
@@ -164,6 +178,18 @@ object PerceptionMain extends App {
         machines.foreach { m =>
           val machineId   = m.hcursor.get[String]("id").getOrElse("")
           val machineName = m.hcursor.get[String]("name").getOrElse("")
+          // A machine present in the corpus is (re)loaded, always. The previous
+          // behaviour skipped any machine that already had a source, so a
+          // persisted source outlived the machine it described: nothing
+          // guarantees the redefined machine has the same CESs, the same
+          // interconnections, or the same regions — it may be a full
+          // replacement. Keeping the old source in that case is silently
+          // wrong, and it is not detectable from the source itself.
+          //
+          // addSource replaces by id, and the id is derived from the machine
+          // (test-<machineId>), so a reload overwrites in place rather than
+          // duplicating. PE_SOURCE_MERGE=true restores the old skip for a
+          // caller that wants it.
           if (mergeOnly && seededMachineIds.contains(machineId)) {
             skipped += 1
           } else {
@@ -184,6 +210,96 @@ object PerceptionMain extends App {
         }
         val mode = if (mergeOnly) "merge" else "fresh"
         println(s"[Seed] ($mode) Added $seeded source(s), skipped $skipped machines with existing sources, from ${machines.size} machine(s)")
+
+        // ── Corpus gate ───────────────────────────────────────────────────────
+        //
+        // The PE's machine-backed sources must describe the same corpus the
+        // Reality Engine loaded, and nothing was checking that. Persisted
+        // sources are restored on start and then *supplemented* from the RE —
+        // never reconciled — so a source whose machine left the corpus stays
+        // forever. A full-corpus run left 1,361 sources on disk, and every
+        // 12-machine deployment afterwards restored all of them and pushed
+        // 1,180 active sources into the shared reality vector on every push,
+        // while C++ and LSP pushed none.
+        //
+        // That is not a small drift. It put this runtime one CES transition
+        // ahead of the other two from the first push and was reported as a
+        // Scala semantics defect (RealityEngine_Scala#43) after first being
+        // reported against LSP (RealityEngine_LSP#38) — neither was a runtime
+        // fault. A before/after count is cheap and would have named it
+        // immediately.
+        val corpusIds: Set[String] =
+          machines.flatMap(_.hcursor.get[String]("id").toOption).toSet
+        def machineBackedIds: Set[String] =
+          engine.getSources.collect { case t: TestSourceConfig => t.machineId }.toSet
+
+        val before      = machineBackedIds
+        val beforeTotal = engine.getSources.size
+        val strays      = before -- corpusIds
+
+        // Two kinds of leftover, and pruning only the first is what left 17
+        // sources behind on the first attempt at this.
+        //
+        //   stray   — a test source whose machine is not in the loaded corpus
+        //   dangling— a source with no machine behind it at all: the sensor
+        //             sources localAIStack, OpenClaw and the bridges register.
+        //             They persist and are restored on every start, active,
+        //             even when the stack that owns them is not running.
+        //
+        // Dropping the dangling ones is safe because their owners re-register
+        // on their own startup — localAIStack's register_sensors() posts them
+        // every time the bridge comes up — so a provider that is running gets
+        // its sensors back, and one that is not should not be contributing to
+        // the reality vector in the first place.
+        val prunedStray =
+          if (pruneCorpus && strays.nonEmpty) {
+            val ids = engine.getSources.collect {
+              case t: TestSourceConfig if strays.contains(t.machineId) => t.id
+            }
+            ids.foreach(engine.removeSource)
+            ids.size
+          } else 0
+
+        val prunedDangling =
+          if (pruneCorpus) {
+            val ids = engine.getSources.collect {
+              case s if !s.isInstanceOf[TestSourceConfig] => s.id
+            }
+            ids.foreach(engine.removeSource)
+            ids.size
+          } else 0
+
+        val after      = machineBackedIds
+        val afterTotal = engine.getSources.size
+        val dangling   = afterTotal - after.size
+        println(s"[Corpus] Reality Engine loaded ${corpusIds.size} machine(s); " +
+                s"PE sources before=$beforeTotal after=$afterTotal " +
+                s"(machine-backed ${before.size} -> ${after.size})" +
+                (if (prunedStray + prunedDangling > 0)
+                   s" [pruned $prunedStray stray, $prunedDangling dangling]"
+                 else ""))
+        if (dangling > 0)
+          println(s"[Corpus] $dangling source(s) have no machine behind them (provider-registered); " +
+                  s"PRUNE_CORPUS=true drops them and lets their owners re-register")
+
+        val remaining = after -- corpusIds
+        if (remaining.nonEmpty) {
+          // Loud, and not fatal: refusing to start would take out a running
+          // universe over state the operator can clear with one flag. The
+          // regression lane asserts on this line rather than on a health code.
+          println(s"[Corpus] GATE FAILED: ${remaining.size} PE source(s) reference machines " +
+                  s"outside the loaded corpus — the PE is pushing signal the other runtimes " +
+                  s"never see. Restart with PRUNE_CORPUS=true (or --prune-corpus) to drop them, " +
+                  s"or FRESH_START=true to ignore the persisted store entirely.")
+          println(s"[Corpus] first stray machineIds: ${remaining.toVector.sorted.take(5).mkString(", ")}")
+        } else if (after.size != corpusIds.size) {
+          val missing = corpusIds -- after
+          println(s"[Corpus] GATE WARNING: ${missing.size} loaded machine(s) have no PE source; " +
+                  s"first: ${missing.toVector.sorted.take(5).mkString(", ")}")
+        } else {
+          println(s"[Corpus] GATE OK: PE sources and Reality Engine corpus agree at ${after.size} machine(s)")
+        }
+
         store.save(engine.getSources)
       }
     }(ec)
