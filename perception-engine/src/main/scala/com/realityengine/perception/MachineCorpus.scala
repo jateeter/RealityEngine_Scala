@@ -158,7 +158,7 @@ object MachineCorpus {
     * per *machine*, every input sequence concatenated into `inputs`, and the
     * per-sequence boundaries retained in `metadata.segments`.
     */
-  def testSourceFor(machine: Json): Option[TestSourceConfig] = {
+  def testSourceFor(machine: Json, activateOnLoad: Boolean = false): Option[TestSourceConfig] = {
     val c           = machine.hcursor
     val machineId   = c.get[String]("id").getOrElse("")
     val machineName = c.get[String]("name").getOrElse(machineId)
@@ -172,12 +172,8 @@ object MachineCorpus {
       val sc      = seq.hcursor
       val seqName = sc.get[String]("name").getOrElse("Test sequence")
       val vectors = sc.downField("vectors").as[Vector[Vector[Double]]].getOrElse(Vector.empty)
-      // An explicit opt-in is honoured if a corpus ever declares one.  None
-      // does today: `schemas/machine.schema.json` does not define `active` on
-      // an input sequence and no corpus entry sets it, so in practice this
-      // resolves to inactive — which is what C++ and LSP both do, and what
-      // keeps scenario stimulus out of the shared reality vector until an
-      // operator asks for it.
+      // An explicit corpus opt-in is still honoured. It is no longer the only
+      // way a source becomes active: see activateOnLoad below.
       val optedIn = sc.get[Boolean]("active").getOrElse(false)
       if (vectors.nonEmpty) Some((seqName, vectors, optedIn)) else None
     }
@@ -193,7 +189,15 @@ object MachineCorpus {
           id           = s"test-$machineId",
           name         = s"$machineName / $label",
           region       = Region(offset, length),
-          active       = segments.exists(_._3),
+          // Inactive by default. Activating every machine source made all three
+          // runtimes replay their concatenated input sequences on every push,
+          // and the divergence went three-way rather than away (#36, and the
+          // measurements on RealityEngine_Scala#43): event-1 agreed across all
+          // three, events 2-5 differed between all three.
+          //
+          // activateOnLoad (PE_SOURCE_ACTIVATE_ON_LOAD) turns it on for a
+          // deliberate experiment; a corpus opt-in still forces it per sequence.
+          active       = activateOnLoad || segments.exists(_._3),
           machineId    = machineId,
           machineName  = machineName,
           sequenceName = label,

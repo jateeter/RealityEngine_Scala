@@ -244,11 +244,20 @@ class MachineCorpusSpec extends AnyWordSpec with Matchers {
         Vector(Some("Interconnect Saturation Drift"), Some("Thermal Excursion"))
     }
 
-    "register inactive, because no corpus sequence opts in" in {
-      // The corpus has no `active` property on an input sequence — the schema
-      // does not define one and no entry sets it — so scenario stimulus stays
-      // out of the shared reality vector until an operator activates it (#36).
+    "register inactive by default" in {
+      // Activating every machine source made all three runtimes replay their
+      // concatenated input sequences on every push, and the divergence went
+      // three-way rather than away: event-1 agreed across all three, events 2-5
+      // differed between all three (#36, and the measurements on
+      // RealityEngine_Scala#43). Inactive is the default the three runtimes
+      // share.
       MachineCorpus.testSourceFor(dataCenterMachine).map(_.active) shouldBe Some(false)
+    }
+
+    "register active when the caller sets activateOnLoad" in {
+      // PE_SOURCE_ACTIVATE_ON_LOAD, for a deliberate experiment.
+      MachineCorpus.testSourceFor(dataCenterMachine, activateOnLoad = true)
+        .map(_.active) shouldBe Some(true)
     }
 
     "honour an explicit opt-in if a corpus ever declares one" in {

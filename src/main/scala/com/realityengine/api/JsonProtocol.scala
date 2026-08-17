@@ -80,13 +80,28 @@ object JsonProtocol {
     )
   }
 
+  implicit val encodeEventBusWrite: Encoder[EventBusWrite] = Encoder.instance { w =>
+    Json.obj(
+      "producerMachineId"   -> Json.fromString(w.producerMachineId),
+      "producerSequenceId"  -> Json.fromString(w.producerSequenceId),
+      "subscriberMachineId" -> Json.fromString(w.subscriberMachineId),
+      "bitOffset"           -> Json.fromInt(w.bitOffset),
+      "value"               -> Json.fromDoubleOrNull(w.value)
+    )
+  }
+
   implicit val encodeSimulationStep: Encoder[SimulationStep] = Encoder.instance { ss =>
     Json.obj(
       "stepNumber"      -> Json.fromInt(ss.stepNumber),
       "timestamp"       -> Json.fromLong(ss.timestamp),
       "perceptualSpace" -> ss.perceptualSpace.asJson,
       "machineResults"  -> Json.fromFields(ss.machineResults.view.mapValues(_.asJson).toSeq),
-      "activeRegions"   -> ss.activeRegions.asJson
+      "activeRegions"   -> ss.activeRegions.asJson,
+      // Both required of every runtime by SURFACE_SPEC.md and previously absent
+      // here, which made this runtime's step a different shape from C++'s and
+      // LSP's for an identical computation.
+      "eventBus"        -> ss.eventBus.asJson,
+      "perceptualSpaceIsDebugProjection" -> Json.True
     )
   }
 

@@ -33,6 +33,13 @@ object PushRequest {
     * populated one returns the populated one unchanged, so it would read like
     * a fix and clear nothing.
     */
+  /** Omit machineResults under `compact`, per SURFACE_SPEC.md.
+    *
+    * This replaced the value with an empty object instead of removing the key.
+    * An empty object is not an absent key to a consumer walking the response,
+    * and the other two runtimes omit it — so a compact push from here was a
+    * different shape from a compact push from C++ or LSP.
+    */
   def redactMachineResults(step: Json): Json =
-    step.mapObject(_.add("machineResults", Json.obj()))
+    step.mapObject(_.remove("machineResults"))
 }

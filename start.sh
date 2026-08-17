@@ -29,6 +29,19 @@ QDRANT_URL="${QDRANT_URL:-http://localhost:4333}"
 LOCAL_AI_API_URL="${LOCAL_AI_API_URL:-http://localhost:4000}"
 LOCAL_AI_MACHINES_DIR="${LOCAL_AI_MACHINES_DIR:-../localAIStack/data/machines}"
 REALITY_ENGINE_URL="${REALITY_ENGINE_URL:-http://localhost:${REALITY_ENGINE_PORT}}"
+# The PE persists its sources and restores them on start. Its store was never
+# passed here, so it defaulted to ./data relative to this script — one store
+# shared by every instance, and one that survives a corpus change. A run that
+# loaded the full corpus left 1,361 sources behind; every 12-machine deployment
+# after it restored all of them and pushed 1,180 active sources into the shared
+# reality vector, while C++ and LSP pushed none (RealityEngine_Scala#43).
+#
+# Scoping the store per instance means a corpus change cannot leak across
+# instances, and PRUNE_CORPUS gives the operator a way to reconcile a store that
+# already drifted. The PE's own corpus gate reports the before/after counts
+# either way.
+FRESH_START="${FRESH_START:-false}"
+PRUNE_CORPUS="${PRUNE_CORPUS:-false}"
 # PE integration registry — HealthKit / CareKit ingest routing.
 # localAIStack personal-health domain: ../localAIStack/config/pe-integrations.json
 _DEFAULT_INTEGRATIONS_CONFIG="../RealityEngine_CI/config/integrations.json"
@@ -49,6 +62,9 @@ ACP_COMPLETION_SOURCE_MAPPING_ID="${ACP_COMPLETION_SOURCE_MAPPING_ID:-acp-opencl
 HOST="${HOST:-0.0.0.0}"
 INSTANCE_ID="${INSTANCE_ID:-}"
 _INST="${INSTANCE_ID:+-${INSTANCE_ID}}"
+# Per-instance PE source store. Defined here rather than with the other defaults
+# because it depends on _INST; see the note above REALITY_ENGINE_URL.
+PE_DATA_PATH="${PE_DATA_PATH:-./data${_INST}}"
 SBT="${SBT:-sbt}"
 
 RUN_DIR="$ROOT_DIR/run"
@@ -162,6 +178,10 @@ PORT="$PERCEPTION_ENGINE_PORT" \
 PERCEPTION_ENGINE_PORT="$PERCEPTION_ENGINE_PORT" \
 REALITY_ENGINE_URL="$REALITY_ENGINE_URL" \
 VECTOR_DIMENSION="$VECTOR_DIMENSION" \
+DATA_PATH="$PE_DATA_PATH" \
+FRESH_START="$FRESH_START" \
+PRUNE_CORPUS="$PRUNE_CORPUS" \
+MACHINES_DIR="$_machines_load_dir" \
 LOCAL_AI_API_URL="$LOCAL_AI_API_URL" \
 LOCAL_AI_MACHINES_DIR="$LOCAL_AI_MACHINES_DIR" \
 INTEGRATIONS_CONFIG="$INTEGRATIONS_CONFIG" \

@@ -117,12 +117,28 @@ case class MachineStepResult(
   transitionResult: MachineTransitionResult
 )
 
+/** One event-bus write performed during a step.
+  *
+  * Reported so the step can carry `eventBus`, which SURFACE_SPEC.md requires of
+  * every runtime. The writes were previously applied to the perceptual space and
+  * discarded, so this runtime could not report what C++ and LSP both reported.
+  * Shape follows C++'s EventBusWrite.
+  */
+case class EventBusWrite(
+  producerMachineId:   String,
+  producerSequenceId:  String,
+  subscriberMachineId: String,
+  bitOffset:           Int,
+  value:               Double
+)
+
 case class SimulationStep(
   stepNumber:     Int,
   timestamp:      Long,
   perceptualSpace: Vector[Double],
   machineResults: Map[String, MachineStepResult],
-  activeRegions:  List[ActiveRegion]
+  activeRegions:  List[ActiveRegion],
+  eventBus:       List[EventBusWrite] = Nil
 )
 
 case class SimulationConfig(
