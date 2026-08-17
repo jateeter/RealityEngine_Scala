@@ -69,9 +69,13 @@ class PerceptualSpaceSimulator(dimension: Int = sys.env.getOrElse("VECTOR_DIMENS
     }
   }
 
-  private def applyEventBus(firedSequences: Seq[(String, String)]): Unit = {
-    if (eventBusSubscriptions.isEmpty || firedSequences.isEmpty) return
-    val seen = scala.collection.mutable.Set.empty[String]
+  // Returns the writes it performed. They used to be applied and discarded, so
+  // the step could not carry `eventBus` — a key SURFACE_SPEC.md requires of
+  // every runtime and which C++ and LSP both emitted.
+  private def applyEventBus(firedSequences: Seq[(String, String)]): List[EventBusWrite] = {
+    if (eventBusSubscriptions.isEmpty || firedSequences.isEmpty) return Nil
+    val seen    = scala.collection.mutable.Set.empty[String]
+    val writes  = List.newBuilder[EventBusWrite]
     for ((machineId, seqId) <- firedSequences) {
       val key = composeKey(machineId, seqId)
       eventBusSubscriptions.getOrElse(key, Nil).foreach { sub =>
@@ -80,9 +84,11 @@ class PerceptualSpaceSimulator(dimension: Int = sys.env.getOrElse("VECTOR_DIMENS
           perceptualSpace.growTo(sub.bitOffset + 1)
           perceptualSpace.updateRegion(sub.bitOffset, Vector(1.0))
           latchedEventBits = latchedEventBits + sub.bitOffset
+          writes += EventBusWrite(machineId, seqId, sub.subscriberMachineId, sub.bitOffset, 1.0)
         }
       }
     }
+    writes.result()
   }
 
   private def applyLatchedEventBits(): Unit =
@@ -289,7 +295,7 @@ class PerceptualSpaceSimulator(dimension: Int = sys.env.getOrElse("VECTOR_DIMENS
       rec.foreach(records += _)
     })
     lastArbitration = records.toList
-    applyEventBus(firedSequences.toSeq)
+    val eventBusWrites = applyEventBus(firedSequences.toSeq)
 
     val activeRegions = machineResults.values.flatMap { mr =>
       val inp = ActiveRegion(mr.inputRegion.offset, mr.inputRegion.length, mr.machineId, "input")
@@ -304,7 +310,8 @@ class PerceptualSpaceSimulator(dimension: Int = sys.env.getOrElse("VECTOR_DIMENS
       timestamp       = System.currentTimeMillis(),
       perceptualSpace = perceptualSpace.getPerceptualVector,
       machineResults  = machineResults.toMap,
-      activeRegions   = activeRegions
+      activeRegions   = activeRegions,
+      eventBus        = eventBusWrites
     )
   }
 

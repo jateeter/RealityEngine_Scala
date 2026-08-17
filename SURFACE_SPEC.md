@@ -181,6 +181,46 @@ Default ports: Scala 5000 · CPP 5300 · LSP 5600
 | POST | `/api/auto/start` | ✓ | ✓ | ✓ |
 | POST | `/api/auto/stop` | ✓ | ✓ | ✓ |
 
+#### `POST /api/push` response shape
+
+The push response is how the Reality Engine's result travels back to the
+Perception Engine, and it is a contract, not an implementation detail. Every
+runtime emits the same `step` object with the same keys.
+
+This was not previously specified, and all three runtimes diverged — for an
+identical computation. LSP omitted `perceptualSpace` under `compact` and emitted an
+`inputVector` the others did not, and Scala omitted `eventBus` and
+`perceptualSpaceIsDebugProjection` entirely and ignored `compact`. Anything
+walking the response saw three different pictures of the same reality, which is
+what the cross-runtime parity stage was reporting as engine divergence.
+
+`step` keys, every runtime:
+
+| Key | compact | full | Notes |
+|-----|---------|------|-------|
+| `stepNumber` | ✓ | ✓ | |
+| `timestamp` | ✓ | ✓ | |
+| `perceptualSpace` | ✓ | ✓ | **Always present.** The reality vector after the step — the reason the response exists. |
+| `perceptualSpaceIsDebugProjection` | ✓ | ✓ | |
+| `activeRegions` | ✓ | ✓ | |
+| `mergeBatch` | ✓ | ✓ | |
+| `eventBus` | ✓ | ✓ | |
+| `machineResults` | — | ✓ | Per-machine detail; omitted when `compact` |
+
+`compact: true` omits exactly `machineResults` — the heavy per-machine payload —
+and nothing else. A runtime that ignores `compact` does not satisfy the
+contract: `compact` is what makes the response affordable at corpus scale.
+
+`inputVector` is deliberately **not** in the contract. LSP emitted one; the
+other two never did. The Perception Engine assembled that vector and sent it,
+so echoing it back is redundant, and C++'s `SimulationStep` has no step-level
+input vector to echo — only per-machine ones inside `machineResults`.
+
+Verified live by `RealityEngine_CI/scripts/regression-pe-step-contract.py`,
+which drives a push against every running PE and compares the emitted key sets
+against this table. It runs as the `pe-step-contract` stage of the regression
+lane, so the contract is observable rather than aspirational.
+
 ### Configuration & Reset
 
 | Method | Path | CPP | LSP | Scala |

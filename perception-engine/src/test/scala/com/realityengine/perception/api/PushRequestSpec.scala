@@ -46,11 +46,15 @@ class PushRequestSpec extends AnyWordSpec with Matchers with ScalatestRouteTest 
       "machineResults" -> Json.obj("machine-a" -> Json.obj("outputVector" -> Json.arr(Json.fromInt(1)))),
     )
 
-    "keep the key and empty its contents" in {
+    "omit the key entirely" in {
+      // This asserted the key stayed present with an empty object — "the LSP
+      // shape, not the C++ shape". SURFACE_SPEC.md now specifies one shape for
+      // all three: `compact` omits machineResults. An empty object is not an
+      // absent key to a consumer walking the response, and it made a compact
+      // push from this runtime a different shape from C++'s and LSP's.
       val out = PushRequest.redactMachineResults(populated)
-      out.hcursor.downField("machineResults").focus shouldBe Some(Json.obj())
-      // present, not removed — this is the LSP shape, not the C++ shape
-      out.asObject.map(_.contains("machineResults")) shouldBe Some(true)
+      out.asObject.map(_.contains("machineResults")) shouldBe Some(false)
+      out.hcursor.downField("machineResults").focus shouldBe None
     }
 
     "leave every other field alone" in {
@@ -58,13 +62,14 @@ class PushRequestSpec extends AnyWordSpec with Matchers with ScalatestRouteTest 
       out.hcursor.get[Int]("stepNumber") shouldBe Right(1)
     }
 
-    "actually clear it, where deepMerge would not" in {
-      // Guards the reason `add` is used: deep-merging an empty object into a
-      // populated one is a no-op, so the obvious implementation silently fails.
+    "actually remove it, where deepMerge would not" in {
+      // Guards the reason an explicit remove is used: deep-merging an empty
+      // object into a populated one is a no-op, so the obvious implementation
+      // silently leaves the payload in place.
       val viaDeepMerge = populated.deepMerge(Json.obj("machineResults" -> Json.obj()))
-      viaDeepMerge.hcursor.downField("machineResults").focus should not be Some(Json.obj())
+      viaDeepMerge.asObject.map(_.contains("machineResults")) shouldBe Some(true)
       PushRequest.redactMachineResults(populated)
-        .hcursor.downField("machineResults").focus shouldBe Some(Json.obj())
+        .asObject.map(_.contains("machineResults")) shouldBe Some(false)
     }
   }
 
