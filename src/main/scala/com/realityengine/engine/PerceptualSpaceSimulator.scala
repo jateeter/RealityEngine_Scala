@@ -17,6 +17,10 @@ class PerceptualSpaceSimulator(dimension: Int = sys.env.getOrElse("VECTOR_DIMENS
   private val perceptualSpace    = new PerceptualSpace(dimension)
   private var machines:          Map[String, Machine] = Map.empty
   private var history:           List[SimulationStep] = Nil
+  // Trajectory histories — see SURFACE_SPEC.md, "Trajectory histories".
+  private var isreHistory:       Vector[TrajectoryEntry] = Vector.empty
+  private var orevHistory:       Vector[TrajectoryEntry] = Vector.empty
+  private val maxTrajectory:     Int                     = 1024
   private var currentStep:       Int                  = 0
   private var immediateStepCount: Int                 = 0
   private var isRunning:         Boolean              = false
@@ -157,7 +161,15 @@ class PerceptualSpaceSimulator(dimension: Int = sys.env.getOrElse("VECTOR_DIMENS
     stop()
     perceptualSpace.reset()
     history = Nil
+    isreHistory = Vector.empty
+    orevHistory = Vector.empty
     currentStep = 0
+    // Reset cleared the histories and left this counting, so the first step of
+    // a reset engine was stepNumber 19 while its history held one entry. LSP
+    // zeroed its step counter here and this did not, which makes `stepNumber`
+    // mean something different per runtime the moment anything resets — and the
+    // trajectory histories are compared by it (RealityEngine_CI#148).
+    immediateStepCount = 0
     latchedEventBits = Set.empty
     machines.values.foreach(_.reset())
   }
@@ -198,6 +210,16 @@ class PerceptualSpaceSimulator(dimension: Int = sys.env.getOrElse("VECTOR_DIMENS
 
     // Phase 1: snapshot + re-apply latched event bits
     applyLatchedEventBits()
+
+    // ISRE(n) observation point. This is the input space reality event the
+    // corpus is about to be presented with: the snapshots below are extracted
+    // from exactly this state, so capturing it here — after the latched bits
+    // are re-applied and before the first extract — records what the corpus
+    // read rather than an approximation of it. The arbitration feedback from
+    // step n-1 is already merged in; the gap between this and the seed is what
+    // arbitration did.
+    val isre = sparseTrajectory(stepNum, perceptualSpace.getPerceptualVector)
+
     val inputSnapshots: Map[String, Vector[Double]] =
       mappedMachines.map(m => m.id -> perceptualSpace.extractMachineInput(m.perceptualMapping.get)).toMap
 
@@ -211,6 +233,7 @@ class PerceptualSpaceSimulator(dimension: Int = sys.env.getOrElse("VECTOR_DIMENS
     // SEVERITY unimplementable.
     val contributions     = scala.collection.mutable.ListBuffer.empty[Arbiter.Contribution]
     val firedSequences    = scala.collection.mutable.ListBuffer.empty[(String, String)]
+    val mergeOps          = scala.collection.mutable.ListBuffer.empty[MergeOperation]
 
     for (machine <- mappedMachines) {
       val snapshot     = inputSnapshots(machine.id)
@@ -223,7 +246,14 @@ class PerceptualSpaceSimulator(dimension: Int = sys.env.getOrElse("VECTOR_DIMENS
         transition.sequenceResults.foreach { case (seqId, sr) =>
           if (sr.assertedOutputs.nonEmpty) {
             firedSequences += ((machine.id, seqId))
-            sr.assertedOutputs.foreach { ao =>
+            sr.assertedOutputs.zipWithIndex.foreach { case (ao, outputIndex) =>
+              mergeOps += MergeOperation(
+                region      = RegionMapping(mapping.output.offset, mapping.output.length),
+                machineId   = machine.id,
+                sequenceId  = seqId,
+                outputIndex = outputIndex,
+                values      = ao.vector
+              )
               val rag = Arbiter.joinSeverity(machine.metadata, seqId, ao.vector)
               var i = 0
               while (i < ao.vector.length && i < mapping.output.length) {
@@ -289,11 +319,22 @@ class PerceptualSpaceSimulator(dimension: Int = sys.env.getOrElse("VECTOR_DIMENS
       }
 
     // COMMIT — exactly one write per cell, into the head of the input event.
-    val records = scala.collection.mutable.ListBuffer.empty[Arbiter.ArbitrationRecord]
+    //
+    // OREV(n) observation point. The corpus's output for this step exists as a
+    // single-valued vector at exactly one instant: after resolution, as it is
+    // committed. Recording it in the same loop as the writes is what makes the
+    // entry and the space agree by construction rather than by a later read
+    // that could observe a different state. Sorted by cell because the shards
+    // join in completion order and ordering is part of the contract.
+    val records   = scala.collection.mutable.ListBuffer.empty[Arbiter.ArbitrationRecord]
+    val orevCells = scala.collection.mutable.ListBuffer.empty[TrajectoryCell]
     resolvedShards.foreach(_.foreach { case (cell, value, rec) =>
       perceptualSpace.updateRegion(cell, Vector(value))
+      if (value != 0.0) orevCells += TrajectoryCell(cell, value)
       rec.foreach(records += _)
     })
+    val orev = TrajectoryEntry(stepNum, perceptualSpace.getPerceptualVector.length,
+                               orevCells.toList.sortBy(_.index))
     lastArbitration = records.toList
     val eventBusWrites = applyEventBus(firedSequences.toSeq)
 
@@ -305,14 +346,41 @@ class PerceptualSpaceSimulator(dimension: Int = sys.env.getOrElse("VECTOR_DIMENS
       }
     }.toList
 
+    recordTrajectory(isre, orev)
+
     SimulationStep(
       stepNumber      = stepNum,
       timestamp       = System.currentTimeMillis(),
       perceptualSpace = perceptualSpace.getPerceptualVector,
       machineResults  = machineResults.toMap,
       activeRegions   = activeRegions,
+      // Canonical merge ordering — (machineId, sequenceId, outputIndex), the
+      // same comparator C++ applies, so the batch is a function of the corpus
+      // and the input rather than of map iteration order.
+      mergeBatch      = mergeOps.toList.sortBy(op => (op.machineId, op.sequenceId, op.outputIndex)),
       eventBus        = eventBusWrites
     )
+  }
+
+  /** Dense vector -> sparse trajectory entry. A cell absent from the result is
+    * zero; `length` keeps the dense width so the reconstruction is exact. */
+  private def sparseTrajectory(stepNum: Int, dense: Vector[Double]): TrajectoryEntry =
+    TrajectoryEntry(stepNum, dense.length,
+                    dense.iterator.zipWithIndex.collect {
+                      case (v, i) if v != 0.0 => TrajectoryCell(i, v)
+                    }.toList)
+
+  /** Appends ISRE(n) and OREV(n) together. They are captured at their own
+    * observation points inside the step and recorded in one action, so no
+    * observer can see a step whose trajectories are half-written.
+    *
+    * Ascending stepNumber — oldest first. The step history is newest first
+    * because it is read as "what just happened"; these are read as sequences to
+    * be compared element by element, and the index of the first disagreement is
+    * the answer they exist to give. */
+  private def recordTrajectory(isre: TrajectoryEntry, orev: TrajectoryEntry): Unit = {
+    isreHistory = (isreHistory :+ isre).takeRight(maxTrajectory)
+    orevHistory = (orevHistory :+ orev).takeRight(maxTrajectory)
   }
 
   // ── Auto-play (synchronous scheduler stub) ────────────────────────────────
@@ -335,6 +403,18 @@ class PerceptualSpaceSimulator(dimension: Int = sys.env.getOrElse("VECTOR_DIMENS
 
   def getCurrentStep: Int = currentStep
   def getHistory: List[SimulationStep] = history
+
+  /** Ascending stepNumber, oldest first. `from` is the first stepNumber to
+    * include; `limit` caps the entries returned from there (0 = all). A
+    * comparison walks these by index across engines and reports the first
+    * disagreement, so the window has to be selectable by step, not by recency. */
+  def getOrevHistory(from: Int = 0, limit: Int = 0): List[TrajectoryEntry] = window(orevHistory, from, limit)
+  def getIsreHistory(from: Int = 0, limit: Int = 0): List[TrajectoryEntry] = window(isreHistory, from, limit)
+
+  private def window(entries: Vector[TrajectoryEntry], from: Int, limit: Int): List[TrajectoryEntry] = {
+    val fromStep = entries.dropWhile(_.stepNumber < from)
+    (if (limit > 0) fromStep.take(limit) else fromStep).toList
+  }
   def getIsRunning: Boolean = isRunning
   def getConfig: Option[SimulationConfig] = config
   def getStepDelayMs: Long = config.map(_.stepDelayMs).getOrElse(100L)

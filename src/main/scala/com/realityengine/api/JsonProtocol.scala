@@ -80,6 +80,32 @@ object JsonProtocol {
     )
   }
 
+  // Key order follows C++'s to_json(SimulationStep) mergeBatch object, which
+  // SURFACE_SPEC.md governs. Ordering is part of the contract, not a rendering
+  // preference — an observer must see the same object however it was produced.
+  implicit val encodeMergeOperation: Encoder[MergeOperation] = Encoder.instance { op =>
+    Json.obj(
+      "region"      -> op.region.asJson,
+      "machineId"   -> Json.fromString(op.machineId),
+      "sequenceId"  -> Json.fromString(op.sequenceId),
+      "outputIndex" -> Json.fromInt(op.outputIndex),
+      "values"      -> op.values.asJson,
+      "provenance"  -> op.provenance.asJson
+    )
+  }
+
+  implicit val encodeTrajectoryCell: Encoder[TrajectoryCell] = Encoder.instance { c =>
+    Json.obj("index" -> Json.fromInt(c.index), "value" -> Json.fromDoubleOrNull(c.value))
+  }
+
+  implicit val encodeTrajectoryEntry: Encoder[TrajectoryEntry] = Encoder.instance { e =>
+    Json.obj(
+      "stepNumber" -> Json.fromInt(e.stepNumber),
+      "length"     -> Json.fromInt(e.length),
+      "nonZero"    -> e.nonZero.asJson
+    )
+  }
+
   implicit val encodeEventBusWrite: Encoder[EventBusWrite] = Encoder.instance { w =>
     Json.obj(
       "producerMachineId"   -> Json.fromString(w.producerMachineId),
@@ -97,9 +123,10 @@ object JsonProtocol {
       "perceptualSpace" -> ss.perceptualSpace.asJson,
       "machineResults"  -> Json.fromFields(ss.machineResults.view.mapValues(_.asJson).toSeq),
       "activeRegions"   -> ss.activeRegions.asJson,
-      // Both required of every runtime by SURFACE_SPEC.md and previously absent
-      // here, which made this runtime's step a different shape from C++'s and
-      // LSP's for an identical computation.
+      // All three required of every runtime by SURFACE_SPEC.md and previously
+      // absent here, which made this runtime's step a different shape from
+      // C++'s and LSP's for an identical computation.
+      "mergeBatch"      -> ss.mergeBatch.asJson,
       "eventBus"        -> ss.eventBus.asJson,
       "perceptualSpaceIsDebugProjection" -> Json.True
     )

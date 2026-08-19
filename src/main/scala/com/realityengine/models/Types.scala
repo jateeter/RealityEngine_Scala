@@ -132,14 +132,38 @@ case class EventBusWrite(
   value:               Double
 )
 
+// One machine output staged for merge into the perceptual space. Required of
+// every runtime by SURFACE_SPEC.md and previously absent here: C++ and LSP both
+// emitted `mergeBatch` in the step and this runtime did not, so a consumer
+// walking the step saw a different shape depending on which engine answered.
+//
+// `provenance` is emitted for shape, empty for now: this runtime's OutputVector
+// carries no evidence chain, where C++'s does. Tracked separately — filling it
+// is a change to the machine model, not to the step surface.
+case class MergeOperation(
+  region:      RegionMapping,
+  machineId:   String,
+  sequenceId:  String,
+  outputIndex: Int,
+  values:      Vector[Double],
+  provenance:  List[String] = Nil
+)
+
 case class SimulationStep(
   stepNumber:     Int,
   timestamp:      Long,
   perceptualSpace: Vector[Double],
   machineResults: Map[String, MachineStepResult],
   activeRegions:  List[ActiveRegion],
+  mergeBatch:     List[MergeOperation] = Nil,
   eventBus:       List[EventBusWrite] = Nil
 )
+
+// One step of a trajectory history — see SURFACE_SPEC.md, "Trajectory
+// histories". Sparse: a cell absent from `nonZero` is zero, and `length` keeps
+// the dense width so the reconstruction is exact.
+case class TrajectoryCell(index: Int, value: Double)
+case class TrajectoryEntry(stepNumber: Int, length: Int, nonZero: List[TrajectoryCell])
 
 case class SimulationConfig(
   inputSequence: Vector[Vector[Double]],

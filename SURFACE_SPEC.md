@@ -72,8 +72,95 @@ Default ports: Scala 5001 · CPP 5301 · LSP 5601
 | GET | `/api/engine/stats` | ✓ | ✓ | ✓ |
 | GET | `/api/engine/active` | ✓ | ✓ | ✓ |
 | GET | `/api/engine/history` | ✓ | ✓ | ✓ |
+| GET | `/api/engine/orev-history` | ✓ | ✓ | ✓ |
+| GET | `/api/engine/isre-history` | ✓ | ✓ | ✓ |
 | POST | `/api/engine/process` | ✓ | ✓ | ✓ |
 | POST | `/api/engine/reset` | ✓ | ✓ | ✓ |
+
+#### `GET /api/engine/history` — the `/api/engine/process` audit trail
+
+One record per `POST /api/engine/process` call, newest first, capped at 256:
+`{"type": "engine-process", "result": …}`. `?limit=n` returns the n most recent.
+
+This path meant three different things. C++ served the audit trail; LSP pushed
+step records onto the same list and served both from it, so the endpoint
+returned steps here and audit envelopes there; Scala served the CES transition
+history. An observer asking one question of three engines got three kinds of
+answer — the observability contract broken on a public surface, not a
+behavioural difference (RealityEngine_CI#148).
+
+Step records live at `GET /api/perceptual-simulation/history` and only there.
+Scala's CES transition history remains available in-process and is still
+counted by `ces_history_size` in `/api/metrics`; it is not a surface.
+
+#### Trajectory histories
+
+The two histories the cross-engine trajectory proof reads. Given a seed
+sequence applied by push, what an engine is actually presented with at step n
+is the seed mutated by arbitration feedback from step n-1:
+
+```
+ISRE(1) = ISRESeed(1)
+ISRE(n) = mergeBatch( ISRESeed(n), arbiter(OREV(n-1)) )
+
+ISRE-History = {ISRE(1) … ISRE(n)}
+OREV-History = {OREV(1) … OREV(n-1)}
+```
+
+Every engine given the same seed must produce the same two histories. That is
+the claim the multi-engine deployment rests on, and neither history is
+observable from a single-step response — two engines can agree at every step
+examined in isolation and still be on different trajectories.
+
+**OREV(n)** — the output reality event vector: the resolved output-cell writes
+committed by the corpus at step n. Observed at the commit, which is the only
+instant the corpus's output for the step exists as a single-valued vector.
+
+**ISRE(n)** — the input space reality event vector: the perceptual space as
+presented to the corpus at step n. Observed immediately before the machines'
+input snapshots are extracted from it.
+
+The merge is not performed by the Reality Engine and is not observed here. The
+Perception Engine assembles `ISRE(n)` from its sources — which the previous
+step's output regions feed — and delivers it by push; the engine records what
+it was presented with. So `ISRE-History` is the sequence of inputs the corpus
+actually saw, whatever produced them, which is the only reading under which two
+engines agreeing on it means anything.
+
+Both observations are **atomic**: each is captured at its own point inside the
+step and the pair is appended in one action, so the recorded entry and the
+state the corpus saw cannot differ, and no observer can read a step whose
+trajectories are half-written. Nothing needs to reconstruct a history after the
+fact.
+
+Arbiter *internals* are deliberately not covered. `mergeBatch` is a private
+algorithm expected to change under training; its **effect** is fully captured
+as the gap between `ISRESeed(n)` and `ISRE(n)`, without inspecting it.
+
+Entry shape, both endpoints:
+
+| Key | Notes |
+|-----|-------|
+| `stepNumber` | The step this entry records |
+| `length` | Cells in the full input space — the dense width |
+| `nonZero` | `[{index, value}]`, **ascending index**. A cell absent from this list is zero. |
+
+Sparse because the dense vector is 16k+ cells of which a handful are ever
+non-zero; lossless because `length` and the pairs reconstruct the dense vector
+exactly, which is what makes a first-divergent-index comparison possible.
+
+Ordering is **ascending `stepNumber`, oldest first** — the opposite of the step
+history, which is newest-first because it is read as "what just happened".
+These are read as sequences compared element by element, and the index of the
+first disagreement is the answer they exist to give.
+
+`?from=n` selects the first `stepNumber` to include; `?limit=n` caps the entries
+returned from there. Both default to the whole history, which is capped at 1024
+entries and cleared by `POST /api/reset`.
+
+Regions are not compared. They are an abstraction laid across the input space
+reality vector: it is the vector that must be equivalent, and region
+equivalence follows from it.
 
 ### Machines
 
