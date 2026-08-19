@@ -132,6 +132,27 @@ class Routes(
   private val includeMachineResultsRef  = new AtomicReference[Boolean](true)
   private val includePerceptualSpaceRef = new AtomicReference[Boolean](true)
 
+  // Audit trail for POST /api/engine/process — what GET /api/engine/history
+  // serves, on every runtime.
+  //
+  // This served the CES transition history instead: three runtimes, three
+  // different answers from one path. C++ returned the engine-process audit
+  // trail, LSP returned one list holding both audit envelopes and step records,
+  // and this returned transitions. An observer reading "engine history" got a
+  // different kind of thing depending on which engine answered, which is the
+  // observability contract broken on a public surface (RealityEngine_CI#148).
+  // The step history has its own surface at /api/perceptual-simulation/history
+  // and is unaffected; the CES transition history remains available in-process
+  // via engine.getHistory and is still counted by ces_history_size in
+  // /api/metrics.
+  private val engineHistory      = new java.util.concurrent.ConcurrentLinkedDeque[Json]()
+  private val EngineHistoryLimit = 256
+
+  private def recordEngineHistory(item: Json): Unit = {
+    engineHistory.addFirst(item)
+    while (engineHistory.size() > EngineHistoryLimit) engineHistory.pollLast()
+  }
+
   private def readJsonFile(file: File): String = {
     val mtime = file.lastModified()
     val key   = file.getAbsolutePath
@@ -732,6 +753,10 @@ class Routes(
             path("process") { post { entity(as[Json]) { body =>
               val vec = body.hcursor.downField("vector").as[Vector[Double]].getOrElse(Vector.empty)
               val result = engine.processInputLegacy(vec)
+              recordEngineHistory(Json.obj(
+                "type"   -> Json.fromString("engine-process"),
+                "result" -> result.asJson
+              ))
               complete(Json.obj("result" -> result.asJson))
             } } },
             // Full reset, matching C++ and LSP. This called resetAllSequences()
@@ -781,7 +806,17 @@ class Routes(
               complete(Json.obj("activeVectors" -> Json.arr(rows: _*)))
             } },
             path("history") { get { parameter("limit".as[Int].?) { limit =>
-              complete(Json.obj("history" -> engine.getHistory(limit).asJson))
+              import scala.jdk.CollectionConverters._
+              val all     = engineHistory.iterator.asScala.toList
+              val entries = limit.filter(_ > 0).fold(all)(all.take)
+              complete(Json.obj("history" -> Json.arr(entries: _*)))
+            } } },
+            // Trajectory histories — SURFACE_SPEC.md, "Trajectory histories".
+            path("orev-history") { get { parameters("from".as[Int].?, "limit".as[Int].?) { (from, limit) =>
+              complete(Json.obj("history" -> simulator.getOrevHistory(from.getOrElse(0), limit.getOrElse(0)).asJson))
+            } } },
+            path("isre-history") { get { parameters("from".as[Int].?, "limit".as[Int].?) { (from, limit) =>
+              complete(Json.obj("history" -> simulator.getIsreHistory(from.getOrElse(0), limit.getOrElse(0)).asJson))
             } } }
           )
         },
