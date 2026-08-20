@@ -263,7 +263,10 @@ class RealityEngine(
   def createCheckpoint(machineId: String, label: Option[String] = None): String = {
     val machine = machines.getOrElse(machineId, throw new NoSuchElementException(s"Machine not found: $machineId"))
     val cpId    = s"cp-${System.currentTimeMillis()}-${java.util.UUID.randomUUID().toString.take(8)}"
-    val cp      = MachineCheckpoint(cpId, machineId, machine.name, label, System.currentTimeMillis(), machine.clone())
+    // deepClone, not clone: clone() is copy-on-write and shares the live
+    // machine's Reality Events, so the snapshot advanced with its subject and
+    // restoring it handed back the current state (#51).
+    val cp      = MachineCheckpoint(cpId, machineId, machine.name, label, System.currentTimeMillis(), machine.deepClone())
     checkpoints.getOrElseUpdate(machineId, TrieMap.empty).put(cpId, cp)
     cpId
   }
@@ -275,7 +278,10 @@ class RealityEngine(
     val cp = checkpoints.get(machineId).flatMap(_.get(checkpointId))
       .getOrElse(throw new NoSuchElementException(s"Checkpoint $checkpointId not found for machine $machineId"))
     removeMachine(machineId)
-    addMachine(cp.snapshot.clone())
+    // deepClone so the checkpoint survives being restored: a COW clone would
+    // hand the registry the snapshot's own sequence objects, and the next run
+    // would mutate the checkpoint through them, making it restorable once.
+    addMachine(cp.snapshot.deepClone())
   }
 
   def deleteCheckpoint(machineId: String, checkpointId: String): Boolean =
