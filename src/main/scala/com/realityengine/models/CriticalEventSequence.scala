@@ -70,7 +70,7 @@ class CriticalEventSequence(
    * Process one input cycle over all currently active vectors.
    *
    * Rules:
-   *  1. Clear per-cycle flags (wasJustMatched, lastOutputVector) on every vector.
+   *  1. Clear the per-cycle wasJustMatched flag on every vector.
    *  2. Match every active vector against the input — order irrelevant.
    *  3. For matched vectors: collect outputs, queue successor IDs.
    *  4. Apply all queued activations AFTER the full loop (deferred / atomic).
@@ -80,10 +80,7 @@ class CriticalEventSequence(
     matchAlgorithmOverride:  Option[ComparatorType] = None
   ): SequenceResult = {
     // Clear per-cycle flags.
-    vectors.values.foreach { v =>
-      v.clearWasJustMatched()
-      v.clearLastOutputVector()
-    }
+    vectors.values.foreach(_.clearWasJustMatched())
 
     // Reuse pre-allocated buffers — no allocation per call.
     _matchedBuf.clear()
@@ -97,10 +94,7 @@ class CriticalEventSequence(
       if (matched) {
         _matchedBuf += vector.id
 
-        if (vector.getOutputVectors.nonEmpty) {
-          vector.setWasJustMatched()
-          outputs.headOption.foreach(ov => vector.setLastOutputVector(Some(ov)))
-        }
+        if (vector.getOutputVectors.nonEmpty) vector.setWasJustMatched()
 
         nextIds.foreach(_pendingBuf += _)
         outputs.foreach(_outputsBuf += _)

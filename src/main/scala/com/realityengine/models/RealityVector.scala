@@ -6,7 +6,7 @@ import io.circe.Json
 /**
  * RealityVector — core unit of the Reality Engine.
  *
- * Mutable state (active, wasJustMatched, lastOutputVector) mirrors the
+ * Mutable state (active, wasJustMatched) mirrors the
  * TypeScript implementation exactly.  Callers are responsible for
  * synchronising access when vectors are shared across threads.
  */
@@ -21,7 +21,6 @@ class RealityVector(
   private var _nextVectorIds:   List[String]         = Nil
   private var _outputVectors:   List[OutputVector]   = Nil
   private var _wasJustMatched:  Boolean              = false
-  private var _lastOutputVector: Option[OutputVector] = None
   var metadata: Map[String, Json] = Map.empty
 
   // ── Accessors ────────────────────────────────────────────────────────────
@@ -36,10 +35,6 @@ class RealityVector(
   def setWasJustMatched(): Unit  = { _wasJustMatched = true  }
   def clearWasJustMatched(): Unit = { _wasJustMatched = false }
   def wasJustMatched: Boolean    = _wasJustMatched
-
-  def setLastOutputVector(ov: Option[OutputVector]): Unit = { _lastOutputVector = ov }
-  def clearLastOutputVector(): Unit = { _lastOutputVector = None }
-  def lastOutputVector: Option[OutputVector] = _lastOutputVector
 
   def addNextVector(vectorId: String): Unit = {
     if (!_nextVectorIds.contains(vectorId))
@@ -141,7 +136,6 @@ class RealityVector(
     c._nextVectorIds   = _nextVectorIds
     c._outputVectors   = _outputVectors
     c._wasJustMatched  = _wasJustMatched
-    c._lastOutputVector = _lastOutputVector
     c.metadata         = metadata
     c
   }
@@ -162,7 +156,6 @@ class RealityVector(
     "outputVectors"    -> Json.arr(_outputVectors.map(outputVectorToJson): _*),
     "isInitial"        -> Json.fromBoolean(isInitial),
     "wasJustMatched"   -> Json.fromBoolean(_wasJustMatched),
-    "lastOutputVector" -> _lastOutputVector.map(outputVectorToJson).getOrElse(Json.Null),
     "metadata"         -> Json.fromFields(metadata.toSeq)
   )
 
@@ -193,9 +186,6 @@ object RealityVector {
     v._nextVectorIds  = c.downField("nextVectorIds").as[List[String]].getOrElse(Nil)
     v._outputVectors  = c.downField("outputVectors").as[Vector[io.circe.Json]].getOrElse(Vector.empty).toList.map(parseOutputVector)
     v._wasJustMatched = c.get[Boolean]("wasJustMatched").getOrElse(false)
-    v._lastOutputVector = c.downField("lastOutputVector").as[io.circe.Json].toOption.flatMap { j =>
-      if (j.isNull) None else Some(parseOutputVector(j))
-    }
     v.metadata = c.downField("metadata").as[Map[String, Json]].getOrElse(Map.empty)
     v
   }
