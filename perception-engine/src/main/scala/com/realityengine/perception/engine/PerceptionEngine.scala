@@ -141,7 +141,17 @@ class PerceptionEngine(initialDimension: Int = sys.env.getOrElse("VECTOR_DIMENSI
   def assembleVector(): Vector[Double] = synchronized {
     val out    = persistentVector.clone()
     val outLen = out.length
-    for ((id, src) <- sources if src.active) {
+    // Canonical order, not Map order. Two machines may declare the same input
+    // region — AGX032 and AGX054 both map [228:232] — and a source owns its
+    // region, so where regions overlap the last writer wins. Iterating `sources`
+    // directly made that winner depend on Map iteration order, which is
+    // unspecified; C++ walked a std::map keyed by source id and LSP used
+    // maphash, so the three runtimes assembled different input vectors from
+    // identical corpora (RealityEngine_CI corpus parity sweep, 2026-08-19).
+    //
+    // Sorted by (name, id) — the order already used for the listing endpoints,
+    // and derived from corpus-declared names rather than runtime-minted ids.
+    for ((id, src) <- sources.toSeq.sortBy { case (i, s) => (s.name, i) } if src.active) {
       val values = getSourceValues(id, src)
       val Region(offset, length) = src.region
       // Growth on addSource and on RE sync should make this unreachable; if a
