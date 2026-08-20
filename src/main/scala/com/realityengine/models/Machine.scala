@@ -164,6 +164,37 @@ class Machine(
     c
   }
 
+  /** A fully independent copy, sequences and Reality Events included.
+    *
+    * `clone()` is copy-on-write: it shares the origin's sequence objects and
+    * only takes its own copies when `processInput` first mutates them. That is
+    * right for a clone that is about to be processed — `whatIf` does exactly
+    * that — but wrong for anything that must *hold* a state.
+    *
+    * A checkpoint is the second case. Stored as a COW clone it shared the live
+    * machine's Reality Events, so as the machine advanced the "snapshot"
+    * advanced with it, and restoring it handed back the current state: the
+    * restore answered 200 and changed nothing (#51). A snapshot that tracks its
+    * subject is not a snapshot.
+    *
+    * `CriticalEventSequence.clone()` deep-copies its vectors and
+    * `RealityVector.clone()` carries `state`, so cloning each sequence here is
+    * enough to capture the active RE list — which is what a back-step restores.
+    */
+  def deepClone(): Machine = {
+    val clonedMapping = perceptualMapping.map(m =>
+      PerceptualMapping(
+        input          = RegionMapping(m.input.offset,  m.input.length),
+        output         = RegionMapping(m.output.offset, m.output.length),
+        bitsPerElement = m.bitsPerElement
+      )
+    )
+    val c = new Machine(name, description, metadata, arbiter.getRule, clonedMapping, id)
+    c.matchAlgorithm = matchAlgorithm
+    effectiveSeqs.values.foreach(seq => c.addSequence(seq.clone()))
+    c
+  }
+
   // ── Serialisation ─────────────────────────────────────────────────────────
 
   /** metadata.domain, or "" when absent. */
