@@ -1031,7 +1031,22 @@ class Routes(
             },
             path(Segment) { id =>
               concat(
-                get    { engine.getMachine(id).fold(complete(StatusCodes.NotFound -> Json.obj("error" -> Json.fromString("Machine not found"))))(m => complete(Json.obj("machine" -> m.toJson))) },
+                // toFullJson, not toJson: the detail endpoint must carry the
+                // Reality Events. toJson is the shallow summary used by the
+                // machine *list*, whose sequences hold only id, name and
+                // initialVectorIds — so asking this endpoint for one machine
+                // returned `sequences[].vectors` as an empty array while
+                // reporting a non-zero totalVectors, and C++ and LSP both
+                // returned the events in full (#48).
+                //
+                // The REs carry isActive, state and wasJustMatched. Matching
+                // runs against the REs that are currently active and a match
+                // propagates active to the connected REs, so that flag is the
+                // machine's operating state; without it, this runtime's
+                // activation could not be observed from outside the process at
+                // all, and the model invariant that every initial RE is active
+                // was uncheckable here.
+                get    { engine.getMachine(id).fold(complete(StatusCodes.NotFound -> Json.obj("error" -> Json.fromString("Machine not found"))))(m => complete(Json.obj("machine" -> m.toFullJson))) },
                 patch  { entity(as[Json]) { body =>
                   engine.getMachine(id).fold(
                     complete(StatusCodes.NotFound -> Json.obj("error" -> Json.fromString("Machine not found")))
