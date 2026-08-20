@@ -95,6 +95,7 @@ object PerceptionMain extends App {
     broadcastActor   = broadcastActor,
     realityEngineUrl = realityEngineUrl,
     auditCfg         = auditCfg,
+    activateOnLoad   = activateOnLoad,
   )
 
   val serverAt = Http().newServerAt(host, port)

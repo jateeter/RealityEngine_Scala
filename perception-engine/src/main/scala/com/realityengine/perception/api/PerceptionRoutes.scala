@@ -36,6 +36,13 @@ class PerceptionRoutes(
   broadcastActor: ActorRef,
   realityEngineUrl: String,
   auditCfg: AuditConfig,
+  // PE_SOURCE_ACTIVATE_ON_LOAD, threaded through so the runtime bootstrap route
+  // seeds sources the same way startup does. Without it the setting was honoured
+  // on boot and ignored by POST /api/sources/bootstrap-from-machines, so a
+  // machine added to the running corpus got an inactive source here and an
+  // active one on C++ and LSP — the same corpus presenting different stimulus
+  // per runtime (RealityEngine_CI corpus parity sweep, 2026-08-19).
+  activateOnLoad: Boolean = false,
 )(implicit system: ActorSystem, mat: Materializer, ec: ExecutionContext) {
 
   // Blocking sttp backend runs on calling thread (routes are already on a
@@ -134,7 +141,8 @@ class PerceptionRoutes(
 
     // One builder for both seeding paths — see MachineCorpus.testSourceFor.
     machines.foreach { m =>
-      MachineCorpus.testSourceFor(m).filterNot(src => existingMachineIds.contains(src.machineId)) match {
+      MachineCorpus.testSourceFor(m, activateOnLoad)
+        .filterNot(src => existingMachineIds.contains(src.machineId)) match {
         case Some(src) =>
           engine.addSource(src)
           existingMachineIds = existingMachineIds + src.machineId

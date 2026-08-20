@@ -10,7 +10,19 @@ import scala.collection.mutable
 //
 // Gating:      only machines whose transitionResult.arbiterMetadata.shouldOutput
 //              is true contribute to the merge.
-// Merge order: deterministic — records sorted by machineId before writing.
+// Merge order: deterministic *and* identical across runtimes — records sorted by
+//              machineName, which the corpus declares and which is globally
+//              unique across it.
+//
+//              Sorting by machineId was deterministic within one runtime and
+//              different between them: the corpus declares no id, so each
+//              runtime mints its own. Where two machines' output regions overlap
+//              the merge is last-writer-wins, so the winner was decided by an id
+//              that differs per engine and the merged vector — the next
+//              InputSpaceVector — diverged. Seen on AgHarvestReadinessAssessor,
+//              whose output [3967:3971] overlaps AGX055's [3959:3971]: ISRE cell
+//              3968 read 1.0 on C++/LSP and 0.0 here while every OREV agreed
+//              (RealityEngine_CI corpus parity sweep, 2026-08-19).
 //
 // This is a thin, stateless object so the aggregation restriction (all machine
 // outputs must be present before the next input vector is assembled) can be
@@ -19,7 +31,7 @@ import scala.collection.mutable
 object VectorAggregator {
 
   private case class MergeRecord(
-    machineId:    String,
+    sortKey:      String,
     outputOffset: Int,
     outputLength: Int,
     outputVector: Vector[Double]
@@ -43,7 +55,12 @@ object VectorAggregator {
         if length > 0
         vec    <- result.hcursor.downField("outputVector").as[Vector[Double]].toOption
         if vec.nonEmpty
-      } yield MergeRecord(machineId, offset, length, vec)
+      } yield MergeRecord(
+        // machineName is corpus-declared and stable across runtimes; machineId
+        // is minted locally. Fall back to the id only when a result carries no
+        // name, which keeps a malformed payload ordered rather than unordered.
+        result.hcursor.get[String]("machineName").toOption.filter(_.nonEmpty).getOrElse(machineId),
+        offset, length, vec)
     }
   }
 
@@ -52,8 +69,8 @@ object VectorAggregator {
 
     if (records.isEmpty) return baseVector
 
-    // Deterministic merge order — sort by machineId
-    val sorted = records.sortBy(_.machineId)
+    // Deterministic merge order, identical on every runtime — sort by machineName
+    val sorted = records.sortBy(_.sortKey)
 
     val buf = mutable.ArrayBuffer[Double](baseVector: _*)
     for (rec <- sorted) {
