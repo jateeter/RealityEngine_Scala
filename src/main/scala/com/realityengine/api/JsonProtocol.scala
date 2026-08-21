@@ -65,6 +65,8 @@ object JsonProtocol {
       "machineName"      -> Json.fromString(mr.machineName),
       "inputVector"      -> mr.inputVector.asJson,
       "outputVector"     -> mr.outputVector.asJson,
+      "mergedOutputVector"        -> mr.mergedOutputVector.asJson,
+      "outputMergeTransformation" -> mr.outputMergeTransformation.asJson,
       "inputRegion"      -> mr.inputRegion.asJson,
       "outputRegion"     -> mr.outputRegion.asJson,
       "transitionResult" -> mr.transitionResult.asJson

@@ -58,6 +58,11 @@ object MachineLoader {
     val machine = new Machine(name, description, metadata, arbiterRule, mapping,
       id.getOrElse(s"machine-${System.currentTimeMillis()}-${UUID.randomUUID().toString.take(8)}"))
     machine.matchAlgorithm = matchAlgo
+    // Read at intern time so the machine carries it from the moment it loads.
+    // Absent means "or", which is what every runtime already does, so no corpus
+    // file needs to declare it for behaviour to stay as it is.
+    machine.outputMergeTransformation =
+      OutputMergeTransformation.normalise(m.get[String]("outputMergeTransformation").toOption)
 
     m.downField("sequences").as[Vector[Json]].getOrElse(Vector.empty).foreach { sj =>
       machine.addSequence(loadSequenceFromJson(sj, matchAlgo))

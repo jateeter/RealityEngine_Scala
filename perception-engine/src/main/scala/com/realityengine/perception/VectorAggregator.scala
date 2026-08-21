@@ -53,7 +53,18 @@ object VectorAggregator {
         offset <- result.hcursor.downField("outputRegion").get[Int]("offset").toOption
         length <- result.hcursor.downField("outputRegion").get[Int]("length").toOption
         if length > 0
-        vec    <- result.hcursor.downField("outputVector").as[Vector[Double]].toOption
+        // Prefer mergedOutputVector: the machine's collection of potential
+        // outputs folded under its own outputMergeTransformation. Presenting
+        // that fold is the Reality Engine's job and the last thing it does in
+        // the step, so it is the machine's actual output.
+        //
+        // outputVector is one arbitrarily chosen member of that collection, and
+        // which member differed per runtime — reading it here is what carried
+        // the RE's disagreement into the perceptual space
+        // (RealityEngine_CI#154). Falling back to it keeps this working against
+        // a Reality Engine that has not yet been updated.
+        vec    <- result.hcursor.downField("mergedOutputVector").as[Vector[Double]].toOption
+                    .orElse(result.hcursor.downField("outputVector").as[Vector[Double]].toOption)
         if vec.nonEmpty
       } yield MergeRecord(
         // machineName is corpus-declared and stable across runtimes; machineId

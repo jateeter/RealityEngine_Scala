@@ -111,7 +111,17 @@ case class MachineStepResult(
   machineId:       String,
   machineName:     String,
   inputVector:     Vector[Double],
+  // A single member of the machine's collection of potential outputs, chosen by
+  // the arbiter. Which member that is has differed per runtime. Kept as-is so
+  // existing consumers are unaffected; new ones should read mergedOutputVector.
   outputVector:    Option[Vector[Double]],
+  // The collection folded under the machine's outputMergeTransformation — what
+  // the Reality Engine presents to the Perception Engine. None when the machine
+  // completed no Reality Event, which is not the same as a zero vector.
+  mergedOutputVector: Option[Vector[Double]] = None,
+  // The transformation in force for this machine on this step, reported so the
+  // knob can be observed rather than inferred.
+  outputMergeTransformation: String = "or",
   inputRegion:     RegionMapping,
   outputRegion:    Option[RegionMapping],
   transitionResult: MachineTransitionResult

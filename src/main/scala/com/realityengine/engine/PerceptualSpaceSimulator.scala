@@ -273,13 +273,29 @@ class PerceptualSpaceSimulator(dimension: Int = sys.env.getOrElse("VECTOR_DIMENS
         }
       }
 
+      // Presenting the machine's output is the Reality Engine's job and the
+      // last thing it does in the step. Folded here, in the sequential machine
+      // loop — the parallel work in this step is the arbiter's cell sharding
+      // further down, which this precedes and does not touch.
+      //
+      // The collection is one potential output per completed Reality Event.
+      // `outputVector` above is a single member of it chosen by the arbiter,
+      // and which member that is has differed per runtime — the same corpus
+      // presented one runtime's pick to its PE and another's to its own
+      // (RealityEngine_CI#154). The fold replaces the pick; `outputVector` is
+      // left as it was so nothing reading it today changes.
+      val potentialOutputs = transition.sequenceResults.values.flatMap(_.assertedOutputs.map(_.vector)).toSeq
+      val merged           = OutputMergeTransformation.fold(potentialOutputs, machine.outputMergeTransformation)
+
       machineResults(machine.id) = MachineStepResult(
         machineId        = machine.id,
         machineName      = machine.name,
         inputVector      = snapshot,
         outputVector     = outputVector,
+        mergedOutputVector        = merged,
+        outputMergeTransformation = machine.outputMergeTransformation,
         inputRegion      = RegionMapping(mapping.input.offset, mapping.input.length),
-        outputRegion     = outputVector.map(_ => RegionMapping(mapping.output.offset, mapping.output.length)),
+        outputRegion     = (outputVector orElse merged).map(_ => RegionMapping(mapping.output.offset, mapping.output.length)),
         transitionResult = transition
       )
     }
