@@ -55,6 +55,36 @@ class CriticalEventSequence(
   def getOutputVectorIds: List[String]                   = outputVectorIds.toList.sorted
   def getActiveVectors: List[RealityVector]              = vectors.values.filter(_.isActive).toList
 
+  // ── Lifecycle ────────────────────────────────────────────────────────────
+
+  /** A sequence is deprecated once it carries a `deprecatedAt`. Mirrors C++'s
+    * `is_deprecated`, which tests the same field for non-emptiness. */
+  def isDeprecated: Boolean = deprecatedAt.exists(_.nonEmpty)
+
+  /** Days elapsed since deprecation; 0 when unset or unparseable.
+    *
+    * Accepts "YYYY-MM-DD" and "YYYY-MM-DDTHH:MM:SSZ" by reading the leading
+    * date, which is what C++'s `std::get_time(&tm, "%Y-%m-%d")` does — it stops
+    * at the format and ignores the rest. Anything more exotic returns 0, the
+    * same conservative fallback all three runtimes take: a stale-CES dashboard
+    * showing 0 days is visibly wrong, where a parse guess would be plausibly
+    * wrong.
+    *
+    * Measured from local midnight, matching C++'s `mktime`, so the three
+    * runtimes agree when they share a timezone and disagree by at most a day
+    * when they do not. That is a property of the field's precision, not of the
+    * arithmetic — the corpus declares a date, not an instant.
+    */
+  def daysSinceDeprecation: Long =
+    deprecatedAt.flatMap { raw =>
+      scala.util.Try {
+        val date = java.time.LocalDate.parse(raw.take(10))
+        java.time.temporal.ChronoUnit.DAYS.between(
+          date.atStartOfDay(java.time.ZoneId.systemDefault()).toInstant(),
+          java.time.Instant.now())
+      }.toOption
+    }.getOrElse(0L)
+
   // ── Validation ───────────────────────────────────────────────────────────
 
   def validate(): (Boolean, List[String]) = {

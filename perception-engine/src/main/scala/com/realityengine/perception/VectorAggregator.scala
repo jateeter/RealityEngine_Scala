@@ -95,19 +95,24 @@ object VectorAggregator {
     buf.toVector
   }
 
-  /** One operation per asserted output, which is the canonical merge unit.
+  /** One operation per machine per output region — FOLD_PLACEMENT.md §1.
     *
-    * C++ is the definition here (RealityEngine_CI#91): when the arbiter says
-    * shouldOutput, it emits one entry per assertedOutput of each sequence,
-    * carrying the sequenceId and the index within that sequence. This emitted
-    * one entry per *machine* instead, so it lost which sequence fired — and
-    * sequenceId is exactly what the cross-runtime parity check compares, so
-    * every entry read as a mismatch against C++ and LSP.
+    * It used to be one operation per asserted output, carrying the sequenceId
+    * and the index within that sequence. That was right while the fold sat
+    * beside the arbitration path: the merged value was reported and every
+    * asserted output still reached the arbiter on its own, so a machine with
+    * seven completed Reality Events contributed seven values to the same cell.
+    * Now the machine presents one output and this reports one operation for it.
+    *
+    * `sequenceIds` is the evidence for that value — the set of CESs that
+    * completed. `contributors` pairs each of them with its OWN asserted values,
+    * which is what governance resolves against (§3); it is carried rather than
+    * re-derived so the join cannot be given the folded vector by accident.
     */
   private case class MergeOp(
     machineId:    String,
-    sequenceId:   String,
-    outputIndex:  Int,
+    sequenceIds:  List[String],
+    contributors: List[(String, Vector[Double])],
     outputOffset: Int,
     outputLength: Int,
     values:       Vector[Double],
@@ -125,24 +130,70 @@ object VectorAggregator {
         if length > 0
       } yield (offset, length)
 
-      (shouldOutput, region) match {
-        case (true, Some((offset, length))) =>
-          val sequences = transition.downField("sequenceResults").focus
+      // The folded value, and no fallback to `outputVector`.
+      //
+      // Absent means the machine presents nothing, and there are exactly two
+      // ways to get there: it completed no Reality Event, or its fold refused —
+      // the Łukasiewicz pair with no declared chain top (§2). Both mean no
+      // operation. Falling back to `outputVector` would substitute one
+      // arbitrarily chosen member of the collection, which differed per runtime
+      // and is the divergence the fold exists to remove (RealityEngine_CI#154);
+      // `aggregate` above keeps that fallback only because the perceptual space
+      // must survive an un-upgraded Reality Engine, and RE and PE move together
+      // here (§7).
+      val folded = cursor.downField("mergedOutputVector").as[Vector[Double]].toOption.filter(_.nonEmpty)
+
+      (shouldOutput, region, folded) match {
+        case (true, Some((offset, length)), Some(values)) =>
+          // Sorted by sequenceId: `sequenceResults` is a JSON object keyed by
+          // ids minted per runtime, so its order was arbitrary and the
+          // governance tie-break below would have inherited that.
+          val contributors = transition.downField("sequenceResults").focus
             .flatMap(_.asObject).map(_.toList).getOrElse(Nil)
-          sequences.flatMap { case (sequenceId, sequenceResult) =>
-            sequenceResult.hcursor.downField("assertedOutputs").focus
-              .flatMap(_.asArray).getOrElse(Vector.empty)
-              .zipWithIndex
-              .toList
-              .flatMap { case (asserted, index) =>
-                asserted.hcursor.get[Vector[Double]]("vector").toOption
-                  .filter(_.nonEmpty)
-                  .map(MergeOp(machineId, sequenceId, index, offset, length, _))
-              }
-          }
+            .sortBy(_._1)
+            .flatMap { case (sequenceId, sequenceResult) =>
+              sequenceResult.hcursor.downField("assertedOutputs").focus
+                .flatMap(_.asArray).getOrElse(Vector.empty).toList
+                .flatMap(_.hcursor.get[Vector[Double]]("vector").toOption.filter(_.nonEmpty))
+                .map(sequenceId -> _)
+            }
+          if (contributors.isEmpty) Nil
+          else List(MergeOp(machineId, contributors.map(_._1).distinct.sorted,
+                            contributors, offset, length, values))
         case _ => Nil
       }
     }
+
+  // ── Governance join (FOLD_PLACEMENT.md §3) ─────────────────────────────────
+
+  /** The severity chain the join runs over: GREEN/absent 0 < AMBER 1 < RED 2.
+    * Mirrors `Arbiter.severityRank` in the Reality Engine. */
+  private val RagRank = Map("GREEN" -> 0, "AMBER" -> 1, "RED" -> 2)
+
+  /** Governance for a folded contribution — the join over its contributors'
+    * severity ranks, ties to the lexicographically smallest sequenceId.
+    *
+    * Each contributor is resolved against its OWN asserted values and never
+    * against the fold: a rule written for one CES's output need not match the
+    * fold, and 135 of 1328 corpus machines have an `outputMatches` pattern that
+    * maps to more than one RAG code, so the sequenceId filter is doing real
+    * work. The winner's decision travels WHOLE — `ragStatusCode`,
+    * `processStatus`, `ownerTeam`, `sequenceId` and the rest — because a record
+    * composed from fields of different rules describes no rule that exists.
+    *
+    * Safety-preserving, which is the point: a RED-governed firing cannot be
+    * hidden by a GREEN one that folded alongside it.
+    */
+  private def joinGovernance(op: MergeOp, corpus: MachineCorpus): Option[Json] = {
+    val resolved = op.contributors.flatMap { case (sequenceId, values) =>
+      corpus.governance(op.machineId, sequenceId, values).map(sequenceId -> _)
+    }
+    if (resolved.isEmpty) None
+    else Some(resolved.minBy { case (sequenceId, decision) =>
+      val rag = decision.hcursor.get[String]("ragStatusCode").toOption.getOrElse("")
+      (-RagRank.getOrElse(rag, 0), sequenceId)
+    }._2)
+  }
 
   /** @param corpus resolves the two fields the merge batch reports about a
     *   fired sequence that the machine results themselves do not carry: the
@@ -152,33 +203,38 @@ object VectorAggregator {
     *   degrades to the pre-existing five-key entry rather than failing.
     */
   def mergeBatch(machineResults: Json, corpus: MachineCorpus = MachineCorpus.empty): Vector[Json] =
-    // Canonical merge ordering — (machineId, sequenceId, outputIndex), the
-    // same triple C++ sorts on, so both runtimes emit the same sequence for
-    // the same input.
+    // Canonical merge ordering — `machineId` alone (§6). The comparator was
+    // (machineId, sequenceId, outputIndex); with one operation per machine the
+    // secondary keys are constant, so machineId already orders it totally.
     mergeOps(machineResults)
-      .sortBy(op => (op.machineId, op.sequenceId, op.outputIndex))
+      .sortBy(_.machineId)
       .toVector
       .map { op =>
         val base = Json.obj(
-          "machineId"   -> Json.fromString(op.machineId),
-          "sequenceId"  -> Json.fromString(op.sequenceId),
-          "outputIndex" -> Json.fromInt(op.outputIndex),
+          "machineId" -> Json.fromString(op.machineId),
+          // An array, replacing the scalar `sequenceId`, and `outputIndex` is
+          // gone with it (§7): one operation covers the machine, so there is no
+          // single firing sequence to name and no index to name it within. A
+          // consumer reading `sequenceId` as a string gets nothing, which is
+          // why RE and PE move together.
+          "sequenceIds" -> Json.arr(op.sequenceIds.map(Json.fromString): _*),
           "region" -> Json.obj(
             "offset" -> Json.fromInt(op.outputOffset),
             "length" -> Json.fromInt(op.outputLength),
           ),
           // "values", not "vector" — C++ and LSP both name it values, and the
-          // C++ PE's trigger dispatch reads op.at("values").
+          // C++ PE's trigger dispatch reads op.at("values"). Folded now, rather
+          // than one sequence's asserted output.
           "values" -> Json.arr(op.values.map(Json.fromDoubleOrNull): _*),
+          // The union over contributors, order-preserved and deduped (§1).
           // Unconditional, like C++: an entry with no chain reports an empty
           // array rather than dropping the key, so a consumer can tell "no
           // provenance" apart from "this runtime does not report provenance".
           "provenance" -> Json.arr(
-            corpus.provenance(op.machineId, op.sequenceId).map(Json.fromString): _*
+            op.sequenceIds.flatMap(corpus.provenance(op.machineId, _)).distinct.map(Json.fromString): _*
           ),
         )
         // Conditional, like C++: present only when a trigger rule matched.
-        corpus.governance(op.machineId, op.sequenceId, op.values)
-          .fold(base)(g => base.mapObject(_.add("governance", g)))
+        joinGovernance(op, corpus).fold(base)(g => base.mapObject(_.add("governance", g)))
       }
 }

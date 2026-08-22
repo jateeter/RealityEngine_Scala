@@ -46,7 +46,11 @@ object MachineLoader {
           val bpe = mc.get[Int]("bitsPerElement").toOption
             .filter(Set(1, 2, 4, 8).contains)
             .getOrElse(8)
-          PerceptualMapping(RegionMapping(iOff, iLen), RegionMapping(oOff, oLen), bpe)
+          // k for the chain fold. Filtered at >= 1 because a top below that is
+          // not a chain; the fold applies the same filter, so a malformed
+          // declaration reads as undeclared in both places rather than in one.
+          val top = mc.get[Int]("outputAlphabetTop").toOption.filter(_ >= 1)
+          PerceptualMapping(RegionMapping(iOff, iLen), RegionMapping(oOff, oLen), bpe, top)
         }
       }
     }
@@ -179,7 +183,7 @@ object MachineLoader {
         "input"          -> Json.obj("offset" -> Json.fromInt(m.input.offset), "length" -> Json.fromInt(m.input.length)),
         "output"         -> Json.obj("offset" -> Json.fromInt(m.output.offset), "length" -> Json.fromInt(m.output.length)),
         "bitsPerElement" -> Json.fromInt(m.bitsPerElement)
-      )
+      ).deepMerge(Machine.chainTopJson(m))
     }
 
     val machineFields = Seq(

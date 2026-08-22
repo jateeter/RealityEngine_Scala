@@ -1229,6 +1229,11 @@ class Routes(
             "shards"          -> Json.fromInt(com.realityengine.engine.ArbiterParallelism.shards),
             "count"           -> Json.fromInt(recs.length),
             "records"         -> Json.arr(recs.map { r =>
+              // `cesId` is an opaque key, not a sequence identifier
+              // (FOLD_PLACEMENT.md A3): a machine contribution carries the
+              // comma-joined, sorted, deduplicated set of the sequences that
+              // folded into it, so a reader must not split it and look a
+              // sequence up. A one-element set renders as the bare id.
               def contrib(c: com.realityengine.engine.Arbiter.Contribution) = Json.obj(
                 "provider"       -> Json.fromString(c.provider),
                 "determinism"    -> Json.fromString(c.determinism),

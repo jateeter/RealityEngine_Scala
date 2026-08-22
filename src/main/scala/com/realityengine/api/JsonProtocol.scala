@@ -85,15 +85,66 @@ object JsonProtocol {
   // Key order follows C++'s to_json(SimulationStep) mergeBatch object, which
   // SURFACE_SPEC.md governs. Ordering is part of the contract, not a rendering
   // preference — an observer must see the same object however it was produced.
+  //
+  // `sequenceIds` (array) replaces `sequenceId` (string) and `outputIndex` is
+  // gone (FOLD_PLACEMENT.md §7): one operation now covers the machine, so there
+  // is no single firing sequence to name and no index to name it within. RE and
+  // PE move together — a PE reading `sequenceId` from a new RE gets nothing, and
+  // the reverse is worse.
+  //
+  // Key order follows C++'s to_json(PagingDecision) exactly, including
+  // `description` sitting between `contact` and `source`. Ordering is part of
+  // the contract: an observer must see the same object however it was produced.
+  //
+  // Empty-valued fields are nulled rather than dropped — C++ carries
+  // empty-string sentinels and encodes them as null — EXCEPT `description`,
+  // which C++ omits entirely when the rule carries none, so a consumer can tell
+  // "the rule said nothing" from "the rule said nothing useful".
+  implicit val encodePagingDecision: Encoder[PagingDecision] = Encoder.instance { d =>
+    val contact = Json.fromFields(
+      d.contactPrimary.map("primary" -> Json.fromString(_)).toList ++
+      d.contactSecondary.map("secondary" -> Json.fromString(_)).toList)
+    val base = List(
+      "machineId"        -> Json.fromString(d.machineId),
+      "machineName"      -> Json.fromString(d.machineName),
+      "sequenceId"       -> Json.fromString(d.sequenceId),
+      "ragStatusCode"    -> d.ragStatusCode.fold(Json.Null)(Json.fromString),
+      "processStatus"    -> d.processStatus.fold(Json.Null)(Json.fromString),
+      "ownerTeam"        -> Json.fromString(d.ownerTeam),
+      "slaSeconds"       -> d.slaSeconds.fold(Json.Null)(Json.fromInt),
+      "runbook"          -> d.runbook.fold(Json.Null)(Json.fromString),
+      "escalationPolicy" -> d.escalationPolicy.fold(Json.Null)(Json.fromString),
+      "contact"          -> contact)
+    val withDescription =
+      base ++ d.description.map("description" -> Json.fromString(_)).toList
+    Json.fromFields(withDescription ++ List(
+      "source"               -> Json.fromString(d.source),
+      "hasMachineGovernance" -> Json.fromBoolean(d.hasMachineGovernance)))
+  }
+
+  // `replacedBy` is omitted when the corpus names no successor, like C++.
+  implicit val encodeDeprecationMark: Encoder[DeprecationMark] = Encoder.instance { m =>
+    val base = List(
+      "since"   -> Json.fromString(m.since),
+      "ageDays" -> Json.fromLong(m.ageDays))
+    Json.fromFields(base ++ m.replacedBy.filter(_.nonEmpty).map("replacedBy" -> Json.fromString(_)).toList)
+  }
+
+  // `governance` and `deprecation` are conditional, like C++: present only when
+  // a trigger rule matched, and only when a contributor is deprecated. This
+  // runtime emitted neither key at all before — a consumer reading
+  // `governance.ragStatusCode` got an object from C++ and LSP and nothing here
+  // (FOLD_PLACEMENT.md A2).
   implicit val encodeMergeOperation: Encoder[MergeOperation] = Encoder.instance { op =>
-    Json.obj(
+    val base = Json.obj(
       "region"      -> op.region.asJson,
       "machineId"   -> Json.fromString(op.machineId),
-      "sequenceId"  -> Json.fromString(op.sequenceId),
-      "outputIndex" -> Json.fromInt(op.outputIndex),
+      "sequenceIds" -> op.sequenceIds.asJson,
       "values"      -> op.values.asJson,
       "provenance"  -> op.provenance.asJson
     )
+    val withGov = op.governance.fold(base)(g => base.mapObject(_.add("governance", g.asJson)))
+    op.deprecation.fold(withGov)(d => withGov.mapObject(_.add("deprecation", d.asJson)))
   }
 
   implicit val encodeTrajectoryCell: Encoder[TrajectoryCell] = Encoder.instance { c =>
