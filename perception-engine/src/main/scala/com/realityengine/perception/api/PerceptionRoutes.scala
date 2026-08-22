@@ -588,10 +588,34 @@ class PerceptionRoutes(
           case _ =>
         }
 
+        // Consume the Reality Engine's mergeBatch; do not rebuild it.
+        //
+        // This used to `deepMerge` a locally reconstructed batch over the RE's,
+        // which silently discarded the authoritative one. The RE composes that
+        // batch at the end of the machine's atomic step — folded value, joined
+        // governance, deprecation mark, provenance union — and emits it
+        // unconditionally. Rebuilding it here from `machineResults` could only
+        // ever produce a subset: `machineResults` carries no CES lifecycle data,
+        // so the reconstruction could not express `deprecation` at all, and
+        // Manager's trigger envelope reads that field
+        // (perception-engine/backend/src/triggers/envelopeBuilder.ts).
+        //
+        // The C++ and LSP Perception Engines both read the RE's batch. This one
+        // rebuilding it was the outlier, and it is the same defect shape as
+        // RealityEngine_CI#154 one level up: the PE recomputing something the RE
+        // is authoritative for, and losing information doing it.
+        //
+        // The reconstruction is kept ONLY as a fallback for a Reality Engine
+        // that predates the fold move and sends no batch. That is a genuine
+        // mixed-version case, not a silent default: a current RE always sends
+        // one, so this arm should never be taken against a matching stack.
         val machineResults = parsed.hcursor.downField("machineResults").focus.getOrElse(Json.Null)
-        val withMergeBatch = parsed.deepMerge(Json.obj(
-          "mergeBatch" -> Json.arr(VectorAggregator.mergeBatch(machineResults, machineCorpus.get()): _*)
-        ))
+        val reSuppliedBatch = parsed.hcursor.downField("mergeBatch").focus.exists(!_.isNull)
+        val withMergeBatch =
+          if (reSuppliedBatch) parsed
+          else parsed.deepMerge(Json.obj(
+            "mergeBatch" -> Json.arr(VectorAggregator.mergeBatch(machineResults, machineCorpus.get()): _*)
+          ))
         val stepJson = Some(
           if (compact) PushRequest.redactMachineResults(withMergeBatch)
           else withMergeBatch

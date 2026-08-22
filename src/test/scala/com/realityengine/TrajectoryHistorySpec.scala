@@ -126,8 +126,12 @@ class TrajectoryHistorySpec extends AnyFlatSpec with Matchers {
     step.mergeBatch should have size 1
     val op = step.mergeBatch.head
     op.machineId shouldBe "machine-traj"
-    op.sequenceId shouldBe "seq-machine-traj"
-    op.outputIndex shouldBe 0
+    // One operation per machine per output region since the fold moved into the
+    // machine's step (FOLD_PLACEMENT.md §1). The scalar `sequenceId` a folded
+    // contribution cannot supply is now the contributing set, and `outputIndex`
+    // is gone with it. This machine has one contributing sequence, so §8 applies
+    // and the values are the ones the batch carried before.
+    op.sequenceIds shouldBe List("seq-machine-traj")
     op.values shouldBe Vector(1.0)
     op.region shouldBe RegionMapping(20, 1)
   }

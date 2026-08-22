@@ -19,6 +19,20 @@ class Machine(
   val id:               String                    = s"machine-${System.currentTimeMillis()}-${java.util.UUID.randomUUID().toString.take(8)}"
 ) {
   var matchAlgorithm: ComparatorType = ComparatorType.GTE
+  // How this machine folds its collection of potential outputs into the one
+  // output the Reality Engine presents to the PE. Declared per machine
+  // (`outputMergeTransformation`, default "or"), read when the machine is
+  // interned, and mutable between steps — it is a training variable.
+  var outputMergeTransformation: String = OutputMergeTransformation.Or
+  // Interlock on the knob above. Initialised LOCKED: the transformation is a
+  // training variable, and a run that retunes one by accident is a run whose
+  // results mean nothing and which nothing distinguishes from a valid one.
+  // Changing it requires unlocking first, deliberately and as a separate act.
+  //
+  // Runtime state, not a corpus property — a machine's declared transformation
+  // travels with it, but whether this deployment is currently allowed to change
+  // it does not. Every restart comes up locked.
+  var outputMergeLocked: Boolean = true
 
   private var sequences: Map[String, CriticalEventSequence] = Map.empty
   private val arbiter = new OutputArbiter(arbiterRule)
@@ -152,9 +166,13 @@ class Machine(
   override def clone(): Machine = {
     val clonedMapping = perceptualMapping.map(m =>
       PerceptualMapping(
-        input          = RegionMapping(m.input.offset,  m.input.length),
-        output         = RegionMapping(m.output.offset, m.output.length),
-        bitsPerElement = m.bitsPerElement
+        input             = RegionMapping(m.input.offset,  m.input.length),
+        output            = RegionMapping(m.output.offset, m.output.length),
+        bitsPerElement    = m.bitsPerElement,
+        // Field-by-field reconstruction, so anything added to PerceptualMapping
+        // has to be added here too or a clone silently loses it — a clone that
+        // folds differently from its origin is the hardest kind of drift to see.
+        outputAlphabetTop = m.outputAlphabetTop
       )
     )
     val c = new Machine(name, description, metadata, arbiter.getRule, clonedMapping, id)
@@ -184,9 +202,13 @@ class Machine(
   def deepClone(): Machine = {
     val clonedMapping = perceptualMapping.map(m =>
       PerceptualMapping(
-        input          = RegionMapping(m.input.offset,  m.input.length),
-        output         = RegionMapping(m.output.offset, m.output.length),
-        bitsPerElement = m.bitsPerElement
+        input             = RegionMapping(m.input.offset,  m.input.length),
+        output            = RegionMapping(m.output.offset, m.output.length),
+        bitsPerElement    = m.bitsPerElement,
+        // Field-by-field reconstruction, so anything added to PerceptualMapping
+        // has to be added here too or a clone silently loses it — a clone that
+        // folds differently from its origin is the hardest kind of drift to see.
+        outputAlphabetTop = m.outputAlphabetTop
       )
     )
     val c = new Machine(name, description, metadata, arbiter.getRule, clonedMapping, id)
@@ -208,7 +230,7 @@ class Machine(
         "input"          -> Json.obj("offset" -> Json.fromInt(m.input.offset),  "length" -> Json.fromInt(m.input.length)),
         "output"         -> Json.obj("offset" -> Json.fromInt(m.output.offset), "length" -> Json.fromInt(m.output.length)),
         "bitsPerElement" -> Json.fromInt(m.bitsPerElement)
-      )
+      ).deepMerge(Machine.chainTopJson(m))
     }.getOrElse(Json.Null)
 
     Json.obj(
@@ -216,6 +238,8 @@ class Machine(
       "name"             -> Json.fromString(name),
       "description"      -> Json.fromString(description),
       "matchAlgorithm"   -> Json.fromString(ComparatorType.serialize(matchAlgorithm)),
+      "outputMergeTransformation" -> Json.fromString(outputMergeTransformation),
+      "outputMergeLocked" -> Json.fromBoolean(outputMergeLocked),
       "arbiterRule"      -> Json.fromString(ArbiterRule.serialize(arbiter.getRule)),
       "sequenceCount"    -> Json.fromInt(getSequenceCount),
       "totalVectors"     -> Json.fromInt(getTotalVectorCount),
@@ -249,6 +273,18 @@ class Machine(
 }
 
 object Machine {
+
+  /** The `outputAlphabetTop` fragment of a serialized perceptualMapping, or an
+    * empty object when the machine declares none.
+    *
+    * Conditional rather than emitted as null: no corpus machine declares a chain
+    * top today, so an unconditional key would move the serialized bytes of all
+    * 1328 of them for a field none of them uses — and those bytes are the parity
+    * baseline. A machine that declares one round-trips; every other machine
+    * serializes exactly as it did before.
+    */
+  def chainTopJson(m: PerceptualMapping): Json =
+    m.outputAlphabetTop.fold(Json.obj())(k => Json.obj("outputAlphabetTop" -> Json.fromInt(k)))
 
   /** Canonical ordering for machine collections, shared by every runtime.
     *
@@ -290,7 +326,8 @@ object Machine {
           val bpe = mc.get[Int]("bitsPerElement").toOption
             .filter(Set(1, 2, 4, 8).contains)
             .getOrElse(8)
-          PerceptualMapping(RegionMapping(iOff, iLen), RegionMapping(oOff, oLen), bpe)
+          val top = mc.get[Int]("outputAlphabetTop").toOption.filter(_ >= 1)
+          PerceptualMapping(RegionMapping(iOff, iLen), RegionMapping(oOff, oLen), bpe, top)
         }
       }
     }

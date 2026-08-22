@@ -227,10 +227,15 @@ class PerceptualSpaceSimulator(dimension: Int = sys.env.getOrElse("VECTOR_DIMENS
     val machineResults    = scala.collection.mutable.Map.empty[String, MachineStepResult]
     // GATHER — contributions, not writes. Nothing touches the perceptual array
     // until the arbiter has resolved every contended cell (ARBITER_CONTRACT.md 2).
-    // The contribution carries cesId and the output vector because the
+    // The contribution carries cesId and the resolved governance because the
     // trigger-rule join (4.3.1) needs them; the previous
     // ListBuffer[(Machine, Vector[Double])] discarded both, which is what made
-    // SEVERITY unimplementable.
+    // SEVERITY unimplementable. Since the fold moved into the machine's step
+    // these are derived from the merge operations rather than built alongside
+    // them, so the arbiter now resolves only genuine contention — between
+    // machines, and between machines and integrations, which is what SEVERITY
+    // was for. Intra-machine cell overlap is the machine's own composition and
+    // the arbiter resolving it was the defect.
     val contributions     = scala.collection.mutable.ListBuffer.empty[Arbiter.Contribution]
     val firedSequences    = scala.collection.mutable.ListBuffer.empty[(String, String)]
     val mergeOps          = scala.collection.mutable.ListBuffer.empty[MergeOperation]
@@ -242,34 +247,147 @@ class PerceptualSpaceSimulator(dimension: Int = sys.env.getOrElse("VECTOR_DIMENS
       val outputVector = transition.machineOutput.map(_.vector)
       val mapping      = machine.perceptualMapping.get
 
-      if (transition.arbiterMetadata.shouldOutput) {
-        transition.sequenceResults.foreach { case (seqId, sr) =>
-          if (sr.assertedOutputs.nonEmpty) {
-            firedSequences += ((machine.id, seqId))
-            sr.assertedOutputs.zipWithIndex.foreach { case (ao, outputIndex) =>
-              mergeOps += MergeOperation(
-                region      = RegionMapping(mapping.output.offset, mapping.output.length),
-                machineId   = machine.id,
-                sequenceId  = seqId,
-                outputIndex = outputIndex,
-                values      = ao.vector
-              )
-              val rag = Arbiter.joinSeverity(machine.metadata, seqId, ao.vector)
-              var i = 0
-              while (i < ao.vector.length && i < mapping.output.length) {
-                contributions += Arbiter.Contribution(
-                  cell           = mapping.output.offset + i,
-                  value          = ao.vector(i),
-                  provider       = "machine",
-                  originId       = machine.id,
-                  cesId          = Some(seqId),
-                  outputVectorId = Some(ao.id),
-                  ragStatusCode  = rag
-                )
-                i += 1
-              }
+      // The machine's collection of potential outputs — one entry per completed
+      // Reality Event, paired with the CES that completed it.
+      //
+      // Enumerated in canonical (sequenceId, position-within-sequence) order.
+      // `sequenceResults` is a Map keyed by ids generated per runtime, so its
+      // iteration order was arbitrary and everything derived from it inherited
+      // that: the event-bus write list, the governance tie-break, and the order
+      // the collection reaches the fold. The fold is symmetric so it did not
+      // care, but the other two do, and "arbitrary but stable" is the shape of
+      // defect that reproduces perfectly and reads as correct
+      // (RealityEngine_CI#91).
+      //
+      // Gated on `shouldOutput`, matching C++'s `pendingOutputs`. This runtime
+      // folded ungated, so an AND-ruled machine that did not clear its arbiter
+      // still reported a `mergedOutputVector` where C++ reported none. All 1328
+      // corpus machines are PASSTHROUGH, under which the gate and the emptiness
+      // check coincide, so this closes a latent divergence without moving a
+      // corpus result.
+      val contributors: List[(String, OutputVector)] =
+        if (transition.arbiterMetadata.shouldOutput)
+          transition.sequenceResults.toList.sortBy(_._1).flatMap {
+            case (seqId, sr) => sr.assertedOutputs.map(seqId -> _)
+          }
+        else Nil
+
+      // Presenting the machine's output is the Reality Engine's job and the
+      // last thing it does in the step. Folded here, in the sequential machine
+      // loop — the parallel work in this step is the arbiter's cell sharding
+      // further down, which this precedes and does not touch.
+      //
+      // ONE fold, feeding both the reported `mergedOutputVector` and the merge
+      // operation below. They were two computations over two differently-built
+      // collections; a single expression is what keeps them from drifting.
+      //
+      // `outputVector` is a single member of the collection chosen by the
+      // arbiter, and which member that is has differed per runtime — the same
+      // corpus presented one runtime's pick to its PE and another's to its own
+      // (RealityEngine_CI#154). It is left as it was so nothing reading it today
+      // changes; the fold is what now reaches arbitration.
+      val merged = OutputMergeTransformation.fold(
+        contributors.map(_._2.vector),
+        machine.outputMergeTransformation,
+        mapping.outputAlphabetTop)
+
+      // The event bus fires for EVERY contributing sequence, exactly as before
+      // (FOLD_PLACEMENT.md §5). It is driven from the contributor list rather
+      // than from the merge operation because it must survive a fold refusal:
+      // the refusal withdraws the machine's value from arbitration, it does not
+      // retract the Reality Events that completed. This is the one consumer
+      // where the behaviour must be identical rather than analogous — it writes
+      // into the perceptual space, and it is how compose/meta machines observe
+      // their producers.
+      contributors.foreach { case (seqId, _) => firedSequences += ((machine.id, seqId)) }
+
+      // One operation per machine per output region (§1). A fold refusal — the
+      // Łukasiewicz pair with no declared chain top — yields no output, so the
+      // machine contributes nothing for the region, the same as completing no
+      // Reality Event. It must not contribute a zero vector: a machine presenting
+      // nothing is a visible, diagnosable signature, and a machine presenting a
+      // plausible wrong severity is not (RealityEngine_CI#158).
+      merged.foreach { values =>
+        val sequenceIds = contributors.map(_._1).distinct.sorted
+        val governance  = Arbiter.joinGovernance(
+                            machine, contributors.map { case (s, ao) => (s, ao.vector) })
+
+        // Deprecation — attached when ANY contributor's sequence is deprecated,
+        // reporting the lexicographically smallest one so the mark is
+        // deterministic (§4). `sequenceIds` is sorted, so the first deprecated
+        // sequence met is that one.
+        val deprecation = sequenceIds.iterator
+          .flatMap(id => machine.getSequence(id).filter(_.isDeprecated).map(id -> _))
+          .nextOption()
+          .map { case (_, seq) =>
+            DeprecationMark(seq.deprecatedAt.getOrElse(""), seq.replacedBy, seq.daysSinceDeprecation)
+          }
+
+        val op = MergeOperation(
+          region      = RegionMapping(mapping.output.offset, mapping.output.length),
+          machineId   = machine.id,
+          sequenceIds = sequenceIds,
+          values      = values,
+          provenance  = Nil,
+          governance  = governance,
+          deprecation = deprecation
+        )
+        mergeOps += op
+
+        coverageRegistry.foreach { reg =>
+          // The joined decision, recorded ONCE per operation (§3). Its totals
+          // drop from per-firing to per-machine-per-step; dashboards reading
+          // those counters step down with it, and that is the shape of the move
+          // rather than a regression. This runtime recorded nothing at all
+          // before — `recordPagingDecision` existed and was called from nowhere,
+          // so `ces_paging_decisions_total` has always emitted zero here while
+          // C++ emitted real counts.
+          governance.foreach { g =>
+            reg.recordPagingDecision(
+              g.ownerTeam,
+              g.processStatus.getOrElse("unknown"),
+              g.ragStatusCode.getOrElse("unknown"),
+              machine.id)
+          }
+          // Once per ASSERTED OUTPUT from a deprecated sequence, not once per
+          // deprecated sequence (FOLD_PLACEMENT.md A4). A sequence that asserts
+          // several outputs in a step fired several times, and this counter has
+          // always counted firings; collapsing it to the deduplicated
+          // `sequenceIds` would silently change what it means. The mark above
+          // still collapses to one — that is the identity of the operation,
+          // which is a different question from how often it fired.
+          contributors.foreach { case (seqId, _) =>
+            machine.getSequence(seqId).filter(_.isDeprecated).foreach { seq =>
+              reg.recordDeprecatedFire(machine.id, machine.name, seqId, seq.replacedBy.getOrElse(""))
             }
           }
+        }
+
+        // GATHER — the contributions are derived FROM the operation, not built
+        // beside it, so the value the arbiter resolves is by construction the
+        // value the batch reports. `outputVectorId` is empty because
+        // `outputIndex` is gone and the folded value belongs to no one asserted
+        // output. Neither is a sort key any more — §6 makes machineId unique per
+        // operation, so it orders the batch alone.
+        //
+        // `cesId` is the comma-joined sorted deduplicated set, no spaces
+        // (FOLD_PLACEMENT.md A3). It is an OPAQUE KEY now, not a sequence
+        // identifier: a one-element set renders as the bare id so
+        // single-contributor machines are unchanged, but nothing may parse it
+        // back into a sequence.
+        val cesIds = if (op.sequenceIds.isEmpty) None else Some(op.sequenceIds.mkString(","))
+        var i = 0
+        while (i < values.length && i < mapping.output.length) {
+          contributions += Arbiter.Contribution(
+            cell           = mapping.output.offset + i,
+            value          = values(i),
+            provider       = "machine",
+            originId       = machine.id,
+            cesId          = cesIds,
+            outputVectorId = None,
+            ragStatusCode  = op.governance.flatMap(_.ragStatusCode)
+          )
+          i += 1
         }
       }
 
@@ -278,8 +396,10 @@ class PerceptualSpaceSimulator(dimension: Int = sys.env.getOrElse("VECTOR_DIMENS
         machineName      = machine.name,
         inputVector      = snapshot,
         outputVector     = outputVector,
+        mergedOutputVector        = merged,
+        outputMergeTransformation = machine.outputMergeTransformation,
         inputRegion      = RegionMapping(mapping.input.offset, mapping.input.length),
-        outputRegion     = outputVector.map(_ => RegionMapping(mapping.output.offset, mapping.output.length)),
+        outputRegion     = (outputVector orElse merged).map(_ => RegionMapping(mapping.output.offset, mapping.output.length)),
         transitionResult = transition
       )
     }
@@ -354,10 +474,12 @@ class PerceptualSpaceSimulator(dimension: Int = sys.env.getOrElse("VECTOR_DIMENS
       perceptualSpace = perceptualSpace.getPerceptualVector,
       machineResults  = machineResults.toMap,
       activeRegions   = activeRegions,
-      // Canonical merge ordering — (machineId, sequenceId, outputIndex), the
-      // same comparator C++ applies, so the batch is a function of the corpus
-      // and the input rather than of map iteration order.
-      mergeBatch      = mergeOps.toList.sortBy(op => (op.machineId, op.sequenceId, op.outputIndex)),
+      // Canonical merge ordering — `machineId` alone (FOLD_PLACEMENT.md §6).
+      // The comparator was (machineId, sequenceId, outputIndex); with one
+      // operation per machine the secondary keys are constant, so machineId is
+      // already total. The batch stays a function of the corpus and the input
+      // rather than of map iteration order.
+      mergeBatch      = mergeOps.toList.sortBy(_.machineId),
       eventBus        = eventBusWrites
     )
   }

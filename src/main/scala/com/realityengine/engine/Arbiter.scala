@@ -1,6 +1,7 @@
 package com.realityengine.engine
 
 import io.circe.Json
+import com.realityengine.models.PagingDecision
 
 /**
  * Output arbiter — RealityEngine_Machines docs/ARBITER_CONTRACT.md.
@@ -51,9 +52,20 @@ object Arbiter {
   /**
    * One contribution to one cell.
    *
-   * `cesId` and `outputVector` are what the trigger-rule join needs (4.3.1), so
-   * the gather phase must carry the contribution rather than the bare value —
-   * discarding them before the merge makes SEVERITY unimplementable.
+   * `ragStatusCode` is what SEVERITY ranks by (4.3.1), so the gather phase must
+   * carry the contribution rather than the bare value — discarding it before the
+   * merge makes SEVERITY unimplementable.
+   *
+   * `cesId` is an OPAQUE KEY, not a sequence identifier (FOLD_PLACEMENT.md A3).
+   * For a machine contribution it is the comma-joined, sorted, deduplicated set
+   * of contributing sequences, so a folded value carries all of its evidence
+   * rather than one arbitrarily chosen member. A one-element set renders as the
+   * bare id, which is why single-contributor machines are unchanged. Nothing may
+   * parse it back into a sequence — the two readers below treat it as a string
+   * and stay correct:
+   *
+   *   - MEAN's canonical ordering sorts on it lexicographically;
+   *   - the suppressed set is computed by structural equality of Contribution.
    */
   final case class Contribution(
     cell:           Int,
@@ -164,5 +176,59 @@ object Arbiter {
       seqOk && outOk
     }.flatMap(_.hcursor.get[String]("ragStatusCode").toOption)
     if (hits.isEmpty) None else Some(hits.maxBy(r => ragRank.getOrElse(r, 0)))
+  }
+
+  /**
+   * Governance for a FOLDED contribution — the join over its contributors'
+   * severity ranks (FOLD_PLACEMENT.md §3).
+   *
+   * The fold gives the machine one value per cell but leaves it with no single
+   * firing sequence, and severity ranking needs one `ragStatusCode`. 135 of 1328
+   * corpus machines have an `outputMatches` pattern that maps to more than one
+   * RAG code, so matching on the folded values alone is genuinely ambiguous for
+   * them — the sequenceId filter is doing real work, which is why each
+   * contributor is resolved against its OWN asserted values here and never
+   * against the fold. A rule written for one CES's output need not match the
+   * fold, and changing the matching semantics is not part of this move.
+   *
+   * The selection is the join over `severityRank`, which is already an ordered
+   * chain — GREEN/absent 0 < AMBER 1 < RED 2 < lifeSafety 3 — so this is the
+   * same lattice operation the fold vocabulary defines, applied to a chain the
+   * codebase already had. It has the properties the fold contract demands, for
+   * the same reasons: deterministic; symmetric, since max over a set does not
+   * depend on enumeration order; closed, since it returns one contributor's rank
+   * rather than inventing one; and safety-preserving, since a RED-governed
+   * firing cannot be hidden by a GREEN one that folded alongside it. That last
+   * property is what SEVERITY arbitration exists to guarantee — 2 cells under
+   * `rule: SEVERITY` and 268 under `withinRank: SEVERITY` — so taking the join
+   * preserves its intent rather than approximating it.
+   *
+   * Note the fold and the ranking can disagree by construction: `meet` can
+   * select a value from a low-severity contributor while a high-severity one
+   * also fired. That is intended — the value is the machine's composition, the
+   * governance is how loudly a human is told about it, and they answer different
+   * questions.
+   *
+   * Ties go to the lexicographically smallest `sequenceId`, and the winner's
+   * decision is taken WHOLE. A decision composed from fields of different rules
+   * describes no rule that exists; here the record is a single RAG code so
+   * "whole" is trivially satisfied, but the selection is written as a choice of
+   * contributor rather than a max over codes so it stays correct when this
+   * runtime grows the rest of the PagingDecision.
+   *
+   * `contributors` are (sequenceId, that sequence's asserted values) in the
+   * machine's canonical contributor order. None when no contributor resolved
+   * governance, as today.
+   */
+  def joinGovernance(machine: com.realityengine.models.Machine,
+                     contributors: Seq[(String, Vector[Double])]): Option[PagingDecision] = {
+    val resolved = contributors.flatMap { case (seqId, values) =>
+      com.realityengine.models.Governance.resolve(machine, seqId, values)
+    }
+    if (resolved.isEmpty) None
+    // lifeSafety is never set by this runtime's machine contributions, so the
+    // rank is the RAG chain alone. Passed explicitly rather than assumed, so the
+    // day it is set this reads correctly without being revisited.
+    else Some(resolved.minBy(d => (-severityRank(d.ragStatusCode, lifeSafety = false), d.sequenceId)))
   }
 }

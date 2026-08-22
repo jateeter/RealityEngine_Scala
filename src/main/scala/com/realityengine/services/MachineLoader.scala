@@ -46,7 +46,11 @@ object MachineLoader {
           val bpe = mc.get[Int]("bitsPerElement").toOption
             .filter(Set(1, 2, 4, 8).contains)
             .getOrElse(8)
-          PerceptualMapping(RegionMapping(iOff, iLen), RegionMapping(oOff, oLen), bpe)
+          // k for the chain fold. Filtered at >= 1 because a top below that is
+          // not a chain; the fold applies the same filter, so a malformed
+          // declaration reads as undeclared in both places rather than in one.
+          val top = mc.get[Int]("outputAlphabetTop").toOption.filter(_ >= 1)
+          PerceptualMapping(RegionMapping(iOff, iLen), RegionMapping(oOff, oLen), bpe, top)
         }
       }
     }
@@ -58,6 +62,11 @@ object MachineLoader {
     val machine = new Machine(name, description, metadata, arbiterRule, mapping,
       id.getOrElse(s"machine-${System.currentTimeMillis()}-${UUID.randomUUID().toString.take(8)}"))
     machine.matchAlgorithm = matchAlgo
+    // Read at intern time so the machine carries it from the moment it loads.
+    // Absent means "or", which is what every runtime already does, so no corpus
+    // file needs to declare it for behaviour to stay as it is.
+    machine.outputMergeTransformation =
+      OutputMergeTransformation.normalise(m.get[String]("outputMergeTransformation").toOption)
 
     m.downField("sequences").as[Vector[Json]].getOrElse(Vector.empty).foreach { sj =>
       machine.addSequence(loadSequenceFromJson(sj, matchAlgo))
@@ -174,7 +183,7 @@ object MachineLoader {
         "input"          -> Json.obj("offset" -> Json.fromInt(m.input.offset), "length" -> Json.fromInt(m.input.length)),
         "output"         -> Json.obj("offset" -> Json.fromInt(m.output.offset), "length" -> Json.fromInt(m.output.length)),
         "bitsPerElement" -> Json.fromInt(m.bitsPerElement)
-      )
+      ).deepMerge(Machine.chainTopJson(m))
     }
 
     val machineFields = Seq(

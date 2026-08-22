@@ -1106,6 +1106,83 @@ class Routes(
                 case Failure(e) => complete(StatusCodes.BadRequest -> Json.obj("error" -> Json.fromString(e.getMessage)))
               }
             } } },
+            // The merge knob, readable always and settable only while unlocked.
+            //
+            // Declared on the machine (`outputMergeTransformation`, default
+            // "or") so it is carried from the moment the machine is interned,
+            // and mutable here so a run can be retuned between steps without
+            // reloading the corpus. It is a training variable; both properties
+            // are needed.
+            //
+            // The interlock starts LOCKED. Retuning a training variable by
+            // accident produces a run whose results mean nothing and which
+            // nothing distinguishes from a valid one, so unlocking is a
+            // separate, deliberate act.
+            path(Segment / "output-merge") { id =>
+              concat(
+                get {
+                  engine.getMachine(id).fold(
+                    complete(StatusCodes.NotFound -> Json.obj("error" -> Json.fromString("Machine not found")))
+                  )(m => complete(Json.obj(
+                    "machineId"                 -> Json.fromString(m.id),
+                    "machineName"               -> Json.fromString(m.name),
+                    "outputMergeTransformation" -> Json.fromString(m.outputMergeTransformation),
+                    "locked"                    -> Json.fromBoolean(m.outputMergeLocked),
+                    "available"                 -> Json.arr(
+                      OutputMergeTransformation.All.toList.sorted.map(Json.fromString): _*)
+                  )))
+                },
+                put {
+                  entity(as[Json]) { body =>
+                    val requested = body.hcursor.get[String]("outputMergeTransformation").toOption
+                    engine.getMachine(id) match {
+                      case None =>
+                        complete(StatusCodes.NotFound -> Json.obj("error" -> Json.fromString("Machine not found")))
+                      case Some(_) if requested.isEmpty =>
+                        complete(StatusCodes.BadRequest -> Json.obj(
+                          "error" -> Json.fromString("outputMergeTransformation must be a string")))
+                      case Some(_) if !OutputMergeTransformation.All.contains(requested.get.trim.toLowerCase) =>
+                        complete(StatusCodes.BadRequest -> Json.obj(
+                          "error" -> Json.fromString(s"Unknown output merge transformation: ${requested.get}")))
+                      // 423 rather than 403: the refusal is about the resource's
+                      // current state and is cleared by unlocking, not about who
+                      // is asking.
+                      case Some(m) if m.outputMergeLocked =>
+                        complete(StatusCodes.Locked -> Json.obj("error" -> Json.fromString(
+                          "outputMergeTransformation is locked; unlock it before changing a training variable")))
+                      case Some(m) =>
+                        m.outputMergeTransformation = OutputMergeTransformation.normalise(requested)
+                        complete(Json.obj(
+                          "success"                   -> Json.fromBoolean(true),
+                          "machineId"                 -> Json.fromString(m.id),
+                          "outputMergeTransformation" -> Json.fromString(m.outputMergeTransformation),
+                          "locked"                    -> Json.fromBoolean(m.outputMergeLocked)))
+                    }
+                  }
+                }
+              )
+            },
+            path(Segment / "output-merge" / "lock") { id =>
+              put {
+                entity(as[Json]) { body =>
+                  body.hcursor.get[Boolean]("locked").toOption match {
+                    case None =>
+                      complete(StatusCodes.BadRequest -> Json.obj(
+                        "error" -> Json.fromString("locked must be a boolean")))
+                    case Some(locked) =>
+                      engine.getMachine(id).fold(
+                        complete(StatusCodes.NotFound -> Json.obj("error" -> Json.fromString("Machine not found")))
+                      ) { m =>
+                        m.outputMergeLocked = locked
+                        complete(Json.obj(
+                          "success"   -> Json.fromBoolean(true),
+                          "machineId" -> Json.fromString(m.id),
+                          "locked"    -> Json.fromBoolean(locked)))
+                      }
+                  }
+                }
+              }
+            },
             path(Segment / "checkpoints") { id =>
               concat(
                 get  { complete(Json.arr(engine.listCheckpoints(id).map(_.asJson): _*)) },
@@ -1152,6 +1229,11 @@ class Routes(
             "shards"          -> Json.fromInt(com.realityengine.engine.ArbiterParallelism.shards),
             "count"           -> Json.fromInt(recs.length),
             "records"         -> Json.arr(recs.map { r =>
+              // `cesId` is an opaque key, not a sequence identifier
+              // (FOLD_PLACEMENT.md A3): a machine contribution carries the
+              // comma-joined, sorted, deduplicated set of the sequences that
+              // folded into it, so a reader must not split it and look a
+              // sequence up. A one-element set renders as the bare id.
               def contrib(c: com.realityengine.engine.Arbiter.Contribution) = Json.obj(
                 "provider"       -> Json.fromString(c.provider),
                 "determinism"    -> Json.fromString(c.determinism),
