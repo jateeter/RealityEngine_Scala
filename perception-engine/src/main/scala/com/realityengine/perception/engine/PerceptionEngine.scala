@@ -19,6 +19,12 @@ class PerceptionEngine(initialDimension: Int = sys.env.getOrElse("VECTOR_DIMENSI
   private var sources: Map[String, SourceConfig]        = Map.empty
   private var testStep: Map[String, Int]                = Map.empty
   private var walkState: Map[String, Vector[Double]]    = Map.empty
+  // Sources restored from the store that nothing in this run has touched yet.
+  // reset() re-arms test sources so this run's interned sequences replay from
+  // the top; a restored source has no sequence this run interned, so re-arming
+  // it replays the previous run's. Membership ends the moment this run adds,
+  // updates or feeds the source — at which point it is an ordinary source.
+  private var restoredDormant: Set[String]              = Set.empty
   // Persistent perceptual space — carries machine outputs forward.  Grows
   // dynamically as sources with higher offsets are added so machines whose
   // perceptualMapping extends beyond the initial dimension still receive
@@ -69,15 +75,44 @@ class PerceptionEngine(initialDimension: Int = sys.env.getOrElse("VECTOR_DIMENSI
     val src = applyId(config, id)
     ensureCapacity(src.region.offset + src.region.length)
     sources = sources + (id -> src)
+    restoredDormant = restoredDormant - id
     initRuntimeState(id, src)
     src
   }
 
-  /** Restore a previously persisted source preserving its original ID. */
+  /** Restore a previously persisted source preserving its original ID.
+    *
+    * Restored ALWAYS INACTIVE, whatever the store recorded. An active source
+    * contributes its region to every vector this PE assembles, so restoring one
+    * active makes the engine perceive data before anything in this run produced
+    * it. For the localAI machines that is not merely early, it is impossible:
+    * every value in those windows is a *response* to a dispatch this process has
+    * not yet made, so a value present at step 0 is last run's answer to a
+    * question nobody asked.
+    *
+    * That is how it surfaced. On a freshly booted one-machine universe, scala-1
+    * arrived holding 56 PE sources against C++'s 1 and LSP's 0 and emitted
+    * `localai` output cells at step 0 that neither of the others did:
+    *
+    *     orev cpp-1   set=0 []
+    *     orev lsp-1   set=0 []
+    *     orev scala-1 set=4 [7449, 7457, 7581, 7589]
+    *
+    * C++ and LSP persist no sources at all, so they cannot reach this state and
+    * the difference read as an engine divergence (#54).
+    *
+    * Activity is run state, not configuration. It is earned by receiving a
+    * value, which is the contract the rest of the stack already states:
+    * "PE sources are declared inactive and activated by their first value."
+    * The registration survives a restart; the claim to be carrying live data
+    * does not.
+    */
   def restoreSource(src: SourceConfig): Unit = synchronized {
-    ensureCapacity(src.region.offset + src.region.length)
-    sources = sources + (src.id -> src)
-    initRuntimeState(src.id, src)
+    val dormant = src.withActive(false)
+    ensureCapacity(dormant.region.offset + dormant.region.length)
+    sources = sources + (dormant.id -> dormant)
+    restoredDormant = restoredDormant + dormant.id
+    initRuntimeState(dormant.id, dormant)
   }
 
   def removeSource(id: String): Boolean = synchronized {
@@ -94,6 +129,7 @@ class PerceptionEngine(initialDimension: Int = sys.env.getOrElse("VECTOR_DIMENSI
     else {
       val updated = applyId(patch, id)
       sources = sources + (id -> updated)
+      restoredDormant = restoredDormant - id
       Some(updated)
     }
   }
@@ -127,6 +163,7 @@ class PerceptionEngine(initialDimension: Int = sys.env.getOrElse("VECTOR_DIMENSI
           lastUpdated = Some(System.currentTimeMillis()),
         )
         sources = sources + (s.id -> updated)
+        restoredDormant = restoredDormant - s.id
         true
       case _ => false
     }
@@ -242,7 +279,7 @@ class PerceptionEngine(initialDimension: Int = sys.env.getOrElse("VECTOR_DIMENSI
     globalStep       = 0L
     persistentVector = new Array[Double](_vectorDimension)
     for ((id, src) <- sources) src match {
-      case t: TestSourceConfig =>
+      case t: TestSourceConfig if !restoredDormant.contains(id) =>
         testStep = testStep + (id -> 0)
         if (!t.active) sources = sources + (id -> t.copy(active = true))
       case s: SimulatedSourceConfig if s.pattern == SimPattern.RandomWalk =>
