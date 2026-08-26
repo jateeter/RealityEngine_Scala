@@ -155,21 +155,46 @@ class PerceptionRoutes(
     (created, skipped)
   }
 
+  private def mqttSource(sensorId: String, offset: Int, length: Int, ttlMs: Long): SensorSourceConfig =
+    SensorSourceConfig(
+      id          = sensorId,
+      name        = s"mqtt:$sensorId",
+      region      = com.realityengine.perception.models.Region(offset, length),
+      active      = false,
+      sensorId    = sensorId,
+      lastValue   = Vector.empty,
+      lastUpdated = None,
+      ttlMs       = ttlMs,
+      origin      = Some("mqtt"),
+    )
+
+  /** Enabling the bridge is the MQTT integration registering, so it declares
+    * its whole source set there and then — one inactive sensor source per
+    * mapping rule — rather than materialising each one when its first message
+    * lands (RealityEngine_CI#163 points 1 and 2a).
+    *
+    * A rule whose `sensorIdTemplate` interpolates topic captures (`{1}`, `{2}`)
+    * names a source per matching topic, so its id is not knowable until a
+    * message arrives; those still declare on first signal, via the same
+    * idempotent `declareSource` call in `mqttIngest`.
+    *
+    * Returns how many rules were declarable up front.
+    */
+  private def declareMqttSources(rules: Vector[MqttMappingRule]): Int = {
+    val declarable = rules.filterNot(_.sensorIdTemplate.contains("{"))
+    declarable.foreach { r =>
+      engine.declareSource(mqttSource(r.sensorIdTemplate, r.regionOffset, r.regionLength, r.ttlMs))
+    }
+    declarable.length
+  }
+
   private def mqttIngest(sensorId: String, offset: Int, length: Int,
                           values: Vector[Double], ttlMs: Long,
                           topic: String, mappingId: String): Unit = {
-    if (engine.findSensorBySensorId(sensorId).isEmpty)
-      engine.addSource(com.realityengine.perception.models.SensorSourceConfig(
-        id          = sensorId,
-        name        = s"mqtt:$sensorId",
-        region      = com.realityengine.perception.models.Region(offset, length),
-        active      = true,
-        sensorId    = sensorId,
-        lastValue   = Vector.empty,
-        lastUpdated = None,
-        ttlMs       = ttlMs,
-        origin      = Some("mqtt"),
-      ))
+    // Idempotent: declared at registration for every rule with a static
+    // sensorIdTemplate, and here for the topic-interpolated ones. Either way
+    // the record exists inactive before updateSensorValue earns it activity.
+    engine.declareSource(mqttSource(sensorId, offset, length, ttlMs))
     engine.updateSensorValue(sensorId, values)
     broadcast(Json.obj(
       "type"      -> "mqtt-ingest".asJson,
@@ -196,7 +221,8 @@ class PerceptionRoutes(
       case scala.util.Success(_) =>
         mqttBridgeRef.set(Some(bridge))
         mqttBrokerUrlRef.set(Some(cfg.brokerUrl))
-        println(s"[mqtt-bridge] started — broker=${cfg.brokerUrl} mappings=${cfg.rules.size}")
+        val declared = declareMqttSources(cfg.rules)
+        println(s"[mqtt-bridge] started — broker=${cfg.brokerUrl} mappings=${cfg.rules.size} declared=$declared")
     }
   }
 
@@ -279,6 +305,49 @@ class PerceptionRoutes(
     m
   }
 
+  /** Loading the source-mapping registry is the boot-time half of integration
+    * registration: `INTEGRATIONS_CONFIG` is where ACP/OpenClaw, Ollama, OpenAI,
+    * HealthKit and CareKit declare which perceptual-space region each of their
+    * signals owns. Declaring here is what gives those integrations a
+    * declared-inactive state at all — before this they had none, because the
+    * source record was conjured `active = true` by the first value to arrive
+    * (RealityEngine_CI#163 point 2a).
+    *
+    * A mapping is declarable when it carries a region and names its sensor
+    * without interpolation. Most do not: `agent.{agent}.completion` and
+    * `carekit.{taskId}.{sampleType}` name one source per agent and per task, so
+    * the set is not knowable from configuration alone and those still declare
+    * on first ingest — inactive, through the same idempotent `declareSource`.
+    */
+  private def declareMappedSources(): Int = {
+    val declared = sourceMappings.values.toVector.flatMap { m =>
+      val c = m.hcursor
+      val sensorId = c.get[String]("sensorId").toOption.filter(_.nonEmpty)
+        .orElse(c.get[String]("sensorIdTemplate").toOption.filter(t => t.nonEmpty && !t.contains("{")))
+      for {
+        sid    <- sensorId
+        region <- c.get[Region]("region").toOption
+      } yield engine.declareSource(SensorSourceConfig(
+        id          = sid,
+        name        = c.get[String]("name").getOrElse(sid),
+        region      = region,
+        active      = false,
+        sensorId    = sid,
+        lastValue   = Vector.empty,
+        lastUpdated = None,
+        ttlMs       = c.get[Long]("ttlMs").getOrElse(300000L),
+        origin      = c.get[String]("origin").toOption
+                       .orElse(c.get[String]("id").toOption.map(_.takeWhile(ch => ch != ':' && ch != '-'))),
+      ))
+    }
+    declared.length
+  }
+
+  {
+    val n = declareMappedSources()
+    if (n > 0) println(s"[integrations] declared $n source(s) from the source-mapping registry")
+  }
+
   // ── Integration helpers ───────────────────────────────────────────────────
 
   private def resolveTemplate(template: String, tokens: Map[String, String]): String =
@@ -302,26 +371,28 @@ class PerceptionRoutes(
 
     val values = body.hcursor.downField("values").as[Vector[Double]].getOrElse(Vector(1.0))
 
-    // Register the sensor source with the correct perceptual-space region on first use.
-    if (engine.findSensorBySensorId(sensorId).isEmpty) {
-      mapping.foreach { m =>
-        for {
-          offset <- m.hcursor.downField("region").get[Int]("offset").toOption
-          length <- m.hcursor.downField("region").get[Int]("length").toOption
-        } {
-          val ttl = m.hcursor.get[Long]("ttlMs").getOrElse(300000L)
-          engine.addSource(com.realityengine.perception.models.SensorSourceConfig(
-            id          = sensorId,
-            name        = m.hcursor.get[String]("name").getOrElse(s"acp:$sensorId"),
-            region      = com.realityengine.perception.models.Region(offset, length),
-            active      = true,
-            sensorId    = sensorId,
-            lastValue   = Vector.empty,
-            lastUpdated = None,
-            ttlMs       = ttl,
-            origin      = Some(body.hcursor.get[String]("provider").getOrElse("openclaw")),
-          ))
-        }
+    // Declare the sensor source against the mapping's perceptual-space region.
+    // Idempotent, and inactive: the completion arriving immediately below is
+    // what earns it activity. Templates that interpolate the agent name cannot
+    // be declared from configuration alone, so this is where those first
+    // appear — declared, then activated by their value, never conjured live.
+    mapping.foreach { m =>
+      for {
+        offset <- m.hcursor.downField("region").get[Int]("offset").toOption
+        length <- m.hcursor.downField("region").get[Int]("length").toOption
+      } {
+        val ttl = m.hcursor.get[Long]("ttlMs").getOrElse(300000L)
+        engine.declareSource(com.realityengine.perception.models.SensorSourceConfig(
+          id          = sensorId,
+          name        = m.hcursor.get[String]("name").getOrElse(s"acp:$sensorId"),
+          region      = com.realityengine.perception.models.Region(offset, length),
+          active      = false,
+          sensorId    = sensorId,
+          lastValue   = Vector.empty,
+          lastUpdated = None,
+          ttlMs       = ttl,
+          origin      = Some(body.hcursor.get[String]("provider").getOrElse("openclaw")),
+        ))
       }
     }
 
@@ -1230,21 +1301,23 @@ class PerceptionRoutes(
                     val ttlMs = m.hcursor.get[Long]("ttlMs").getOrElse(3600000L)
                     val name  = m.hcursor.get[String]("name").getOrElse(s"healthkit:$tpe")
                     val mapId = m.hcursor.get[String]("id").getOrElse(explicitId.getOrElse(""))
-                    val source = if (engine.updateSensorValue(sensorId, values)) {
-                      engine.findSensorBySensorId(sensorId)
-                    } else {
-                      Some(engine.addSource(SensorSourceConfig(
-                        id          = "",
-                        name        = name,
-                        region      = region,
-                        active      = true,
-                        sensorId    = sensorId,
-                        lastValue   = values.take(region.length),
-                        lastUpdated = Some(System.currentTimeMillis()),
-                        ttlMs       = ttlMs,
-                        origin      = Some("healthkit"),
-                      )))
-                    }
+                    // Declare, then feed. The bridge handshake declares what the
+                    // registry can name up front; a sample whose mapping
+                    // interpolates its type or source name declares here, still
+                    // inactive, and the value below is what activates it.
+                    engine.declareSource(SensorSourceConfig(
+                      id          = "",
+                      name        = name,
+                      region      = region,
+                      active      = false,
+                      sensorId    = sensorId,
+                      lastValue   = Vector.empty,
+                      lastUpdated = None,
+                      ttlMs       = ttlMs,
+                      origin      = Some("healthkit"),
+                    ))
+                    engine.updateSensorValue(sensorId, values)
+                    val source = engine.findSensorBySensorId(sensorId)
                     val r = Json.obj(
                       "resolved"        -> true.asJson,
                       "sensorId"        -> sensorId.asJson,
@@ -1400,15 +1473,21 @@ class PerceptionRoutes(
           ("localai_rag_grading",    "LocalAI RAG Grading",    4),
           ("localai_agent_activity", "LocalAI Agent Activity", 8)
         )
+        // This route *is* the localAI integration registering, so it declares
+        // its source set — inactive. Declaring these active was the sharpest
+        // form of the 2a violation: a `localai` window can only ever hold the
+        // answer to a dispatch this process made, so a source claiming to be
+        // live there before one has gone out is claiming something impossible
+        // (#54).
         val created = defaultSensors.flatMap { case (sid, name, offset) =>
           engine.findSensorBySensorId(sid) match {
             case Some(_) => None
             case None =>
-              val src = engine.addSource(SensorSourceConfig(
+              val src = engine.declareSource(SensorSourceConfig(
                 id          = sid,
                 name        = name,
                 region      = com.realityengine.perception.models.Region(offset, 4),
-                active      = true,
+                active      = false,
                 sensorId    = sid,
                 lastValue   = Vector.empty,
                 lastUpdated = None,
@@ -1560,6 +1639,7 @@ class PerceptionRoutes(
                         Json.obj("error" -> s"MQTT bridge failed to restart: ${e.getMessage}".asJson))
                     case scala.util.Success(_) =>
                       mqttBridgeRef.set(Some(bridge))
+                      declareMqttSources(rules)
                       broadcast(Json.obj("type" -> "mqtt-mappings-reloaded".asJson, "mappings" -> rules.length.asJson))
                       complete(Json.obj(
                         "success"  -> true.asJson,
@@ -1598,6 +1678,7 @@ class PerceptionRoutes(
                 case scala.util.Success(_) =>
                   mqttBridgeRef.set(Some(bridge))
                   mqttBrokerUrlRef.set(Some(brokerUrl))
+                  declareMqttSources(rules)
                   broadcast(Json.obj("type" -> "mqtt-enabled".asJson, "brokerUrl" -> brokerUrl.asJson))
                   complete(Json.obj(
                     "success"  -> true.asJson,
