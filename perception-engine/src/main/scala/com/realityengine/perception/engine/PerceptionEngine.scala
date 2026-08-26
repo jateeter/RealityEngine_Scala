@@ -326,16 +326,67 @@ class PerceptionEngine(initialDimension: Int = sys.env.getOrElse("VECTOR_DIMENSI
 
   // ── Reset ─────────────────────────────────────────────────────────────────
 
+  /** Clear run state, then **validate** each source's activity against it.
+    *
+    * Reset is membership-neutral: it rewinds playback cursors, `globalStep`,
+    * the persistent vector and (in `resetAndBroadcast`) `lastPush`. It never
+    * manufactures sources and never re-derives the set from boot configuration
+    * — doing so would drop every integration registered since boot
+    * (RealityEngine_CI#163 point 4).
+    *
+    * What it does own is the `active` flag, and it *recomputes* that flag from
+    * the rules for each kind rather than forcing a constant (point 3). All four
+    * PE runtimes used to force `active = true` on every test source and leave
+    * every other kind exactly as it was, so a sensor whose TTL had expired
+    * before the reset was still reported `active: true` after it. The assembled
+    * vector was right — an expired sensor already contributes zeros at assembly
+    * — but `GET /api/sources` and `GET /api/state` advertised a source that
+    * contributes nothing as live, and `active` is byte-compared across
+    * runtimes (RealityEngine_CI#166).
+    *
+    * The rules, identical on all four runtimes:
+    *
+    *  - **sensor** — active iff holding a value inside its TTL. Same predicate
+    *    the assembly path uses to decide what it contributes.
+    *  - **test** — active iff its interned sequence is non-empty. A test source
+    *    supplies its own values and the reset has rewound it to step 0, so it
+    *    has one to give; a source with nothing interned can supply nothing, and
+    *    reporting *that* active would be assignment rather than validation.
+    *  - **simulated** — active. It generates from `globalStep`, which the reset
+    *    has zeroed.
+    *
+    * Recomputed from the rules alone: the prior flag is not read and not
+    * carried forward. An operator-deactivated source is run state, not
+    * configuration, so the reset that clears run state clears the pause too.
+    *
+    * `lastValue` and `lastUpdated` are deliberately left alone — they are the
+    * evidence the sensor rule is validated against, so clearing them would
+    * destroy the information the validation needs.
+    *
+    * The clock is read once for the whole pass: two sensors with the same
+    * `lastUpdated` and `ttlMs` must not come out differently because the fold
+    * crossed a millisecond boundary.
+    */
   def reset(): Unit = synchronized {
     globalStep       = 0L
     persistentVector = new Array[Double](_vectorDimension)
-    for ((id, src) <- sources) src match {
-      case t: TestSourceConfig =>
-        testStep = testStep + (id -> 0)
-        if (!t.active) sources = sources + (id -> t.copy(active = true))
-      case s: SimulatedSourceConfig if s.pattern == SimPattern.RandomWalk =>
-        walkState = walkState + (id -> Vector.fill(s.region.length)(s.dcOffset))
-      case _ =>
+    val now = System.currentTimeMillis()
+    for ((id, src) <- sources) {
+      // Run state first — the flags below are validated against the state the
+      // reset leaves behind, not the one it found.
+      src match {
+        case _: TestSourceConfig =>
+          testStep = testStep + (id -> 0)
+        case s: SimulatedSourceConfig if s.pattern == SimPattern.RandomWalk =>
+          walkState = walkState + (id -> Vector.fill(s.region.length)(s.dcOffset))
+        case _ =>
+      }
+      val validated = src match {
+        case t: TestSourceConfig => t.inputs.nonEmpty
+        case _: SimulatedSourceConfig => true
+        case s: SensorSourceConfig => holdsLiveValue(s, now)
+      }
+      if (validated != src.active) sources = sources + (id -> src.withActive(validated))
     }
   }
 
