@@ -120,6 +120,18 @@ object PerceptionJsonCodecs {
 
   // ── SourceConfig (discriminated union) ───────────────────────────────────
 
+  // `active` is emitted verbatim from the source handed in, and what a reader
+  // must be given is the *reported* value — `stored AND validated`
+  // (RealityEngine_CI#175). The engine owns that rule
+  // (`PerceptionEngine.reportedSources` / `.reported`), so anything serializing
+  // a source for a client passes it through one of those first; the store is the
+  // one caller that deliberately does not.
+  //
+  // The rule lives there rather than here because an encoder has no clock to
+  // read once per pass, and because moving it into implicit scope is how the
+  // marshaller ambiguity in PerceptionRoutes (`jsonMarshaller` vs `marshaller`)
+  // started: a second, more specific encoder for the same type resolves by
+  // specificity, not by intent.
   implicit val encodeSourceConfig: Encoder[SourceConfig] = {
     case s: TestSourceConfig      => encodeTestSourceConfig(s)
     case s: SimulatedSourceConfig => encodeSimulatedSourceConfig(s)

@@ -19,12 +19,6 @@ class PerceptionEngine(initialDimension: Int = sys.env.getOrElse("VECTOR_DIMENSI
   private var sources: Map[String, SourceConfig]        = Map.empty
   private var testStep: Map[String, Int]                = Map.empty
   private var walkState: Map[String, Vector[Double]]    = Map.empty
-  // Sources restored from the store that nothing in this run has touched yet.
-  // reset() re-arms test sources so this run's interned sequences replay from
-  // the top; a restored source has no sequence this run interned, so re-arming
-  // it replays the previous run's. Membership ends the moment this run adds,
-  // updates or feeds the source — at which point it is an ordinary source.
-  private var restoredDormant: Set[String]              = Set.empty
   // Persistent perceptual space — carries machine outputs forward.  Grows
   // dynamically as sources with higher offsets are added so machines whose
   // perceptualMapping extends beyond the initial dimension still receive
@@ -75,44 +69,87 @@ class PerceptionEngine(initialDimension: Int = sys.env.getOrElse("VECTOR_DIMENSI
     val src = applyId(config, id)
     ensureCapacity(src.region.offset + src.region.length)
     sources = sources + (id -> src)
-    restoredDormant = restoredDormant - id
     initRuntimeState(id, src)
     src
   }
 
+  /** Declare a source as part of an integration registering — the membership
+    * half of the source contract (RealityEngine_CI#163 points 1, 2a and 3).
+    *
+    * Registration happens two ways with one meaning: at boot from declared
+    * configuration (the MQTT mapping registry, INTEGRATIONS_CONFIG source
+    * mappings, the PE source-bootstrap flag) or dynamically at runtime
+    * (POST /api/mqtt/enable, an ACP session opening, the HealthKit bridge
+    * handshake). Either way the integration declares its full source set up
+    * front, and `GET /api/sources` reflects it before any traffic arrives.
+    *
+    * Two properties distinguish this from `addSource`:
+    *
+    *  - **Declared inactive.** Activity is earned by the first value and stays
+    *    lazy by design (point 2b). Materialising a source `active = true` on
+    *    its first value — which MQTT and the completion/HealthKit ingest paths
+    *    both did — means no declared-inactive state ever exists for those
+    *    integrations, so nothing can observe the set before it is live.
+    *  - **Idempotent.** Re-registration is the same event as first
+    *    registration, so it must not disturb an existing source's activity,
+    *    cached value or playback cursor. Sensors dedupe on their logical
+    *    `sensorId` as well as their id, matching what the ingest paths check.
+    *
+    * Returns the source now under that identity — the freshly declared one, or
+    * the existing one left untouched.
+    */
+  def declareSource(config: SourceConfig): SourceConfig = synchronized {
+    val existing = config match {
+      case s: SensorSourceConfig =>
+        sources.get(s.id).orElse(
+          sources.values.collectFirst { case e: SensorSourceConfig if e.sensorId == s.sensorId => e })
+      case other => sources.get(other.id)
+    }
+    existing.getOrElse {
+      val id       = if (config.id.nonEmpty) config.id else uuidGen.generate().toString
+      val declared = applyId(config.withActive(false), id)
+      ensureCapacity(declared.region.offset + declared.region.length)
+      sources = sources + (id -> declared)
+      initRuntimeState(id, declared)
+      declared
+    }
+  }
+
   /** Restore a previously persisted source preserving its original ID.
     *
-    * Restored ALWAYS INACTIVE, whatever the store recorded. An active source
-    * contributes its region to every vector this PE assembles, so restoring one
-    * active makes the engine perceive data before anything in this run produced
-    * it. For the localAI machines that is not merely early, it is impossible:
-    * every value in those windows is a *response* to a dispatch this process has
-    * not yet made, so a value present at step 0 is last run's answer to a
-    * question nobody asked.
+    * The store caches run state — cached value and cached activity — and never
+    * membership (RealityEngine_CI#163 point 5). So a restored source brings its
+    * recorded `active` flag back with it, and that claim is then **validated**
+    * rather than overridden: a sensor holding a value outside its TTL is
+    * deactivated, one holding a live value is left active.
     *
-    * That is how it surfaced. On a freshly booted one-machine universe, scala-1
-    * arrived holding 56 PE sources against C++'s 1 and LSP's 0 and emitted
-    * `localai` output cells at step 0 that neither of the others did:
+    * This supersedes the blanket "restore always inactive" rule (#55). That
+    * rule was aimed at the right target — on a freshly booted one-machine
+    * universe scala-1 arrived holding 56 PE sources against C++'s 1 and LSP's
+    * 0, and emitted `localai` output cells at step 0 that neither of the others
+    * did (#54):
     *
     *     orev cpp-1   set=0 []
     *     orev lsp-1   set=0 []
     *     orev scala-1 set=4 [7449, 7457, 7581, 7589]
     *
-    * C++ and LSP persist no sources at all, so they cannot reach this state and
-    * the difference read as an engine divergence (#54).
+    * Every value in a `localai` window is a *response* to a dispatch this
+    * process has not yet made, so a value present at step 0 is last run's
+    * answer to a question nobody asked. But those values are stale by their own
+    * TTL, so validation deactivates them on the evidence — which is what the
+    * blanket rule was approximating.
     *
-    * Activity is run state, not configuration. It is earned by receiving a
-    * value, which is the contract the rest of the stack already states:
-    * "PE sources are declared inactive and activated by their first value."
-    * The registration survives a restart; the claim to be carrying live data
-    * does not.
+    * Forcing inactive additionally cost something: an integration with a
+    * dispatch in flight when the process ended — an ACP completion pending, an
+    * MQTT signal mid-delivery, a HealthKit batch part-ingested — needs the fact
+    * that its source was live to survive the restart, or the retry resumes
+    * against a source the engine believes never carried data.
     */
   def restoreSource(src: SourceConfig): Unit = synchronized {
-    val dormant = src.withActive(false)
-    ensureCapacity(dormant.region.offset + dormant.region.length)
-    sources = sources + (dormant.id -> dormant)
-    restoredDormant = restoredDormant + dormant.id
-    initRuntimeState(dormant.id, dormant)
+    val restored = src.withActive(src.active && cachedValueSupportsActivity(src, System.currentTimeMillis()))
+    ensureCapacity(restored.region.offset + restored.region.length)
+    sources = sources + (restored.id -> restored)
+    initRuntimeState(restored.id, restored)
   }
 
   def removeSource(id: String): Boolean = synchronized {
@@ -129,7 +166,6 @@ class PerceptionEngine(initialDimension: Int = sys.env.getOrElse("VECTOR_DIMENSI
     else {
       val updated = applyId(patch, id)
       sources = sources + (id -> updated)
-      restoredDormant = restoredDormant - id
       Some(updated)
     }
   }
@@ -141,9 +177,61 @@ class PerceptionEngine(initialDimension: Int = sys.env.getOrElse("VECTOR_DIMENSI
     * `sources` is a Map keyed by id and ids are generated per runtime, so every
     * PE listed sources differently — C++ by id, Scala and LSP by hash order,
     * TypeScript by insertion order.  Four engines, four orderings, on an
-    * endpoint under byte comparison. */
+    * endpoint under byte comparison.
+    *
+    * This is the **stored** view: each source carries the `active` flag the
+    * engine is holding for it. That is what the store persists and what a PATCH
+    * merges onto. What gets *reported* is `reportedSources` — see there. */
   def getSources: Vector[SourceConfig] =
     synchronized { sources.values.toVector.sortBy(s => (s.name, s.id)) }
+
+  /** Sources as they are **reported**, with every `active` flag validated
+    * against the state backing it (RealityEngine_CI#175).
+    *
+    *     reported_active = stored_active AND validated_active(kind)
+    *
+    * Activity expiry is continuous, not an event. Nothing runs when a sensor's
+    * TTL lapses, so between resets the stored flag drifts away from what the
+    * source can actually supply: `assembleVector` was already zeroing an expired
+    * sensor's window while `/api/sources` and `/api/state` still advertised it
+    * `active: true`. Validating at reset closed the gap only at reset; deriving
+    * the reported value at every read closes it always.
+    *
+    * Both conjuncts carry weight and neither can be dropped:
+    *
+    *  - `stored_active` keeps activity something a source has to be *given*. An
+    *    operator pause (PATCH /api/sources/:id) and a finished non-looping test
+    *    source both read inactive through it, and it is what preserves the
+    *    ingress invariant — a declared sensor that has never been fed has
+    *    `stored_active = false` and no amount of validation can make it live.
+    *  - `validated_active` stops a stale flag being reported as live.
+    *
+    * So validation can only ever take activity away. Granting it stays with the
+    * paths entitled to: `updateSensorValue` for a sensor's first (or next)
+    * value, `reset` for a rewound run, `addSource`/`declareSource` for what the
+    * registration asked for.
+    *
+    * This is a read. The stored flag is untouched — a source demoted here is
+    * still holding its own `active = true`, and the ingress or reset that
+    * revalidates it finds exactly the state it left behind.
+    *
+    * The clock is read once for the whole pass, for the same reason `reset`
+    * reads it once: two sensors with identical `lastUpdated` and `ttlMs` must
+    * not serialize differently because the map crossed a millisecond boundary.
+    */
+  def reportedSources: Vector[SourceConfig] = synchronized {
+    val now = System.currentTimeMillis()
+    getSources.map(reportedView(_, now))
+  }
+
+  /** The reported view of a single source — `reportedSources` for the
+    * one-source responses (`POST /api/sources`, `PATCH /api/sources/:id`, the
+    * ingest and bootstrap payloads that echo the source they touched).
+    *
+    * Those serialize a source too, and a reported `active` that depends on
+    * which endpoint answered would be the same drift in a new place. */
+  def reported(src: SourceConfig): SourceConfig =
+    reportedView(src, System.currentTimeMillis())
 
   /** Find an existing sensor source by its logical sensorId (not its UUID). */
   def findSensorBySensorId(sensorId: String): Option[SensorSourceConfig] = synchronized {
@@ -152,6 +240,21 @@ class PerceptionEngine(initialDimension: Int = sys.env.getOrElse("VECTOR_DIMENSI
 
   // ── Sensor push ───────────────────────────────────────────────────────────
 
+  /** Feed a sensor source its next value.
+    *
+    * This is where a declared sensor **earns its activity**. Registration
+    * declares the source inactive (`declareSource`) and the first value is what
+    * makes it live — the stack's standing rule, "PE sources are declared
+    * inactive and activated by their first value" (RealityEngine_CI#163 point
+    * 2b).
+    *
+    * Setting the flag here is what makes the declared-inactive state and
+    * reset's TTL validation safe to have. Both can deactivate a sensor; without
+    * an ingress path that reactivates, a sensor demoted by an expired TTL would
+    * stay demoted through every subsequent reading and contribute zeros forever
+    * while holding a fresh value — a worse defect than the stale `active: true`
+    * the validation is there to fix.
+    */
   def updateSensorValue(sensorId: String, values: Vector[Double]): Boolean = synchronized {
     sources.values.find {
       case s: SensorSourceConfig if s.sensorId == sensorId => true
@@ -159,11 +262,11 @@ class PerceptionEngine(initialDimension: Int = sys.env.getOrElse("VECTOR_DIMENSI
     } match {
       case Some(s: SensorSourceConfig) =>
         val updated = s.copy(
+          active      = true,
           lastValue   = values.take(s.region.length),
           lastUpdated = Some(System.currentTimeMillis()),
         )
         sources = sources + (s.id -> updated)
-        restoredDormant = restoredDormant - s.id
         true
       case _ => false
     }
@@ -275,24 +378,82 @@ class PerceptionEngine(initialDimension: Int = sys.env.getOrElse("VECTOR_DIMENSI
 
   // ── Reset ─────────────────────────────────────────────────────────────────
 
+  /** Clear run state, then **validate** each source's activity against it.
+    *
+    * Reset is membership-neutral: it rewinds playback cursors, `globalStep`,
+    * the persistent vector and (in `resetAndBroadcast`) `lastPush`. It never
+    * manufactures sources and never re-derives the set from boot configuration
+    * — doing so would drop every integration registered since boot
+    * (RealityEngine_CI#163 point 4).
+    *
+    * What it does own is the `active` flag, and it *recomputes* that flag from
+    * the rules for each kind rather than forcing a constant (point 3). All four
+    * PE runtimes used to force `active = true` on every test source and leave
+    * every other kind exactly as it was, so a sensor whose TTL had expired
+    * before the reset was still reported `active: true` after it. The assembled
+    * vector was right — an expired sensor already contributes zeros at assembly
+    * — but `GET /api/sources` and `GET /api/state` advertised a source that
+    * contributes nothing as live, and `active` is byte-compared across
+    * runtimes (RealityEngine_CI#166).
+    *
+    * The rules, identical on all four runtimes:
+    *
+    *  - **sensor** — active iff holding a value inside its TTL. Same predicate
+    *    the assembly path uses to decide what it contributes.
+    *  - **test** — active iff its interned sequence is non-empty. A test source
+    *    supplies its own values and the reset has rewound it to step 0, so it
+    *    has one to give; a source with nothing interned can supply nothing, and
+    *    reporting *that* active would be assignment rather than validation.
+    *  - **simulated** — active. It generates from `globalStep`, which the reset
+    *    has zeroed.
+    *
+    * Recomputed from the rules alone: the prior flag is not read and not
+    * carried forward. An operator-deactivated source is run state, not
+    * configuration, so the reset that clears run state clears the pause too.
+    *
+    * `lastValue` and `lastUpdated` are deliberately left alone — they are the
+    * evidence the sensor rule is validated against, so clearing them would
+    * destroy the information the validation needs.
+    *
+    * The clock is read once for the whole pass: two sensors with the same
+    * `lastUpdated` and `ttlMs` must not come out differently because the fold
+    * crossed a millisecond boundary.
+    *
+    * Reset and serialization apply the *same* predicate (`validatedActive`) and
+    * differ only in what they do with the answer: reset assigns it, because a
+    * rewound run is entitled to re-arm what it rewound; serialization intersects
+    * it with the stored flag, because a read may take activity away but must not
+    * grant it (RealityEngine_CI#175).
+    */
   def reset(): Unit = synchronized {
     globalStep       = 0L
     persistentVector = new Array[Double](_vectorDimension)
-    for ((id, src) <- sources) src match {
-      case t: TestSourceConfig if !restoredDormant.contains(id) =>
-        testStep = testStep + (id -> 0)
-        if (!t.active) sources = sources + (id -> t.copy(active = true))
-      case s: SimulatedSourceConfig if s.pattern == SimPattern.RandomWalk =>
-        walkState = walkState + (id -> Vector.fill(s.region.length)(s.dcOffset))
-      case _ =>
+    val now = System.currentTimeMillis()
+    for ((id, src) <- sources) {
+      // Run state first — the flags below are validated against the state the
+      // reset leaves behind, not the one it found.
+      src match {
+        case _: TestSourceConfig =>
+          testStep = testStep + (id -> 0)
+        case s: SimulatedSourceConfig if s.pattern == SimPattern.RandomWalk =>
+          walkState = walkState + (id -> Vector.fill(s.region.length)(s.dcOffset))
+        case _ =>
+      }
+      val validated = validatedActive(src, now)
+      if (validated != src.active) sources = sources + (id -> src.withActive(validated))
     }
   }
 
   // ── State snapshot ────────────────────────────────────────────────────────
 
+  /** The snapshot `GET /api/state` and every WebSocket state-update serialize.
+    *
+    * Sources come from `reportedSources`, not `getSources`: `/api/state` embeds
+    * the same source objects `/api/sources` lists, and the two must not report a
+    * source's activity differently. */
   def getState(lastPush: Option[Long], auto: AutoConfig): EngineState = synchronized {
     EngineState(
-      sources         = getSources,
+      sources         = reportedSources,
       assembledVector = assembleVector(),
       globalStep      = globalStep,
       auto            = auto,
@@ -318,6 +479,92 @@ class PerceptionEngine(initialDimension: Int = sys.env.getOrElse("VECTOR_DIMENSI
     case _ =>
   }
 
+  /** Whether a source is holding a value it can still supply.
+    *
+    * The one definition of sensor freshness in this engine. The assembly path
+    * decides what a sensor contributes with it, and `reset`/`restoreSource`
+    * decide whether a sensor's `active` claim is still supported by it, so the
+    * reported flag and the contributed values can never disagree about whether
+    * a TTL has run out.
+    *
+    * Test and simulated sources supply their own values — from an interned
+    * sequence and from `globalStep` respectively — so nothing about them
+    * expires and the answer is unconditionally true.
+    *
+    * `now` is a parameter rather than a call so a whole validation pass reads
+    * the clock once: two sensors with the same `lastUpdated` and `ttlMs` must
+    * not come out differently because the fold crossed a millisecond boundary.
+    */
+  private def holdsLiveValue(src: SourceConfig, now: Long): Boolean = src match {
+    case s: SensorSourceConfig => s.lastUpdated.exists(ts => now - ts <= s.ttlMs)
+    case _                     => true
+  }
+
+  /** Whether a source's state supports calling it active, per kind.
+    *
+    * The single definition of validated activity in this engine, and the one
+    * `reset` assigns from and `reportedSources` intersects with. Identical on
+    * all four PE runtimes:
+    *
+    *  - **sensor** — holds a value inside its TTL (`holdsLiveValue`, the same
+    *    predicate the assembly path uses to decide the sensor's contribution,
+    *    so the reported flag and the contributed values cannot disagree).
+    *  - **test** — its interned sequence is non-empty. A test source supplies
+    *    its own values, so with a sequence it has one to give; with nothing
+    *    interned it can supply nothing.
+    *  - **simulated** — generates from `globalStep`, so always.
+    *
+    * `now` is a parameter so a whole pass reads the clock once.
+    */
+  private def validatedActive(src: SourceConfig, now: Long): Boolean = src match {
+    case t: TestSourceConfig      => t.inputs.nonEmpty
+    case _: SimulatedSourceConfig => true
+    case s: SensorSourceConfig    => holdsLiveValue(s, now)
+  }
+
+  /** `stored_active AND validated_active` for one source, without touching the
+    * stored one — the whole of the reporting rule (RealityEngine_CI#175).
+    *
+    * Returns the source itself when the two agree, so the common case allocates
+    * nothing and a serialization pass over an unchanged set is identity. */
+  private def reportedView(src: SourceConfig, now: Long): SourceConfig = {
+    val reported = src.active && validatedActive(src, now)
+    if (reported == src.active) src else src.withActive(reported)
+  }
+
+  /** Whether a restored source's cached `active` flag is supported by cached
+    * evidence — a different question from `holdsLiveValue`, and it has to be.
+    *
+    * `holdsLiveValue` asks "can this source supply a value *now*", which a test
+    * or simulated source always can: it carries its own sequence or generates
+    * from `globalStep`. That is the right question for the assembly path and
+    * for reset, both of which run inside a live run.
+    *
+    * Restore asks something narrower: does this activity claim trace back to
+    * anything? Activity is earned by an ingress event, and after a restart the
+    * only evidence any such event happened is the cached value the store kept
+    * for it. A sensor holding a live value carries that evidence, and that is
+    * the case worth restoring — an integration whose dispatch was in flight
+    * when the process ended needs its source to still be live for the retry to
+    * resume against.
+    *
+    * Nothing else carries it. A restored test or simulated source has no cached
+    * value at all, so an `active` flag on one is a claim with nothing behind
+    * it — which is exactly what put 808 armed test sources into a freshly
+    * booted scala-1 while C++ held 1 and LSP held 0, and made this runtime
+    * perceive stimulus the others never saw (#54).
+    *
+    * Their owners re-arm them anyway: startup seeding re-declares corpus
+    * sources at the activation the boot configuration asks for, and reset
+    * validates every test source with a sequence back to active. So this loses
+    * nothing that is not immediately re-established by whoever is entitled to
+    * establish it.
+    */
+  private def cachedValueSupportsActivity(src: SourceConfig, now: Long): Boolean = src match {
+    case s: SensorSourceConfig => s.lastUpdated.exists(ts => now - ts <= s.ttlMs)
+    case _                     => false
+  }
+
   private def getSourceValues(id: String, src: SourceConfig): Vector[Double] = src match {
     case t: TestSourceConfig =>
       val step = testStep.getOrElse(id, 0)
@@ -325,15 +572,12 @@ class PerceptionEngine(initialDimension: Int = sys.env.getOrElse("VECTOR_DIMENSI
     case s: SimulatedSourceConfig =>
       PerceptionEngine.simValues(id, s, globalStep, walkState)
     case s: SensorSourceConfig =>
-      s.lastUpdated match {
-        case None => Vector.fill(s.region.length)(0.0)
-        case Some(ts) if System.currentTimeMillis() - ts > s.ttlMs =>
-          Vector.fill(s.region.length)(0.0)
-        case _ =>
-          val padded = Array.fill(s.region.length)(0.0)
-          var i = 0
-          while (i < s.lastValue.length && i < s.region.length) { padded(i) = s.lastValue(i); i += 1 }
-          padded.toVector
+      if (!holdsLiveValue(s, System.currentTimeMillis())) Vector.fill(s.region.length)(0.0)
+      else {
+        val padded = Array.fill(s.region.length)(0.0)
+        var i = 0
+        while (i < s.lastValue.length && i < s.region.length) { padded(i) = s.lastValue(i); i += 1 }
+        padded.toVector
       }
   }
 }

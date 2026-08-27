@@ -315,6 +315,27 @@ lane, so the contract is observable rather than aspirational.
 | PATCH | `/api/config` | ✓ | ✓ | ✓ |
 | POST | `/api/reset` | ✓ | ✓ | ✓ |
 
+`POST /api/reset` is presence-compatible on all three, and its **post-state** is
+part of the contract (RealityEngine_CI#163 point 3 and 4):
+
+- **Membership is untouched.** Reset never creates or removes a source, never
+  re-derives the set from the RE corpus, and never re-reads boot configuration
+  — that would drop every integration registered since boot. Sources arrive and
+  leave only by register and deregister.
+- **Run state is rewound**: `globalStep` to 0, the persistent vector to zeros,
+  test playback cursors to step 0, random-walk state to its DC offset, and
+  `lastPush` to unset.
+- **Activity is validated, not assigned.** Each source's `active` flag is
+  recomputed from the rules for its kind, from the rules alone — the prior flag
+  is not carried forward, so an explicit pause does not survive a reset:
+  - *sensor* — active iff holding a value inside its TTL. `lastValue` and
+    `lastUpdated` are **not** cleared; they are the evidence this is checked
+    against.
+  - *test* — active iff its interned sequence is non-empty.
+  - *simulated* — active; it generates from the zeroed `globalStep`.
+
+`active` is on the byte-compared source payload, so this is a parity surface.
+
 ### Sources & Sensors
 
 | Method | Path | CPP | LSP | Scala |
