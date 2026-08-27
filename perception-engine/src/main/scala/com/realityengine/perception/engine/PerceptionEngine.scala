@@ -146,7 +146,7 @@ class PerceptionEngine(initialDimension: Int = sys.env.getOrElse("VECTOR_DIMENSI
     * against a source the engine believes never carried data.
     */
   def restoreSource(src: SourceConfig): Unit = synchronized {
-    val restored = src.withActive(src.active && holdsLiveValue(src, System.currentTimeMillis()))
+    val restored = src.withActive(src.active && cachedValueSupportsActivity(src, System.currentTimeMillis()))
     ensureCapacity(restored.region.offset + restored.region.length)
     sources = sources + (restored.id -> restored)
     initRuntimeState(restored.id, restored)
@@ -439,6 +439,39 @@ class PerceptionEngine(initialDimension: Int = sys.env.getOrElse("VECTOR_DIMENSI
   private def holdsLiveValue(src: SourceConfig, now: Long): Boolean = src match {
     case s: SensorSourceConfig => s.lastUpdated.exists(ts => now - ts <= s.ttlMs)
     case _                     => true
+  }
+
+  /** Whether a restored source's cached `active` flag is supported by cached
+    * evidence — a different question from `holdsLiveValue`, and it has to be.
+    *
+    * `holdsLiveValue` asks "can this source supply a value *now*", which a test
+    * or simulated source always can: it carries its own sequence or generates
+    * from `globalStep`. That is the right question for the assembly path and
+    * for reset, both of which run inside a live run.
+    *
+    * Restore asks something narrower: does this activity claim trace back to
+    * anything? Activity is earned by an ingress event, and after a restart the
+    * only evidence any such event happened is the cached value the store kept
+    * for it. A sensor holding a live value carries that evidence, and that is
+    * the case worth restoring — an integration whose dispatch was in flight
+    * when the process ended needs its source to still be live for the retry to
+    * resume against.
+    *
+    * Nothing else carries it. A restored test or simulated source has no cached
+    * value at all, so an `active` flag on one is a claim with nothing behind
+    * it — which is exactly what put 808 armed test sources into a freshly
+    * booted scala-1 while C++ held 1 and LSP held 0, and made this runtime
+    * perceive stimulus the others never saw (#54).
+    *
+    * Their owners re-arm them anyway: startup seeding re-declares corpus
+    * sources at the activation the boot configuration asks for, and reset
+    * validates every test source with a sequence back to active. So this loses
+    * nothing that is not immediately re-established by whoever is entitled to
+    * establish it.
+    */
+  private def cachedValueSupportsActivity(src: SourceConfig, now: Long): Boolean = src match {
+    case s: SensorSourceConfig => s.lastUpdated.exists(ts => now - ts <= s.ttlMs)
+    case _                     => false
   }
 
   private def getSourceValues(id: String, src: SourceConfig): Vector[Double] = src match {

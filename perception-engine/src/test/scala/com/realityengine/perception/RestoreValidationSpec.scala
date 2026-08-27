@@ -82,12 +82,22 @@ class RestoreValidationSpec extends AnyFlatSpec with Matchers {
     engine.getSource("declared").map(_.active) shouldBe Some(false)
   }
 
-  it should "restore a test source's cached activity — nothing about it expires" in {
+  it should "not restore a test source active — the store cached no value to support the claim" in {
     val engine = new PerceptionEngine(256)
     engine.restoreSource(persistedTest("armed", active = true))
     engine.restoreSource(persistedTest("idle",  active = false))
-    engine.getSource("armed").map(_.active) shouldBe Some(true)
+    engine.getSource("armed").map(_.active) shouldBe Some(false)
     engine.getSource("idle").map(_.active)  shouldBe Some(false)
+    engine.assembleVector().forall(_ == 0.0) shouldBe true
+  }
+
+  it should "leave re-arming a restored test source to whoever is entitled to" in {
+    val engine = new PerceptionEngine(256)
+    engine.restoreSource(persistedTest("armed", active = true))
+    engine.getSource("armed").map(_.active) shouldBe Some(false)
+    // Reset validates every test source holding a sequence back to active.
+    engine.reset()
+    engine.getSource("armed").map(_.active) shouldBe Some(true)
   }
 
   // ── The half #55 could not express: retry state ───────────────────────────
