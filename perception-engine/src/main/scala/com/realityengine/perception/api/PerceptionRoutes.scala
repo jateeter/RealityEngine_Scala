@@ -729,6 +729,10 @@ class PerceptionRoutes(
   }
 
   private def saveAndBroadcast(): Future[Unit] = Future {
+    // getSources, deliberately: the store caches the *stored* flag. Persisting
+    // the reported one would make a read mutate state — a sensor whose TTL
+    // happened to lapse during a save would come back from the store demoted,
+    // and the demotion would outlive the restart that reset it.
     store.save(engine.getSources)
     broadcastState()
   }(system.dispatchers.lookup("blocking-io-dispatcher"))
@@ -866,7 +870,11 @@ class PerceptionRoutes(
     // ── Sources ─────────────────────────────────────────────────────────────
     path("api" / "sources") {
       concat(
-        get { complete(Json.obj("sources" -> engine.getSources.asJson)) },
+        // reportedSources, not getSources: `active` is derived at every read as
+        // `stored AND validated`, so an expired sensor stops advertising itself
+        // as live the moment its TTL lapses rather than at the next reset
+        // (RealityEngine_CI#175). The stored flag is untouched by the read.
+        get { complete(Json.obj("sources" -> engine.reportedSources.asJson)) },
         post { entity(as[SourceConfig]) { config =>
           // Idempotent for sensor sources: if a sensor with the same sensorId already
           // exists (e.g. from the persisted volume after a non-fresh restart), return it
@@ -877,11 +885,11 @@ class PerceptionRoutes(
           }
           existing match {
             case Some(src) =>
-              complete(StatusCodes.OK -> Json.obj("source" -> src.asJson))
+              complete(StatusCodes.OK -> Json.obj("source" -> engine.reported(src).asJson))
             case None =>
               val src = engine.addSource(config)
               onComplete(saveAndBroadcast()) { _ =>
-                complete(StatusCodes.OK -> Json.obj("source" -> src.asJson))
+                complete(StatusCodes.OK -> Json.obj("source" -> engine.reported(src).asJson))
               }
           }
         }}
@@ -897,12 +905,16 @@ class PerceptionRoutes(
             case Some(existing) =>
               // Merge patch fields onto existing
               val merged = mergeSourcePatch(existing, body)
+              // The patch merges onto the *stored* source (engine.getSource) and
+              // the response reports the *validated* one — a PATCH must be able
+              // to set a flag the read then declines to report, not have a stale
+              // reported value fed back into storage.
               engine.updateSource(id, merged) match {
                 case None =>
                   complete(StatusCodes.NotFound -> Json.obj("error" -> "Source not found".asJson))
                 case Some(updated) =>
                   onComplete(saveAndBroadcast()) { _ =>
-                    complete(Json.obj("source" -> updated.asJson))
+                    complete(Json.obj("source" -> engine.reported(updated).asJson))
                   }
               }
           }
@@ -1327,7 +1339,7 @@ class PerceptionRoutes(
                       "sourceMappingId" -> mapId.asJson,
                       "region"          -> region.asJson,
                       "values"          -> values.asJson,
-                      "source"          -> source.map(_.asJson).getOrElse(Json.obj("lastValue" -> values.asJson)),
+                      "source"          -> source.map(engine.reported(_).asJson).getOrElse(Json.obj("lastValue" -> values.asJson)),
                       "ttlMs"           -> ttlMs.asJson)
                     (res :+ r, unm)
                 }
@@ -1494,7 +1506,7 @@ class PerceptionRoutes(
                 ttlMs       = 60000L,
                 origin      = Some("localai"),
               ))
-              Some(src.asJson)
+              Some(engine.reported(src).asJson)
           }
         }
         val machineResults = localAiMachinesDir.map { dir =>

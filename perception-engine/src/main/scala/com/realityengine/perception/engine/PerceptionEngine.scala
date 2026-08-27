@@ -177,9 +177,61 @@ class PerceptionEngine(initialDimension: Int = sys.env.getOrElse("VECTOR_DIMENSI
     * `sources` is a Map keyed by id and ids are generated per runtime, so every
     * PE listed sources differently — C++ by id, Scala and LSP by hash order,
     * TypeScript by insertion order.  Four engines, four orderings, on an
-    * endpoint under byte comparison. */
+    * endpoint under byte comparison.
+    *
+    * This is the **stored** view: each source carries the `active` flag the
+    * engine is holding for it. That is what the store persists and what a PATCH
+    * merges onto. What gets *reported* is `reportedSources` — see there. */
   def getSources: Vector[SourceConfig] =
     synchronized { sources.values.toVector.sortBy(s => (s.name, s.id)) }
+
+  /** Sources as they are **reported**, with every `active` flag validated
+    * against the state backing it (RealityEngine_CI#175).
+    *
+    *     reported_active = stored_active AND validated_active(kind)
+    *
+    * Activity expiry is continuous, not an event. Nothing runs when a sensor's
+    * TTL lapses, so between resets the stored flag drifts away from what the
+    * source can actually supply: `assembleVector` was already zeroing an expired
+    * sensor's window while `/api/sources` and `/api/state` still advertised it
+    * `active: true`. Validating at reset closed the gap only at reset; deriving
+    * the reported value at every read closes it always.
+    *
+    * Both conjuncts carry weight and neither can be dropped:
+    *
+    *  - `stored_active` keeps activity something a source has to be *given*. An
+    *    operator pause (PATCH /api/sources/:id) and a finished non-looping test
+    *    source both read inactive through it, and it is what preserves the
+    *    ingress invariant — a declared sensor that has never been fed has
+    *    `stored_active = false` and no amount of validation can make it live.
+    *  - `validated_active` stops a stale flag being reported as live.
+    *
+    * So validation can only ever take activity away. Granting it stays with the
+    * paths entitled to: `updateSensorValue` for a sensor's first (or next)
+    * value, `reset` for a rewound run, `addSource`/`declareSource` for what the
+    * registration asked for.
+    *
+    * This is a read. The stored flag is untouched — a source demoted here is
+    * still holding its own `active = true`, and the ingress or reset that
+    * revalidates it finds exactly the state it left behind.
+    *
+    * The clock is read once for the whole pass, for the same reason `reset`
+    * reads it once: two sensors with identical `lastUpdated` and `ttlMs` must
+    * not serialize differently because the map crossed a millisecond boundary.
+    */
+  def reportedSources: Vector[SourceConfig] = synchronized {
+    val now = System.currentTimeMillis()
+    getSources.map(reportedView(_, now))
+  }
+
+  /** The reported view of a single source — `reportedSources` for the
+    * one-source responses (`POST /api/sources`, `PATCH /api/sources/:id`, the
+    * ingest and bootstrap payloads that echo the source they touched).
+    *
+    * Those serialize a source too, and a reported `active` that depends on
+    * which endpoint answered would be the same drift in a new place. */
+  def reported(src: SourceConfig): SourceConfig =
+    reportedView(src, System.currentTimeMillis())
 
   /** Find an existing sensor source by its logical sensorId (not its UUID). */
   def findSensorBySensorId(sensorId: String): Option[SensorSourceConfig] = synchronized {
@@ -366,6 +418,12 @@ class PerceptionEngine(initialDimension: Int = sys.env.getOrElse("VECTOR_DIMENSI
     * The clock is read once for the whole pass: two sensors with the same
     * `lastUpdated` and `ttlMs` must not come out differently because the fold
     * crossed a millisecond boundary.
+    *
+    * Reset and serialization apply the *same* predicate (`validatedActive`) and
+    * differ only in what they do with the answer: reset assigns it, because a
+    * rewound run is entitled to re-arm what it rewound; serialization intersects
+    * it with the stored flag, because a read may take activity away but must not
+    * grant it (RealityEngine_CI#175).
     */
   def reset(): Unit = synchronized {
     globalStep       = 0L
@@ -381,20 +439,21 @@ class PerceptionEngine(initialDimension: Int = sys.env.getOrElse("VECTOR_DIMENSI
           walkState = walkState + (id -> Vector.fill(s.region.length)(s.dcOffset))
         case _ =>
       }
-      val validated = src match {
-        case t: TestSourceConfig => t.inputs.nonEmpty
-        case _: SimulatedSourceConfig => true
-        case s: SensorSourceConfig => holdsLiveValue(s, now)
-      }
+      val validated = validatedActive(src, now)
       if (validated != src.active) sources = sources + (id -> src.withActive(validated))
     }
   }
 
   // ── State snapshot ────────────────────────────────────────────────────────
 
+  /** The snapshot `GET /api/state` and every WebSocket state-update serialize.
+    *
+    * Sources come from `reportedSources`, not `getSources`: `/api/state` embeds
+    * the same source objects `/api/sources` lists, and the two must not report a
+    * source's activity differently. */
   def getState(lastPush: Option[Long], auto: AutoConfig): EngineState = synchronized {
     EngineState(
-      sources         = getSources,
+      sources         = reportedSources,
       assembledVector = assembleVector(),
       globalStep      = globalStep,
       auto            = auto,
@@ -439,6 +498,38 @@ class PerceptionEngine(initialDimension: Int = sys.env.getOrElse("VECTOR_DIMENSI
   private def holdsLiveValue(src: SourceConfig, now: Long): Boolean = src match {
     case s: SensorSourceConfig => s.lastUpdated.exists(ts => now - ts <= s.ttlMs)
     case _                     => true
+  }
+
+  /** Whether a source's state supports calling it active, per kind.
+    *
+    * The single definition of validated activity in this engine, and the one
+    * `reset` assigns from and `reportedSources` intersects with. Identical on
+    * all four PE runtimes:
+    *
+    *  - **sensor** — holds a value inside its TTL (`holdsLiveValue`, the same
+    *    predicate the assembly path uses to decide the sensor's contribution,
+    *    so the reported flag and the contributed values cannot disagree).
+    *  - **test** — its interned sequence is non-empty. A test source supplies
+    *    its own values, so with a sequence it has one to give; with nothing
+    *    interned it can supply nothing.
+    *  - **simulated** — generates from `globalStep`, so always.
+    *
+    * `now` is a parameter so a whole pass reads the clock once.
+    */
+  private def validatedActive(src: SourceConfig, now: Long): Boolean = src match {
+    case t: TestSourceConfig      => t.inputs.nonEmpty
+    case _: SimulatedSourceConfig => true
+    case s: SensorSourceConfig    => holdsLiveValue(s, now)
+  }
+
+  /** `stored_active AND validated_active` for one source, without touching the
+    * stored one — the whole of the reporting rule (RealityEngine_CI#175).
+    *
+    * Returns the source itself when the two agree, so the common case allocates
+    * nothing and a serialization pass over an unchanged set is identity. */
+  private def reportedView(src: SourceConfig, now: Long): SourceConfig = {
+    val reported = src.active && validatedActive(src, now)
+    if (reported == src.active) src else src.withActive(reported)
   }
 
   /** Whether a restored source's cached `active` flag is supported by cached
