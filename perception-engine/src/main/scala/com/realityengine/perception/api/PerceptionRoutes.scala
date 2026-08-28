@@ -319,14 +319,39 @@ class PerceptionRoutes(
     * the set is not knowable from configuration alone and those still declare
     * on first ingest — inactive, through the same idempotent `declareSource`.
     */
+  /** Whether the integration that owns a mapping is enabled on this runtime.
+    *
+    * Registration is an integration declaring its sources (RealityEngine_CI
+    * SURFACE_SPEC.md). An integration that is not running has not registered,
+    * so its sources are not part of the set — declaring them anyway puts
+    * membership in the PE that no integration owns.
+    *
+    * It showed up as three `healthkit.*` sensors on a run started with no
+    * HealthKit bridge: cpp-1 and lsp-1 held 12 sources, scala-1 held 15
+    * (RealityEngine_Scala#63). They were inactive, so they contributed no
+    * values, but membership is compared and three runtimes disagreeing about
+    * it is a divergence before any stimulus.
+    *
+    * Unknown origins declare. This gates the integrations that have an
+    * enable flag; anything else keeps its existing behaviour rather than
+    * being silently suppressed by a default this function chose.
+    */
+  private def mappingIntegrationEnabled(origin: Option[String]): Boolean =
+    PerceptionRoutes.integrationEnabled(origin, hkEnabled, ckEnabled, acpEnabled)
+
   private def declareMappedSources(): Int = {
     val declared = sourceMappings.values.toVector.flatMap { m =>
       val c = m.hcursor
       val sensorId = c.get[String]("sensorId").toOption.filter(_.nonEmpty)
         .orElse(c.get[String]("sensorIdTemplate").toOption.filter(t => t.nonEmpty && !t.contains("{")))
+      // Same derivation the `origin` field below uses, so the gate and the
+      // recorded origin cannot disagree about which integration owns a mapping.
+      val owner = c.get[String]("origin").toOption
+        .orElse(c.get[String]("id").toOption.map(_.takeWhile(ch => ch != ':' && ch != '-')))
       for {
         sid    <- sensorId
         region <- c.get[Region]("region").toOption
+        if mappingIntegrationEnabled(owner)
       } yield engine.declareSource(SensorSourceConfig(
         id          = sid,
         name        = c.get[String]("name").getOrElse(sid),
@@ -1799,4 +1824,28 @@ class PerceptionRoutes(
         )
     }
   }
+}
+
+object PerceptionRoutes {
+
+  /** Whether the integration owning a source mapping is enabled here.
+    *
+    * Pure so it can be tested without an ActorSystem: the decision is the part
+    * worth pinning, and constructing routes to reach it would test Akka
+    * instead.
+    *
+    * Unknown origins return true. This gates the integrations that have an
+    * enable flag; anything else keeps its existing behaviour rather than being
+    * silently suppressed by a default chosen here.
+    */
+  def integrationEnabled(origin: Option[String],
+                         healthkit: Boolean,
+                         carekit: Boolean,
+                         acp: Boolean): Boolean =
+    origin.map(_.toLowerCase) match {
+      case Some("healthkit") => healthkit
+      case Some("carekit")   => carekit
+      case Some("acp")       => acp
+      case _                 => true
+    }
 }
