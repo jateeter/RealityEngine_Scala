@@ -74,9 +74,14 @@ class IngressActivationInvariantSpec extends AnyFlatSpec with Matchers {
       restarted.getSources.map(_.id) should contain("never-fed")
       restarted.getSource("never-fed").map(_.active) shouldBe Some(false)
 
-      // 5. And a reset in the new process still finds no ingress to point at.
+      // 5. And a reset in the new process still finds no ingress to point at —
+      //    so the source is dropped, not merely left inactive. Reset returns the
+      //    engine to the clean step 0 condition, and persisted state no
+      //    integration re-registered was never membership (#61). Absence is the
+      //    stronger form of the invariant: it cannot report active because it is
+      //    not there.
       restarted.reset()
-      restarted.getSource("never-fed").map(_.active) shouldBe Some(false)
+      restarted.getSource("never-fed") shouldBe None
 
       // Never contributed anything at any point in that sequence.
       restarted.assembleVector().forall(_ == 0.0) shouldBe true

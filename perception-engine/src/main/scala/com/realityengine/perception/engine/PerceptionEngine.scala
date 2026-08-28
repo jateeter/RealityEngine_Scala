@@ -19,6 +19,12 @@ class PerceptionEngine(initialDimension: Int = sys.env.getOrElse("VECTOR_DIMENSI
   private var sources: Map[String, SourceConfig]        = Map.empty
   private var testStep: Map[String, Int]                = Map.empty
   private var walkState: Map[String, Vector[Double]]    = Map.empty
+  // Sources the store put back at boot that no integration has registered this
+  // run. Membership comes from re-registration (RealityEngine_CI#163 point 5);
+  // until something registers one of these it is persisted state, not a member
+  // of the source set, and reset drops it. Any add, update or fed value takes a
+  // source out of this set — at that point an integration has claimed it.
+  private var storeRestored: Set[String]                = Set.empty
   // Persistent perceptual space — carries machine outputs forward.  Grows
   // dynamically as sources with higher offsets are added so machines whose
   // perceptualMapping extends beyond the initial dimension still receive
@@ -69,6 +75,7 @@ class PerceptionEngine(initialDimension: Int = sys.env.getOrElse("VECTOR_DIMENSI
     val src = applyId(config, id)
     ensureCapacity(src.region.offset + src.region.length)
     sources = sources + (id -> src)
+    storeRestored = storeRestored - id
     initRuntimeState(id, src)
     src
   }
@@ -105,6 +112,9 @@ class PerceptionEngine(initialDimension: Int = sys.env.getOrElse("VECTOR_DIMENSI
           sources.values.collectFirst { case e: SensorSourceConfig if e.sensorId == s.sensorId => e })
       case other => sources.get(other.id)
     }
+    // Re-registration is the same event as first registration, so a restored
+    // source an integration now declares is claimed and must survive reset.
+    existing.foreach(e => storeRestored = storeRestored - e.id)
     existing.getOrElse {
       val id       = if (config.id.nonEmpty) config.id else uuidGen.generate().toString
       val declared = applyId(config.withActive(false), id)
@@ -149,14 +159,24 @@ class PerceptionEngine(initialDimension: Int = sys.env.getOrElse("VECTOR_DIMENSI
     val restored = src.withActive(src.active && cachedValueSupportsActivity(src, System.currentTimeMillis()))
     ensureCapacity(restored.region.offset + restored.region.length)
     sources = sources + (restored.id -> restored)
+    storeRestored = storeRestored + restored.id
     initRuntimeState(restored.id, restored)
   }
 
+  /** Dimension the currently-registered sources actually require.
+    *
+    * Never below the configured initial dimension: that is a deployment input,
+    * not something the source set earns.
+    */
+  private def requiredDimension: Int =
+    sources.values.foldLeft(initialDimension)((acc, s) => math.max(acc, s.region.offset + s.region.length))
+
   def removeSource(id: String): Boolean = synchronized {
     if (sources.contains(id)) {
-      testStep  = testStep  - id
-      walkState = walkState - id
-      sources   = sources   - id
+      testStep      = testStep  - id
+      walkState     = walkState - id
+      sources       = sources   - id
+      storeRestored = storeRestored - id
       true
     } else false
   }
@@ -166,6 +186,7 @@ class PerceptionEngine(initialDimension: Int = sys.env.getOrElse("VECTOR_DIMENSI
     else {
       val updated = applyId(patch, id)
       sources = sources + (id -> updated)
+      storeRestored = storeRestored - id
       Some(updated)
     }
   }
@@ -267,6 +288,9 @@ class PerceptionEngine(initialDimension: Int = sys.env.getOrElse("VECTOR_DIMENSI
           lastUpdated = Some(System.currentTimeMillis()),
         )
         sources = sources + (s.id -> updated)
+        // A value arriving is an integration claiming the source: it is a
+        // member of this run's set now, not persisted state awaiting a claim.
+        storeRestored = storeRestored - s.id
         true
       case _ => false
     }
@@ -426,7 +450,49 @@ class PerceptionEngine(initialDimension: Int = sys.env.getOrElse("VECTOR_DIMENSI
     * grant it (RealityEngine_CI#175).
     */
   def reset(): Unit = synchronized {
-    globalStep       = 0L
+    globalStep = 0L
+
+    // Drop membership the store put back that nothing registered this run.
+    //
+    // Reset has to leave the engine at the clean step 0 condition, and on a
+    // 12-machine standard-deployment boot it did not: C++ and LSP held 0
+    // sources, Scala held 815 restored from perception-sources.json, carrying
+    // regions from the full 1328-machine corpus. They restore inactive, so they
+    // contribute no values — but their regions had already grown the perceptual
+    // space, and the space length is part of every ISRE and OREV entry:
+    //
+    //     cpp-1 len=14388   lsp-1 len=14388   scala-1 len=16942
+    //     FAIL isre-history diverges at step 0 (length): cpp-1+lsp-1 | scala-1
+    //
+    // Scala diverged at step 0, before any stimulus, which invalidates every
+    // downstream comparison and masks any real engine divergence
+    // (RealityEngine_Scala#61).
+    //
+    // This is not re-derivation and does not conflict with "reset is
+    // membership-neutral" (RealityEngine_CI#163 point 4). That rule stops reset
+    // *manufacturing* sources or rebuilding them from boot config. Persisted
+    // state that no integration has re-registered was never membership in the
+    // first place (point 5) — anything an integration has added, updated or fed
+    // has left storeRestored by then and is untouched here.
+    val unclaimed = storeRestored & sources.keySet
+    if (unclaimed.nonEmpty) {
+      sources       = sources   -- unclaimed
+      testStep      = testStep  -- unclaimed
+      walkState     = walkState -- unclaimed
+      storeRestored = storeRestored -- unclaimed
+      // Shrink with the set. Dropping the sources but keeping the grown
+      // dimension would leave the length divergence exactly as it was — the
+      // engine cannot recover a grown space within a run, which is why this
+      // presented as a reset defect rather than a cosmetic one.
+      val required = requiredDimension
+      if (required < _vectorDimension) {
+        System.err.println(
+          s"[PerceptionEngine] reset dropped ${unclaimed.size} unregistered restored source(s); " +
+          s"perceptionDimension ${_vectorDimension} → $required")
+        _vectorDimension = required
+      }
+    }
+
     persistentVector = new Array[Double](_vectorDimension)
     val now = System.currentTimeMillis()
     for ((id, src) <- sources) {

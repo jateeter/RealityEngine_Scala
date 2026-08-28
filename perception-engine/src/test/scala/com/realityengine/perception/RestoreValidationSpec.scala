@@ -92,10 +92,24 @@ class RestoreValidationSpec extends AnyFlatSpec with Matchers {
   }
 
   it should "leave re-arming a restored test source to whoever is entitled to" in {
+    // Nobody is entitled to re-arm a source no integration registered this run.
+    // Reset returns the engine to the clean step 0 condition, so a restored
+    // source nothing has claimed is dropped rather than armed (#61) — which is
+    // strictly stronger than the inactive this used to assert.
     val engine = new PerceptionEngine(256)
     engine.restoreSource(persistedTest("armed", active = true))
     engine.getSource("armed").map(_.active) shouldBe Some(false)
-    // Reset validates every test source holding a sequence back to active.
+    engine.reset()
+    engine.getSource("armed") shouldBe None
+  }
+
+  it should "re-arm a restored test source once an integration re-declares it" in {
+    // The other half: re-registration claims the source, and from then on it is
+    // this run's membership, so reset validates it back to active exactly as it
+    // does for any registered test source.
+    val engine = new PerceptionEngine(256)
+    engine.restoreSource(persistedTest("armed", active = true))
+    engine.declareSource(persistedTest("armed", active = false))
     engine.reset()
     engine.getSource("armed").map(_.active) shouldBe Some(true)
   }
