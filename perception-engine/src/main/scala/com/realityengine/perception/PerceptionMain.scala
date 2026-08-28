@@ -45,6 +45,18 @@ object PerceptionMain extends App {
   // all three runtimes replay their input sequences on every push and the
   // divergence went three-way (#36). Kept as a switch for experiments.
   val activateOnLoad     = sys.env.getOrElse("PE_SOURCE_ACTIVATE_ON_LOAD", "false") == "true"
+  // PE_SOURCE_BOOTSTRAP — whether the corpus test sources are interned at boot.
+  // Mirrors startUniverse.sh --pe-source-bootstrap=auto|off.
+  //
+  // On by default: interning a machine's inputSequences as a test source over
+  // its own region is part of ingesting the machine, and those sources are what
+  // compose the ISRE seed queue the engines are driven with. This runtime
+  // already behaved that way — it seeded unconditionally — but ignored the flag
+  // entirely, so `--pe-source-bootstrap=off` silently did nothing here while
+  // C++ and LSP honoured it, and the three started any comparison from
+  // different membership (#63).
+  val sourceBootstrap    = !Set("off", "OFF", "0", "false", "FALSE", "no", "NO")
+                             .contains(sys.env.getOrElse("PE_SOURCE_BOOTSTRAP", "auto"))
 
   val auditCfg = AuditConfig.fromEnv("perception-engine")
 
@@ -118,8 +130,12 @@ object PerceptionMain extends App {
       println(s"   Reality Engine : $realityEngineUrl")
       // Reload every corpus machine, whether or not a persisted source claims
       // to describe it. PE_SOURCE_MERGE=true opts back into skipping.
-      seedSources(realityEngineUrl, engine, store, routes, mergeOnly = sourceMerge,
-                  pruneCorpus = pruneCorpus, activateOnLoad = activateOnLoad)
+      if (sourceBootstrap)
+        seedSources(realityEngineUrl, engine, store, routes, mergeOnly = sourceMerge,
+                    pruneCorpus = pruneCorpus, activateOnLoad = activateOnLoad)
+      else
+        println("[SourceStore] PE_SOURCE_BOOTSTRAP=off — not interning corpus test sources at boot; " +
+                "POST /api/sources/bootstrap-from-machines still available")
 
       sys.addShutdownHook {
         println("\nShutting down gracefully...")
