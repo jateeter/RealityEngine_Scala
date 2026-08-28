@@ -71,17 +71,17 @@ class IngressActivationInvariantSpec extends AnyFlatSpec with Matchers {
       // 4. A new process restores what the store kept.
       val restarted = new PerceptionEngine(256)
       store.load().foreach(restarted.restoreSource)
+      // Membership comes from re-registration, not from the store (#58).
+      restarted.declareSource(declared("never-fed"))
       restarted.getSources.map(_.id) should contain("never-fed")
       restarted.getSource("never-fed").map(_.active) shouldBe Some(false)
 
       // 5. And a reset in the new process still finds no ingress to point at —
-      //    so the source is dropped, not merely left inactive. Reset returns the
-      //    engine to the clean step 0 condition, and persisted state no
-      //    integration re-registered was never membership (#61). Absence is the
-      //    stronger form of the invariant: it cannot report active because it is
-      //    not there.
+      //    and a reset does not change that. The source is a member — an
+      //    integration re-registered it above — but nothing has ever fed it, so
+      //    it reports inactive at this observation point as at every other.
       restarted.reset()
-      restarted.getSource("never-fed") shouldBe None
+      restarted.getSource("never-fed").map(_.active) shouldBe Some(false)
 
       // Never contributed anything at any point in that sequence.
       restarted.assembleVector().forall(_ == 0.0) shouldBe true
@@ -100,6 +100,7 @@ class IngressActivationInvariantSpec extends AnyFlatSpec with Matchers {
     val engine = new PerceptionEngine(256)
     // The store recorded it active, but kept no value to support the claim.
     engine.restoreSource(declared("claims-live").copy(active = true))
+    engine.declareSource(declared("claims-live"))
     engine.getSource("claims-live").map(_.active) shouldBe Some(false)
   }
 
@@ -111,6 +112,9 @@ class IngressActivationInvariantSpec extends AnyFlatSpec with Matchers {
       lastUpdated = Some(System.currentTimeMillis() - 60000L),
       ttlMs       = 1000L,
     ))
+    // Registration claims the cached record; the cached value is outside its
+    // TTL, so the activity it recorded is not restored with it.
+    engine.declareSource(declared("stale").copy(ttlMs = 1000L))
     engine.getSource("stale").map(_.active) shouldBe Some(false)
   }
 }

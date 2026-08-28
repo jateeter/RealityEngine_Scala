@@ -19,12 +19,18 @@ class PerceptionEngine(initialDimension: Int = sys.env.getOrElse("VECTOR_DIMENSI
   private var sources: Map[String, SourceConfig]        = Map.empty
   private var testStep: Map[String, Int]                = Map.empty
   private var walkState: Map[String, Vector[Double]]    = Map.empty
-  // Sources the store put back at boot that no integration has registered this
-  // run. Membership comes from re-registration (RealityEngine_CI#163 point 5);
-  // until something registers one of these it is persisted state, not a member
-  // of the source set, and reset drops it. Any add, update or fed value takes a
-  // source out of this set — at that point an integration has claimed it.
-  private var storeRestored: Set[String]                = Set.empty
+  // Run state the store cached, held aside until an integration registers the
+  // source it belongs to. Membership comes from re-registration
+  // (RealityEngine_CI SURFACE_SPEC.md point 5), so nothing here is a member of
+  // the source set: it contributes no values, grows no space, and is invisible
+  // to /api/sources until claimed.
+  //
+  // Boot used to restore these straight into `sources`. On a 12-machine corpus
+  // that left scala-1 holding 815 sources against cpp-1 and lsp-1's 0, growing
+  // the perceptual space to 16942 against their 14388 — and space length is
+  // part of every ISRE and OREV entry, so the runtimes diverged at step 0
+  // before any stimulus (#58).
+  private var cachedFromStore: Map[String, SourceConfig] = Map.empty
   // Persistent perceptual space — carries machine outputs forward.  Grows
   // dynamically as sources with higher offsets are added so machines whose
   // perceptualMapping extends beyond the initial dimension still receive
@@ -74,10 +80,10 @@ class PerceptionEngine(initialDimension: Int = sys.env.getOrElse("VECTOR_DIMENSI
     val id  = if (config.id.nonEmpty) config.id else uuidGen.generate().toString
     val src = applyId(config, id)
     ensureCapacity(src.region.offset + src.region.length)
-    sources = sources + (id -> src)
-    storeRestored = storeRestored - id
-    initRuntimeState(id, src)
-    src
+    val withCached = inheritCached(src)
+    sources = sources + (id -> withCached)
+    initRuntimeState(id, withCached)
+    withCached
   }
 
   /** Declare a source as part of an integration registering — the membership
@@ -112,12 +118,11 @@ class PerceptionEngine(initialDimension: Int = sys.env.getOrElse("VECTOR_DIMENSI
           sources.values.collectFirst { case e: SensorSourceConfig if e.sensorId == s.sensorId => e })
       case other => sources.get(other.id)
     }
-    // Re-registration is the same event as first registration, so a restored
-    // source an integration now declares is claimed and must survive reset.
-    existing.foreach(e => storeRestored = storeRestored - e.id)
     existing.getOrElse {
       val id       = if (config.id.nonEmpty) config.id else uuidGen.generate().toString
-      val declared = applyId(config.withActive(false), id)
+      // Declared inactive (point 2a); inheritCached may then restore a cached
+      // value and, if that value still supports it, the cached activity.
+      val declared = inheritCached(applyId(config.withActive(false), id))
       ensureCapacity(declared.region.offset + declared.region.length)
       sources = sources + (id -> declared)
       initRuntimeState(id, declared)
@@ -156,12 +161,41 @@ class PerceptionEngine(initialDimension: Int = sys.env.getOrElse("VECTOR_DIMENSI
     * against a source the engine believes never carried data.
     */
   def restoreSource(src: SourceConfig): Unit = synchronized {
-    val restored = src.withActive(src.active && cachedValueSupportsActivity(src, System.currentTimeMillis()))
-    ensureCapacity(restored.region.offset + restored.region.length)
-    sources = sources + (restored.id -> restored)
-    storeRestored = storeRestored + restored.id
-    initRuntimeState(restored.id, restored)
+    cachedFromStore = cachedFromStore + (src.id -> src)
   }
+
+  /** Cached run state an integration inherits when it registers a source.
+    *
+    * Membership is not restored — that is the whole point (#58). A persisted
+    * record no integration has re-registered this run is not a member of the
+    * set, so it stays here, contributes nothing to `assembleVector`, and does
+    * not grow the perceptual space.
+    *
+    * When registration does arrive for that id, the cached value and cached
+    * activity come with it — validated, so a value outside its TTL restores as
+    * inactive. That is what lets an interrupted dispatch resume against a
+    * source known to have been live, without letting a stale one claim it.
+    */
+  private def inheritCached(declared: SourceConfig): SourceConfig =
+    cachedFromStore.get(declared.id) match {
+      case None => declared
+      case Some(cached) =>
+        cachedFromStore = cachedFromStore - declared.id
+        val withValue = (declared, cached) match {
+          case (d: SensorSourceConfig, c: SensorSourceConfig) =>
+            d.copy(lastValue = c.lastValue, lastUpdated = c.lastUpdated)
+          case _ => declared
+        }
+        withValue.withActive(
+          cached.active && cachedValueSupportsActivity(withValue, System.currentTimeMillis()))
+    }
+
+  /** Sources the store cached that nothing has registered this run.
+    *
+    * Reported for diagnosis — a growing count means integrations are not
+    * re-registering what the store remembers.
+    */
+  def unclaimedCachedCount: Int = synchronized { cachedFromStore.size }
 
   /** Dimension the currently-registered sources actually require.
     *
@@ -176,7 +210,6 @@ class PerceptionEngine(initialDimension: Int = sys.env.getOrElse("VECTOR_DIMENSI
       testStep      = testStep  - id
       walkState     = walkState - id
       sources       = sources   - id
-      storeRestored = storeRestored - id
       true
     } else false
   }
@@ -186,7 +219,6 @@ class PerceptionEngine(initialDimension: Int = sys.env.getOrElse("VECTOR_DIMENSI
     else {
       val updated = applyId(patch, id)
       sources = sources + (id -> updated)
-      storeRestored = storeRestored - id
       Some(updated)
     }
   }
@@ -288,9 +320,6 @@ class PerceptionEngine(initialDimension: Int = sys.env.getOrElse("VECTOR_DIMENSI
           lastUpdated = Some(System.currentTimeMillis()),
         )
         sources = sources + (s.id -> updated)
-        // A value arriving is an integration claiming the source: it is a
-        // member of this run's set now, not persisted state awaiting a claim.
-        storeRestored = storeRestored - s.id
         true
       case _ => false
     }
@@ -452,46 +481,10 @@ class PerceptionEngine(initialDimension: Int = sys.env.getOrElse("VECTOR_DIMENSI
   def reset(): Unit = synchronized {
     globalStep = 0L
 
-    // Drop membership the store put back that nothing registered this run.
-    //
-    // Reset has to leave the engine at the clean step 0 condition, and on a
-    // 12-machine standard-deployment boot it did not: C++ and LSP held 0
-    // sources, Scala held 815 restored from perception-sources.json, carrying
-    // regions from the full 1328-machine corpus. They restore inactive, so they
-    // contribute no values — but their regions had already grown the perceptual
-    // space, and the space length is part of every ISRE and OREV entry:
-    //
-    //     cpp-1 len=14388   lsp-1 len=14388   scala-1 len=16942
-    //     FAIL isre-history diverges at step 0 (length): cpp-1+lsp-1 | scala-1
-    //
-    // Scala diverged at step 0, before any stimulus, which invalidates every
-    // downstream comparison and masks any real engine divergence
-    // (RealityEngine_Scala#61).
-    //
-    // This is not re-derivation and does not conflict with "reset is
-    // membership-neutral" (RealityEngine_CI#163 point 4). That rule stops reset
-    // *manufacturing* sources or rebuilding them from boot config. Persisted
-    // state that no integration has re-registered was never membership in the
-    // first place (point 5) — anything an integration has added, updated or fed
-    // has left storeRestored by then and is untouched here.
-    val unclaimed = storeRestored & sources.keySet
-    if (unclaimed.nonEmpty) {
-      sources       = sources   -- unclaimed
-      testStep      = testStep  -- unclaimed
-      walkState     = walkState -- unclaimed
-      storeRestored = storeRestored -- unclaimed
-      // Shrink with the set. Dropping the sources but keeping the grown
-      // dimension would leave the length divergence exactly as it was — the
-      // engine cannot recover a grown space within a run, which is why this
-      // presented as a reset defect rather than a cosmetic one.
-      val required = requiredDimension
-      if (required < _vectorDimension) {
-        System.err.println(
-          s"[PerceptionEngine] reset dropped ${unclaimed.size} unregistered restored source(s); " +
-          s"perceptionDimension ${_vectorDimension} → $required")
-        _vectorDimension = required
-      }
-    }
+    // No membership to drop. The store no longer restores sources at boot — it
+    // caches their run state until an integration registers them (#58) — so a
+    // persisted record nothing claimed was never a member and there is nothing
+    // here to remove. Reset stays membership-neutral in the strict sense.
 
     persistentVector = new Array[Double](_vectorDimension)
     val now = System.currentTimeMillis()
