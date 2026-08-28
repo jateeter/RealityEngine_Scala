@@ -49,10 +49,22 @@ class RestoreValidationSpec extends AnyFlatSpec with Matchers {
 
   // ── Membership ────────────────────────────────────────────────────────────
 
-  "restoreSource" should "register the source, so the restart does not forget it" in {
+  "restoreSource" should "cache the source without making it a member" in {
+    // The store caches run state, never membership (#58). A persisted record
+    // no integration has re-registered this run is not in the set: it is
+    // invisible to /api/sources, contributes nothing, and grows no space.
     val engine = new PerceptionEngine(256)
     engine.restoreSource(persistedTest("persisted"))
+    engine.getSources shouldBe empty
+    engine.unclaimedCachedCount shouldBe 1
+  }
+
+  it should "hand the cached state over when an integration registers the source" in {
+    val engine = new PerceptionEngine(256)
+    engine.restoreSource(persistedTest("persisted"))
+    engine.declareSource(persistedTest("persisted"))
     engine.getSources.map(_.id) should contain("persisted")
+    engine.unclaimedCachedCount shouldBe 0
   }
 
   // ── Validation of the restored activity claim ─────────────────────────────
@@ -60,18 +72,21 @@ class RestoreValidationSpec extends AnyFlatSpec with Matchers {
   it should "deactivate a restored sensor whose cached value is outside its TTL" in {
     val engine = new PerceptionEngine(256)
     engine.restoreSource(persistedSensor("stale", active = true, ageMs = 60000L, ttlMs = 1000L))
+    engine.declareSource(persistedSensor("stale", active = false, ageMs = 0L, ttlMs = 1000L))
     engine.getSource("stale").map(_.active) shouldBe Some(false)
   }
 
   it should "contribute nothing for a restored sensor that failed validation" in {
     val engine = new PerceptionEngine(256)
     engine.restoreSource(persistedSensor("stale", active = true, ageMs = 60000L, ttlMs = 1000L))
+    engine.declareSource(persistedSensor("stale", active = false, ageMs = 0L, ttlMs = 1000L))
     engine.assembleVector().forall(_ == 0.0) shouldBe true
   }
 
   it should "keep a restored sensor active when its cached value is still live" in {
     val engine = new PerceptionEngine(256)
     engine.restoreSource(persistedSensor("live", active = true, ageMs = 0L, ttlMs = 600000L))
+    engine.declareSource(persistedSensor("live", active = false, ageMs = 0L, ttlMs = 600000L))
     engine.getSource("live").map(_.active) shouldBe Some(true)
     engine.assembleVector().slice(60, 64) shouldBe Vector(1.0, 1.0, 1.0, 1.0)
   }
@@ -79,6 +94,7 @@ class RestoreValidationSpec extends AnyFlatSpec with Matchers {
   it should "not activate a source the store recorded inactive" in {
     val engine = new PerceptionEngine(256)
     engine.restoreSource(persistedSensor("declared", active = false, ageMs = 0L, ttlMs = 600000L))
+    engine.declareSource(persistedSensor("declared", active = false, ageMs = 0L, ttlMs = 600000L))
     engine.getSource("declared").map(_.active) shouldBe Some(false)
   }
 
@@ -86,6 +102,8 @@ class RestoreValidationSpec extends AnyFlatSpec with Matchers {
     val engine = new PerceptionEngine(256)
     engine.restoreSource(persistedTest("armed", active = true))
     engine.restoreSource(persistedTest("idle",  active = false))
+    engine.declareSource(persistedTest("armed", active = false))
+    engine.declareSource(persistedTest("idle",  active = false))
     engine.getSource("armed").map(_.active) shouldBe Some(false)
     engine.getSource("idle").map(_.active)  shouldBe Some(false)
     engine.assembleVector().forall(_ == 0.0) shouldBe true
@@ -98,7 +116,7 @@ class RestoreValidationSpec extends AnyFlatSpec with Matchers {
     // strictly stronger than the inactive this used to assert.
     val engine = new PerceptionEngine(256)
     engine.restoreSource(persistedTest("armed", active = true))
-    engine.getSource("armed").map(_.active) shouldBe Some(false)
+    engine.getSource("armed") shouldBe None
     engine.reset()
     engine.getSource("armed") shouldBe None
   }
@@ -119,6 +137,9 @@ class RestoreValidationSpec extends AnyFlatSpec with Matchers {
   it should "let an interrupted dispatch resume against a source known to have been live" in {
     val engine = new PerceptionEngine(256)
     engine.restoreSource(persistedSensor("in-flight", active = true, ageMs = 0L, ttlMs = 600000L))
+    // The integration re-registers on start, inheriting the cached value and
+    // the activity that value still supports.
+    engine.declareSource(persistedSensor("in-flight", active = false, ageMs = 0L, ttlMs = 600000L))
     // The retry lands after the restart.
     engine.updateSensorValue("in-flight", Vector(0.5, 0.5, 0.5, 0.5)) shouldBe true
     engine.getSource("in-flight").map(_.active) shouldBe Some(true)

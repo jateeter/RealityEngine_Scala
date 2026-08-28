@@ -14,8 +14,20 @@ import scala.util.{Failure, Success, Try}
  * Persists perception engine sources to a JSON file using atomic writes
  * (write to .tmp then rename) to prevent corruption on crash.
  *
- * Sensor sources are stripped of their live data fields (lastValue,
- * lastUpdated) before saving — those are runtime state.
+ * The store caches run state — cached value and cached activity — and never
+ * membership (RealityEngine_CI SURFACE_SPEC.md, source contract point 5).
+ * Membership comes from re-registration: an integration that has not registered
+ * this run owns no sources, whatever this file records.
+ *
+ * Sensor `lastValue` and `lastUpdated` are persisted rather than stripped.
+ * Stripping them made the file record that a source *was* active while
+ * discarding the only evidence that could justify the claim, so a restored
+ * source could not be validated — the combination
+ * `PerceptionEngine.cachedValueSupportsActivity` needs (#58).
+ *
+ * Staleness is handled by validation on restore, not by erasure here: a cached
+ * value outside its TTL deactivates the source on the evidence. That is what
+ * the blanket strip was approximating.
  *
  * save() is called from a blocking-io-dispatcher Future in PerceptionRoutes
  * so the file I/O never blocks Akka's default dispatcher.
@@ -34,12 +46,7 @@ class SourceStore(dataDir: String) {
       val json = io.circe.parser.parse(raw).getOrElse(io.circe.Json.Null)
       json.hcursor.get[Vector[SourceConfig]]("sources").getOrElse(Vector.empty)
     } match {
-      case Success(sources) =>
-        // Reset live sensor fields so stale data doesn't appear on restart
-        sources.map {
-          case s: SensorSourceConfig => s.copy(lastValue = Vector.empty, lastUpdated = None)
-          case other                 => other
-        }
+      case Success(sources) => sources
       case Failure(e) =>
         System.err.println(s"[SourceStore] Failed to load sources file, starting fresh: ${e.getMessage}")
         Vector.empty
@@ -47,14 +54,9 @@ class SourceStore(dataDir: String) {
   }
 
   def save(sources: Vector[SourceConfig]): Unit = {
-    val sanitized = sources.map {
-      case s: SensorSourceConfig => s.copy(lastValue = Vector.empty, lastUpdated = None)
-      case other                 => other
-    }
-
     val payload = io.circe.Json.obj(
       "version" -> 1.asJson,
-      "sources" -> sanitized.asJson,
+      "sources" -> sources.asJson,
     )
 
     val tmp = filePath.resolveSibling(filePath.getFileName.toString + ".tmp")
