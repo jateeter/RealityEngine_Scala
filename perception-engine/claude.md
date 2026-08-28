@@ -12,29 +12,16 @@ This directory contains the standalone Scala Perception Engine.
 
 ## Machine ingestion
 
-**Interning a machine's test source is part of ingesting the machine**, and it
-happens by default. `PerceptionMain` calls `seedSources` at boot — a machine's
-`inputSequences` become a test source over that machine's own input region —
-unless `PE_SOURCE_BOOTSTRAP` is `off`/`0`/`false`/`no`.
+Governed by the canonical contract, which lives in `RealityEngine_CI` and
+nowhere else:
 
-Those sources are the material the **ISRE seed queue** is composed from: the
-seed at step n is the merge of every active test source's n-th vector, each
-written into its own machine's region. A runtime holding a corpus but no test
-sources has nothing to be presented with.
+    RealityEngine_CI/SURFACE_SPEC.md  §  Machine ingestion
 
-This runtime seeded unconditionally and read no flag at all, so
-`--pe-source-bootstrap=off` silently did nothing here while C++ and LSP honoured
-it — three runtimes, three post-boot source sets, before any comparison began
-(#63, fixed in #64). Seeding by default was already right; the opt-out is what
-was missing. `off` is what a harness driving its own per-iteration bootstrap
-wants (`test-corpus-parity-loop.sh`).
-`POST /api/sources/bootstrap-from-machines` is unaffected either way.
+Do not restate it here. It defines what ingesting a machine interns, how
+`PE_SOURCE_BOOTSTRAP` gates it, and how those sources compose `ISRESeed(n)` —
+and it governs this repository's implementation of all three.
 
-Machine-derived test sources are the one source kind that does not wait for an
-external integration to register — they arrive with the machines. MQTT, ACP,
-MCP, HealthKit and localAI are external and register on their own terms. Note
-this runtime still declares HealthKit sensor sources from `INTEGRATIONS_CONFIG`
-whether or not the bridge is enabled, which is the open half of #63.
-
-Master contract: `RealityEngine_CI/SURFACE_SPEC.md`, "Machine ingestion".
-
+Implemented in `PerceptionMain.seedSources`. This runtime read no flag at all
+until #64, so `--pe-source-bootstrap=off` silently did nothing here (#63). It
+still declares HealthKit sensors from `INTEGRATIONS_CONFIG` whether or not the
+bridge is enabled — the open half of #63.
