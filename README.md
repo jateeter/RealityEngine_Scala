@@ -5,7 +5,7 @@ active reference implementation for the suite. Black-box equivalent to
 [`RealityEngine_CPP`](../RealityEngine_CPP) (native C++) and
 [`RealityEngine_LSP`](../RealityEngine_LSP) (Common Lisp) on the same machine JSON
 corpus, governance contracts, and Prometheus metrics shape.
-[`RealityEngine_AI`](../RealityEngine_AI) is the deprecated TypeScript prototype —
+The TypeScript prototype it replaced is deprecated and frozen —
 retained as the behavioral reference for core RE/PE semantics, not an active runtime
 target.
 
