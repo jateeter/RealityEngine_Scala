@@ -55,3 +55,17 @@ scalacOptions ++= Seq(
   "-unchecked",
   "-Xlint:unused"
 )
+
+// Suites share process-global singletons — SemanticAuditLog, ArbitrationRegistry
+// — so running them in parallel is not safe, and the failure mode is silent.
+// SemanticAuditLog is a 1000-entry ring buffer: CesgenOraclesParitySpec pushes
+// 4966 machines through processInput, which evicts whatever SemanticAuditSpec
+// had just recorded before it can read it back. That surfaced as "58 was not
+// equal to 2" and then "0 was not equal to 2" from a spec that passes in
+// isolation on any branch.
+//
+// Scoping the assertions to their own machine (which those specs now also do)
+// is not sufficient on its own: eviction removes the records entirely, so
+// there is nothing left to filter. Serialising is the fix that matches the
+// cause.
+Test / parallelExecution := false

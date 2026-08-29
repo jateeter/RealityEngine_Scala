@@ -101,7 +101,18 @@ class SemanticAuditSpec extends AnyFlatSpec with Matchers with ScalatestRouteTes
     val machine = buildMachine()
     engine.addMachine(machine)
     engine.processWhatIf(machine.id, Vector(1.0))
-    SemanticAuditLog.size shouldBe 0
+    // Scoped to this spec's own machine, for the same reason as the assertion
+    // above: SemanticAuditLog is a process-global ring buffer written by any
+    // machine processing anywhere, and sbt runs suites in parallel, so
+    // `beforeEach` clearing it does not stop a concurrent suite writing between
+    // the clear and this read. `SemanticAuditLog.size shouldBe 0` was a global
+    // count and began failing with "1 was not equal to 0" once
+    // CesgenOraclesParitySpec started processing 4966 machines.
+    //
+    // The property under test is that a what-if records nothing *for this
+    // machine*, which is what it now says.
+    SemanticAuditLog.recent(SemanticAuditLog.Capacity)
+      .count(_.machineId == machine.id) shouldBe 0
     engine.removeMachine(machine.id)
   }
 }
