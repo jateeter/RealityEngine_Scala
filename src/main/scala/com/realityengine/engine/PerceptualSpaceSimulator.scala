@@ -458,13 +458,25 @@ class PerceptualSpaceSimulator(dimension: Int = sys.env.getOrElse("VECTOR_DIMENS
     lastArbitration = records.toList
     val eventBusWrites = applyEventBus(firedSequences.toSeq)
 
+    // Canonical ordering — offset, length, machineId, type (SURFACE_SPEC.md,
+    // "Active regions"). The regions are built by walking machineResults, and
+    // each runtime walks its own collection in its own order: all three
+    // reported the same fifteen regions in three different orders (#197).
+    // Because no two agreed byte-for-byte, the clustering in the
+    // universal-vectors stage never found a majority and every divergence
+    // there reported as "runtimes split evenly" whatever the engines had
+    // actually done.
+    //
+    // machineId is in the key so the order is total. offset+length+type alone
+    // is not: two machines may share a region, which is precisely the
+    // contended case the arbiter exists for.
     val activeRegions = machineResults.values.flatMap { mr =>
       val inp = ActiveRegion(mr.inputRegion.offset, mr.inputRegion.length, mr.machineId, "input")
       mr.outputRegion match {
         case Some(out) => List(inp, ActiveRegion(out.offset, out.length, mr.machineId, "output"))
         case None      => List(inp)
       }
-    }.toList
+    }.toList.sortBy(r => (r.offset, r.length, r.machineId, r.`type`))
 
     recordTrajectory(isre, orev)
 
