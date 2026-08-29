@@ -69,7 +69,16 @@ class SemanticAuditSpec extends AnyFlatSpec with Matchers with ScalatestRouteTes
     Get("/api/audit/semantics") ~> testRoutes ~> check {
       status shouldBe StatusCodes.OK
       val doc = io.circe.parser.parse(responseAs[String]).getOrElse(Json.Null).hcursor
+      // Scoped to this spec's own machine. SemanticAuditLog is a process-global
+      // ring buffer written by any machine processing anywhere, and sbt runs
+      // suites in parallel — `beforeEach` clearing it is not enough, because a
+      // concurrent suite can write between the clear and this read. Asserting a
+      // global count made that a race: this began reporting "58 was not equal
+      // to 2" once CesgenOraclesParitySpec started processing 4966 machines,
+      // while still passing in isolation. The property under test was always
+      // "this machine emitted two observations", so that is what it now says.
       val records = doc.downField("records").as[Vector[Json]].getOrElse(Vector.empty)
+        .filter(_.hcursor.get[String]("machineId").toOption.contains("machine-audit"))
       records.length shouldBe 2
 
       val first = records.head.hcursor
