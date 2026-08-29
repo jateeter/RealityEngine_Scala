@@ -40,7 +40,7 @@ lifecycle fields, and the cross-runtime field support matrix.
 |---|---|---|
 | `RealityVector` | `com.realityengine.models.RealityVector` | Comparator matching and output assertions |
 | `CriticalEventSequence` | `com.realityengine.models.CriticalEventSequence` | Deferred activation over active vector graph |
-| `OutputArbiter` | `com.realityengine.models.OutputArbiter` | AND / OR / PASSTHROUGH output decisions |
+| `OutputArbiter` | `com.realityengine.models.OutputArbiter` | Machine output arbiter — rules and default in `RealityEngine_CI/ARBITER_ARCHITECTURE.md` |
 | `Machine` | `com.realityengine.models.Machine` | Runs CES graphs, emits machine transition results |
 | `PerceptualSpaceSimulator` | `com.realityengine.engine.PerceptualSpaceSimulator` | Snapshot → process → deterministic merge loop, compose event bus |
 | `MachineLoader` | `com.realityengine.services.MachineLoader` | JSON ↔ domain model, version validation |
