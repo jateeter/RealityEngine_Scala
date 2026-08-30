@@ -107,7 +107,28 @@ class PerceptionEngine(initialDimension: Int = sys.env.getOrElse("VECTOR_DIMENSI
     * integration could not. The invariant belongs where that caller arrives.
     */
   def deriveSensorActivity(src: SourceConfig, now: Long): SourceConfig = src match {
-    case s: SensorSourceConfig => s.withActive(holdsLiveValue(s, now))
+    // A conjunction, and the second term is "has a value ever arrived", not "is
+    // that value still fresh":
+    //
+    //     stored_active = requested_active AND (lastUpdated is set)
+    //
+    // Asking for `true` on a sensor that has never reported yields `false` —
+    // the whole of #199. Asking for `false` yields `false` whatever the value
+    // says, so a pause is honoured.
+    //
+    // Freshness is deliberately not part of it. Expiry is a read-time question:
+    // `reported` is `stored AND validated` (#175), and that separation is
+    // load-bearing — a sensor fed and then lapsed keeps its stored flag and is
+    // demoted on the way out, so a later value revives it without anything
+    // having to re-establish the flag. Validating at storage time writes the
+    // demotion back, which ReportedActivitySpec asserts against directly.
+    //
+    // Narrower than C++'s add_source, which derives from liveness and does
+    // write the demotion back. Both refuse to originate activity — the
+    // invariant #163 point 2b states and the one #199 is about; they differ on
+    // whether storage or serialization owns expiry, and here that is settled.
+    // The TypeScript PE uses this same rule.
+    case s: SensorSourceConfig => s.withActive(s.active && s.lastUpdated.isDefined)
     case other                 => other
   }
 

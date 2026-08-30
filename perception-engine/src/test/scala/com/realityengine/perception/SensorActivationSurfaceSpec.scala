@@ -38,16 +38,30 @@ class SensorActivationSurfaceSpec extends AnyFlatSpec with Matchers {
     derived(sensor(active = true)) shouldBe false
   }
 
-  it should "not be granted it by a stale value either" in {
-    // Fed, but outside its TTL. Activity expires with the value that earned it.
-    derived(sensor(active = true, lastUpdated = Some(Now - 5000L), ttlMs = 10L)) shouldBe false
+  it should "keep the stored flag for a sensor that was fed and then lapsed" in {
+    // Fed once, now outside its TTL. The stored flag stays — expiry is a
+    // read-time question, and `reported` is `stored AND validated` (#175). That
+    // separation is load-bearing: a later value revives the source without
+    // anything having to re-establish the flag. Writing the demotion back here
+    // would break it, which ReportedActivitySpec asserts against directly.
+    derived(sensor(active = true, lastUpdated = Some(Now - 5000L), ttlMs = 10L)) shouldBe true
   }
 
   "a sensor constructed while delivering a value" should "come out active" in {
     // The MQTT auto-provision and signal-ingest shape: the value is in hand
-    // before the source is stored, so the predicate is already satisfied. This
-    // is why the rule derives rather than forcing false.
-    derived(sensor(active = false, lastUpdated = Some(Now))) shouldBe true
+    // before the source is stored, so the flag is earned at construction. The
+    // rule is a conjunction, so the path must still ask for it — what it cannot
+    // do is ask without having delivered anything.
+    derived(sensor(active = true, lastUpdated = Some(Now))) shouldBe true
+  }
+
+  it should "still refuse when the path asks but delivers nothing" in {
+    derived(sensor(active = true, lastUpdated = None)) shouldBe false
+  }
+
+  "a caller clearing the flag" should "be honoured whatever the value says" in {
+    // Deactivation is free: the conjunction makes a requested false final.
+    derived(sensor(active = false, lastUpdated = Some(Now))) shouldBe false
   }
 
   "a non-sensor source" should "be left alone" in {
