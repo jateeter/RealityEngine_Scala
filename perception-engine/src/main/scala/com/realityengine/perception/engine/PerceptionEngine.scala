@@ -76,6 +76,41 @@ class PerceptionEngine(initialDimension: Int = sys.env.getOrElse("VECTOR_DIMENSI
     * The decoders default an absent `id` to "", so sources created through
     * POST /api/sources are unaffected unless the caller supplies one.
     */
+  /** A sensor's stored activity, derived rather than accepted.
+    *
+    * An integration source's activity is always traceable to an ingress event:
+    * registration declares the source — completely, and inactive
+    * (RealityEngine_CI#163 point 2a) — and activity is earned by the first
+    * value (point 2b). So no registration path may originate activity for a
+    * sensor, and the flag a caller asks for is not consulted: it is derived
+    * from whether a value is in hand and inside its TTL.
+    *
+    * Enforced here because every construction path funnels through addSource
+    * and updateSource — the MQTT bridge's auto-provision, the
+    * signal/HealthKit/CareKit ingest paths, POST /api/sources and PATCH
+    * /api/sources/:id. Several of those hand in `active = true` inline, which
+    * advertised a sensor that had never reported (RealityEngine_CI#199). A path
+    * that constructs the source while delivering a value still comes out
+    * active, because it sets lastValue/lastUpdated first and so satisfies the
+    * predicate.
+    *
+    * Activation is earned; deactivation is not. Callers that mean to pause a
+    * source clear the flag through the route, which honours it explicitly —
+    * see PerceptionRoutes. This function only refuses to *originate* activity.
+    *
+    * Applied at the HTTP surface rather than inside addSource. addSource is a
+    * constructor and is documented as honouring the activity it is given —
+    * "it is not a registration" (SourceDeclarationSpec) — and the integration
+    * paths that ARE registrations already use declareSource, which declares
+    * inactive. What was missing is that POST /api/sources reaches addSource
+    * directly, so an external caller could assert a sensor active where an
+    * integration could not. The invariant belongs where that caller arrives.
+    */
+  def deriveSensorActivity(src: SourceConfig, now: Long): SourceConfig = src match {
+    case s: SensorSourceConfig => s.withActive(holdsLiveValue(s, now))
+    case other                 => other
+  }
+
   def addSource(config: SourceConfig): SourceConfig = synchronized {
     val id  = if (config.id.nonEmpty) config.id else uuidGen.generate().toString
     val src = applyId(config, id)
@@ -220,6 +255,24 @@ class PerceptionEngine(initialDimension: Int = sys.env.getOrElse("VECTOR_DIMENSI
       val updated = applyId(patch, id)
       sources = sources + (id -> updated)
       Some(updated)
+    }
+  }
+
+  /** Clear a source's stored active flag.
+    *
+    * Activation is earned; deactivation is not, and the two directions do not
+    * need the same rule. Clearing the flag asserts nothing about ingress: the
+    * source keeps its value, keeps its TTL, and the next value re-earns
+    * activity through the ordinary path. It says only "do not use this right
+    * now" — the one lever an operator has, and derivation applied to both
+    * directions would disconnect it (RealityEngine_CPP#43).
+    */
+  def deactivateSource(id: String): Boolean = synchronized {
+    sources.get(id) match {
+      case None => false
+      case Some(src) =>
+        sources = sources + (id -> src.withActive(false))
+        true
     }
   }
 
