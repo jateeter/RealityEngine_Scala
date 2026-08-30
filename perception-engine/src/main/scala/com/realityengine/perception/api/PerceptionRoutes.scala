@@ -912,7 +912,20 @@ class PerceptionRoutes(
             case Some(src) =>
               complete(StatusCodes.OK -> Json.obj("source" -> engine.reported(src).asJson))
             case None =>
-              val src = engine.addSource(config)
+              // A caller may not assert a sensor into activity it has not
+              // earned. Registration declares a source completely and inactive
+              // (RealityEngine_CI#163 point 2a); activity is earned by the
+              // first value (point 2b). The integration paths already honour
+              // this — they go through declareSource — but POST /api/sources
+              // reaches addSource directly, which is a constructor and takes
+              // the flag it is given. So an external caller could do what no
+              // integration could (RealityEngine_CI#199).
+              //
+              // Derived, not forced to false: a create that carries a live
+              // lastValue/lastUpdated still comes out active, which is the
+              // MQTT auto-provision and signal-ingest shape and is what C++
+              // does in add_source.
+              val src = engine.addSource(engine.deriveSensorActivity(config, System.currentTimeMillis()))
               onComplete(saveAndBroadcast()) { _ =>
                 complete(StatusCodes.OK -> Json.obj("source" -> engine.reported(src).asJson))
               }
@@ -937,7 +950,24 @@ class PerceptionRoutes(
               engine.updateSource(id, merged) match {
                 case None =>
                   complete(StatusCodes.NotFound -> Json.obj("error" -> "Source not found".asJson))
-                case Some(updated) =>
+                case Some(updated0) =>
+                  // Activation is earned; deactivation is not. updateSource
+                  // derives a sensor's flag from value liveness and ignores what
+                  // the caller asked for, which is right for activation — no
+                  // caller may assert a sensor into activity it has not earned
+                  // (RealityEngine_CI#199). Applied to deactivation too it would
+                  // silently drop an explicit `"active": false` and leave a live
+                  // sensor with no way to be paused (RealityEngine_CPP#43).
+                  //
+                  // Honour the clear, and only the clear. Telling "asked for
+                  // false" from "field absent" needs the request body, not the
+                  // merged SourceConfig, which is why this reads the JSON.
+                  val asksForDeactivation =
+                    body.hcursor.get[Boolean]("active").toOption.contains(false)
+                  val updated =
+                    if (asksForDeactivation && engine.deactivateSource(id))
+                      engine.getSource(id).getOrElse(updated0)
+                    else updated0
                   onComplete(saveAndBroadcast()) { _ =>
                     complete(Json.obj("source" -> engine.reported(updated).asJson))
                   }
