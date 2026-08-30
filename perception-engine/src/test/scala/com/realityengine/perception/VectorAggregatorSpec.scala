@@ -38,7 +38,7 @@ class VectorAggregatorSpec extends AnyWordSpec with Matchers {
         "transitionResult": {
           "arbiterMetadata": { "shouldOutput": true },
           "sequenceResults": {
-            "signing-complete": { "assertedOutputs": [ { "vector": [0, 0, 0, 1] } ] }
+            "signing-complete": { "matchedVectors": [ "ds-complete" ], "assertedOutputs": [ { "vector": [0, 0, 0, 1] } ] }
           }
         }
       },
@@ -238,11 +238,15 @@ class VectorAggregatorSpec extends AnyWordSpec with Matchers {
         .find(_.hcursor.get[String]("machineId").toOption.contains(id))
         .getOrElse(fail(s"no entry for $id"))
 
-    "report provenance as the contributing sequences' initial reality event vectors" in {
-      // C++ emits ["ds-complete"] here — the id of the isInitial vector of the
-      // sequence that fired, not a slug derived from the sequenceId. With one
-      // operation per machine this is the union over contributors (§1); this
-      // machine has one, so it is unchanged.
+    "report provenance as the Reality Events the contributing sequences walked" in {
+      // Taken from the step's own `matchedVectors`, not resolved against the
+      // corpus. The corpus lookup named a sequence's *entry points*
+      // (`initialVectorIds`), which is only the same answer for a single-vector
+      // sequence — 63% of the corpus — and wrong for the rest, where C++ and
+      // LSP report the whole walked chain (RealityEngine_CI#209).
+      //
+      // With one operation per machine this is the union over contributors
+      // (§1); this machine has one, so it is that sequence's chain.
       entryFor("machine-documentsigningworkflowmonitor")
         .hcursor.get[Vector[String]]("provenance") shouldBe Right(Vector("ds-complete"))
     }
@@ -305,8 +309,8 @@ class VectorAggregatorSpec extends AnyWordSpec with Matchers {
             "transitionResult": {
               "arbiterMetadata": { "shouldOutput": true },
               "sequenceResults": {
-                "s-amber": { "assertedOutputs": [ { "vector": [1, 0] } ] },
-                "s-red":   { "assertedOutputs": [ { "vector": [0, 1] } ] }
+                "s-amber": { "matchedVectors": [ "iv-amber" ], "assertedOutputs": [ { "vector": [1, 0] } ] },
+                "s-red":   { "matchedVectors": [ "iv-red" ],   "assertedOutputs": [ { "vector": [0, 1] } ] }
               }
             }
           }
