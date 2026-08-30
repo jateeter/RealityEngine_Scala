@@ -88,7 +88,19 @@ case class PerceptualMapping(input: RegionMapping, output: RegionMapping, bitsPe
 case class SequenceResult(
   matchedVectors:   List[String],
   activatedVectors: List[String],
-  assertedOutputs:  List[OutputVector]
+  assertedOutputs:  List[OutputVector],
+  // The evidence behind this sequence's contribution: the union of the walked
+  // chains of the matched vectors that asserted output, first-seen order,
+  // deduplicated. `matchedVectors` names only what matched in THIS step; a
+  // Reality Event completed at the end of a chain was reached through its
+  // predecessors, and those are the evidence for it (FOLD_PLACEMENT.md §1).
+  //
+  // Deliberately not serialized. JsonProtocol emits matchedVectors,
+  // activatedVectors and assertedOutputs, and C++ and LSP emit the same three;
+  // adding a fourth would be the payload divergence class of #176/#197. This
+  // exists so the simulator can build MergeOperation.provenance, which IS on
+  // the wire and which all three runtimes carry.
+  provenance:       List[String] = Nil
 )
 
 // ── Arbiter metadata ──────────────────────────────────────────────────────────

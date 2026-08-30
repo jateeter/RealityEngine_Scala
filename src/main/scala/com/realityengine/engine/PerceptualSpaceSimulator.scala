@@ -323,12 +323,45 @@ class PerceptualSpaceSimulator(dimension: Int = sys.env.getOrElse("VECTOR_DIMENS
             DeprecationMark(seq.deprecatedAt.getOrElse(""), seq.replacedBy, seq.daysSinceDeprecation)
           }
 
+        // The Reality Events walked to produce this machine's contribution,
+        // across the contributing sequences, first-seen order, deduplicated —
+        // which is what FOLD_PLACEMENT.md §1 specifies: "union of
+        // contributors' provenance, order-preserved, deduped".
+        //
+        // The chain, not just this step's matches. A Reality Event completed at
+        // the end of a multi-step CES was reached through its predecessors, and
+        // reporting only the final match dropped them: dlx-011 reported
+        // [step-2] where C++ and LSP reported [step-1, step-2]. Successors now
+        // inherit their activator's chain (CriticalEventSequence.transition),
+        // as they do in C++.
+        //
+        // This was `Nil`, on the reasoning that this runtime's OutputVector
+        // carries no evidence chain and filling it would be a change to the
+        // machine model. It does not need one: the evidence is the step's own
+        // `matchedVectors`, already in scope here, and the machines and their
+        // live events within this RE/PE pair are the authoritative source for
+        // the pair's own state (RealityEngine_CI#209).
+        //
+        // Not resolved from the corpus. The PE briefly did that, reading each
+        // sequence's `initialVectorIds`, which names where a sequence *starts*
+        // rather than the chain the Reality Event walked — wrong for the 37% of
+        // corpus sequences carrying more than one vector, and a second view of
+        // machines the pair can already describe itself.
+        //
+        // Restricted to contributing sequences so the union describes the
+        // operation rather than everything the machine did this step.
+        val contributingIds = contributors.map(_._1).toSet
+        val provenance = transition.sequenceResults.toList.sortBy(_._1)
+          .filter { case (seqId, _) => contributingIds.contains(seqId) }
+          .flatMap { case (_, sr) => sr.provenance }
+          .distinct
+
         val op = MergeOperation(
           region      = RegionMapping(mapping.output.offset, mapping.output.length),
           machineId   = machine.id,
           sequenceIds = sequenceIds,
           values      = values,
-          provenance  = Nil,
+          provenance  = provenance,
           governance  = governance,
           deprecation = deprecation
         )

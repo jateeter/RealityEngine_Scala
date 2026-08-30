@@ -30,6 +30,7 @@ class CriticalEventSequence(
   private val _outputsBuf     = new scala.collection.mutable.ArrayBuffer[OutputVector](4)
   private val _activatedBuf   = new scala.collection.mutable.ArrayBuffer[String](8)
   private val _pendingBuf     = new scala.collection.mutable.HashSet[String]()
+  private val _provenanceBuf  = new scala.collection.mutable.ArrayBuffer[String](8)
 
   // ── Mutations ────────────────────────────────────────────────────────────
 
@@ -117,16 +118,41 @@ class CriticalEventSequence(
     _outputsBuf.clear()
     _activatedBuf.clear()
     _pendingBuf.clear()
+    _provenanceBuf.clear()
 
     // Match every currently active vector.
+    // Pair each pending successor with the chain its activator carried, so the
+    // successor inherits the full evidence trail rather than starting a new
+    // one. First activator wins, matching C++'s `pending` map
+    // (reality.cpp:687): a successor armed by two matched predecessors in the
+    // same step records the first in canonical order, deterministically.
+    val pendingChains = scala.collection.mutable.LinkedHashMap.empty[String, List[String]]
+
     for (vector <- getActiveVectors) {
+      // Read the chain BEFORE transitioning. RealityVector.transition
+      // deactivates a transitional vector on a match (RealityVector.scala:142),
+      // and clearActive() drops the predecessor chain with the activation — so
+      // reading provenanceChain afterwards returns just the vector's own id and
+      // the trail is lost one hop at a time. That truncated dlx-017 to
+      // [step-3, step-4] where C++ and LSP report all four.
+      //
+      // C++ has no such hazard because it takes the chain from the transition
+      // result (`tr.provenanceChain`), captured at match time.
+      val chain = vector.provenanceChain
       val (matched, nextIds, outputs, _) = vector.transition(inputVector, matchAlgorithmOverride)
       if (matched) {
         _matchedBuf += vector.id
 
         if (vector.getOutputVectors.nonEmpty) vector.setWasJustMatched()
-
-        nextIds.foreach(_pendingBuf += _)
+        nextIds.foreach { nid =>
+          _pendingBuf += nid
+          if (!pendingChains.contains(nid)) pendingChains(nid) = chain
+        }
+        // Only a vector that asserted output contributes evidence: the chain
+        // is the trail behind a Reality Event that completed, not behind every
+        // match. Mirrors C++, which stamps the chain onto the asserted outputs
+        // (reality.cpp:599-601) rather than onto every matched vector.
+        if (outputs.nonEmpty) chain.foreach(_provenanceBuf += _)
         outputs.foreach(_outputsBuf += _)
       }
     }
@@ -135,7 +161,7 @@ class CriticalEventSequence(
     for (id <- _pendingBuf) {
       vectors.get(id).foreach { nv =>
         if (!nv.isActive) {
-          nv.setActive()
+          nv.setActive(pendingChains.getOrElse(id, Nil))
           _activatedBuf += id
         }
       }
@@ -144,7 +170,8 @@ class CriticalEventSequence(
     SequenceResult(
       matchedVectors   = _matchedBuf.toList,
       activatedVectors = _activatedBuf.toList,
-      assertedOutputs  = _outputsBuf.toList
+      assertedOutputs  = _outputsBuf.toList,
+      provenance       = _provenanceBuf.toList.distinct
     )
   }
 

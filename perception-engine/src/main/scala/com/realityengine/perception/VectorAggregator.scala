@@ -116,6 +116,11 @@ object VectorAggregator {
     outputOffset: Int,
     outputLength: Int,
     values:       Vector[Double],
+    // The Reality Events that actually matched this step, per contributing
+    // sequence, in the order the step reported them. This is the evidence
+    // behind the folded value and it comes from the pair's own live step —
+    // not from a corpus file, and not from a second view of the machines.
+    provenance:   List[String],
   )
 
   private def mergeOps(machineResults: Json): List[MergeOp] =
@@ -157,9 +162,26 @@ object VectorAggregator {
                 .flatMap(_.hcursor.get[Vector[Double]]("vector").toOption.filter(_.nonEmpty))
                 .map(sequenceId -> _)
             }
+          // Provenance from the live step, in first-seen order, deduped
+          // (FOLD_PLACEMENT.md §1: "union of contributors' provenance,
+          // order-preserved, deduped"). `matchedVectors` is the set of Reality
+          // Events that matched in this machine's atomic step, which is the
+          // evidence for the value it just presented.
+          //
+          // Read only from sequences that contributed, so the union describes
+          // the operation rather than the machine's whole step.
+          val contributingIds = contributors.map(_._1).toSet
+          val provenance = transition.downField("sequenceResults").focus
+            .flatMap(_.asObject).map(_.toList).getOrElse(Nil)
+            .sortBy(_._1)
+            .filter { case (sequenceId, _) => contributingIds.contains(sequenceId) }
+            .flatMap { case (_, sequenceResult) =>
+              sequenceResult.hcursor.get[List[String]]("matchedVectors").getOrElse(Nil)
+            }
+            .distinct
           if (contributors.isEmpty) Nil
           else List(MergeOp(machineId, contributors.map(_._1).distinct.sorted,
-                            contributors, offset, length, values))
+                            contributors, offset, length, values, provenance))
         case _ => Nil
       }
     }
@@ -226,13 +248,22 @@ object VectorAggregator {
           // C++ PE's trigger dispatch reads op.at("values"). Folded now, rather
           // than one sequence's asserted output.
           "values" -> Json.arr(op.values.map(Json.fromDoubleOrNull): _*),
-          // The union over contributors, order-preserved and deduped (§1).
+          // The union over contributors, order-preserved and deduped (§1),
+          // taken from the live step rather than resolved against the corpus.
+          //
+          // This read `corpus.provenance`, which looks up each sequence's
+          // `initialVectorIds`. That was wrong twice over. It named where a
+          // sequence *starts*, not the chain the Reality Event actually walked,
+          // so it could never match C++ for the 37% of corpus sequences with
+          // more than one vector. And it asked a second view of the machines a
+          // question the pair could answer about itself — the machine list and
+          // the step are the authoritative source for a pair's own state
+          // (RealityEngine_CI#209).
+          //
           // Unconditional, like C++: an entry with no chain reports an empty
           // array rather than dropping the key, so a consumer can tell "no
           // provenance" apart from "this runtime does not report provenance".
-          "provenance" -> Json.arr(
-            op.sequenceIds.flatMap(corpus.provenance(op.machineId, _)).distinct.map(Json.fromString): _*
-          ),
+          "provenance" -> Json.arr(op.provenance.map(Json.fromString): _*),
         )
         // Conditional, like C++: present only when a trigger rule matched.
         joinGovernance(op, corpus).fold(base)(g => base.mapObject(_.add("governance", g)))

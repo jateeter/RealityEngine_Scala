@@ -21,6 +21,11 @@ class RealityVector(
   private var _nextVectorIds:   List[String]         = Nil
   private var _outputVectors:   List[OutputVector]   = Nil
   private var _wasJustMatched:  Boolean              = false
+  // The Reality Events walked to reach this one, in order. An initial event has
+  // none. A successor inherits its activator's chain, so the evidence trail for
+  // a firing is the whole path rather than only the step that completed it.
+  // Mirrors `predecessorChain` in RealityEngine_CPP (reality.cpp:511).
+  private var _predecessorChain: List[String]         = Nil
   var metadata: Map[String, Json] = Map.empty
 
   // ── Accessors ────────────────────────────────────────────────────────────
@@ -29,8 +34,20 @@ class RealityVector(
   def getElements: Vector[VectorElement] = elements
 
   def isActive: Boolean = state == VectorState.Active
-  def setActive():  Unit = { state = VectorState.Active }
-  def clearActive(): Unit = { if (!isInitial) state = VectorState.Inactive }
+  def setActive(predecessorChain: List[String] = Nil): Unit = {
+    state = VectorState.Active
+    _predecessorChain = predecessorChain
+  }
+  def clearActive(): Unit = {
+    if (!isInitial) {
+      state = VectorState.Inactive
+      _predecessorChain = Nil
+    }
+  }
+
+  /** predecessorChain + this id — the evidence for a Reality Event this vector
+    * completes. Mirrors `RealityVector::provenance_chain()` in C++. */
+  def provenanceChain: List[String] = _predecessorChain :+ id
 
   def setWasJustMatched(): Unit  = { _wasJustMatched = true  }
   def clearWasJustMatched(): Unit = { _wasJustMatched = false }
