@@ -845,8 +845,8 @@ class Routes(
               complete(Json.obj("history" -> Json.arr(entries: _*)))
             } } },
             // Trajectory histories — SURFACE_SPEC.md, "Trajectory histories".
-            path("orev-history") { get { parameters("from".as[Int].?, "limit".as[Int].?) { (from, limit) =>
-              complete(Json.obj("history" -> spaceRuntime.getOrevHistory(from.getOrElse(0), limit.getOrElse(0)).asJson))
+            path("osre-history") { get { parameters("from".as[Int].?, "limit".as[Int].?) { (from, limit) =>
+              complete(Json.obj("history" -> spaceRuntime.getOsreHistory(from.getOrElse(0), limit.getOrElse(0)).asJson))
             } } },
             path("isre-history") { get { parameters("from".as[Int].?, "limit".as[Int].?) { (from, limit) =>
               complete(Json.obj("history" -> spaceRuntime.getIsreHistory(from.getOrElse(0), limit.getOrElse(0)).asJson))

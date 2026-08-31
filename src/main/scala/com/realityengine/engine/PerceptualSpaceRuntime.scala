@@ -19,7 +19,7 @@ class PerceptualSpaceRuntime(dimension: Int = sys.env.getOrElse("VECTOR_DIMENSIO
   private var history:           List[SimulationStep] = Nil
   // Trajectory histories — see SURFACE_SPEC.md, "Trajectory histories".
   private var isreHistory:       Vector[TrajectoryEntry] = Vector.empty
-  private var orevHistory:       Vector[TrajectoryEntry] = Vector.empty
+  private var osreHistory:       Vector[TrajectoryEntry] = Vector.empty
   private val maxTrajectory:     Int                     = 1024
   private var currentStep:       Int                  = 0
   private var immediateStepCount: Int                 = 0
@@ -158,7 +158,7 @@ class PerceptualSpaceRuntime(dimension: Int = sys.env.getOrElse("VECTOR_DIMENSIO
     perceptualSpace.reset()
     history = Nil
     isreHistory = Vector.empty
-    orevHistory = Vector.empty
+    osreHistory = Vector.empty
     currentStep = 0
     // Reset cleared the histories and left this counting, so the first step of
     // a reset engine was stepNumber 19 while its history held one entry. LSP
@@ -467,21 +467,21 @@ class PerceptualSpaceRuntime(dimension: Int = sys.env.getOrElse("VECTOR_DIMENSIO
 
     // COMMIT — exactly one write per cell, into the head of the input event.
     //
-    // OREV(n) observation point. The corpus's output for this step exists as a
+    // OSRE(n) observation point. The corpus's output for this step exists as a
     // single-valued vector at exactly one instant: after resolution, as it is
     // committed. Recording it in the same loop as the writes is what makes the
     // entry and the space agree by construction rather than by a later read
     // that could observe a different state. Sorted by cell because the shards
     // join in completion order and ordering is part of the contract.
     val records   = scala.collection.mutable.ListBuffer.empty[Arbiter.ArbitrationRecord]
-    val orevCells = scala.collection.mutable.ListBuffer.empty[TrajectoryCell]
+    val osreCells = scala.collection.mutable.ListBuffer.empty[TrajectoryCell]
     resolvedShards.foreach(_.foreach { case (cell, value, rec) =>
       perceptualSpace.updateRegion(cell, Vector(value))
-      if (value != 0.0) orevCells += TrajectoryCell(cell, value)
+      if (value != 0.0) osreCells += TrajectoryCell(cell, value)
       rec.foreach(records += _)
     })
-    val orev = TrajectoryEntry(stepNum, perceptualSpace.getPerceptualVector.length,
-                               orevCells.toList.sortBy(_.index))
+    val osre = TrajectoryEntry(stepNum, perceptualSpace.getPerceptualVector.length,
+                               osreCells.toList.sortBy(_.index))
     lastArbitration = records.toList
     val eventBusWrites = applyEventBus(firedSequences.toSeq)
 
@@ -505,7 +505,7 @@ class PerceptualSpaceRuntime(dimension: Int = sys.env.getOrElse("VECTOR_DIMENSIO
       }
     }.toList.sortBy(r => (r.offset, r.length, r.machineId, r.`type`))
 
-    recordTrajectory(isre, orev)
+    recordTrajectory(isre, osre)
 
     SimulationStep(
       stepNumber      = stepNum,
@@ -531,7 +531,7 @@ class PerceptualSpaceRuntime(dimension: Int = sys.env.getOrElse("VECTOR_DIMENSIO
                       case (v, i) if v != 0.0 => TrajectoryCell(i, v)
                     }.toList)
 
-  /** Appends ISRE(n) and OREV(n) together. They are captured at their own
+  /** Appends ISRE(n) and OSRE(n) together. They are captured at their own
     * observation points inside the step and recorded in one action, so no
     * observer can see a step whose trajectories are half-written.
     *
@@ -539,9 +539,9 @@ class PerceptualSpaceRuntime(dimension: Int = sys.env.getOrElse("VECTOR_DIMENSIO
     * because it is read as "what just happened"; these are read as sequences to
     * be compared element by element, and the index of the first disagreement is
     * the answer they exist to give. */
-  private def recordTrajectory(isre: TrajectoryEntry, orev: TrajectoryEntry): Unit = {
+  private def recordTrajectory(isre: TrajectoryEntry, osre: TrajectoryEntry): Unit = {
     isreHistory = (isreHistory :+ isre).takeRight(maxTrajectory)
-    orevHistory = (orevHistory :+ orev).takeRight(maxTrajectory)
+    osreHistory = (osreHistory :+ osre).takeRight(maxTrajectory)
   }
 
   // ── Auto-play (synchronous scheduler stub) ────────────────────────────────
@@ -569,7 +569,7 @@ class PerceptualSpaceRuntime(dimension: Int = sys.env.getOrElse("VECTOR_DIMENSIO
     * include; `limit` caps the entries returned from there (0 = all). A
     * comparison walks these by index across engines and reports the first
     * disagreement, so the window has to be selectable by step, not by recency. */
-  def getOrevHistory(from: Int = 0, limit: Int = 0): List[TrajectoryEntry] = window(orevHistory, from, limit)
+  def getOsreHistory(from: Int = 0, limit: Int = 0): List[TrajectoryEntry] = window(osreHistory, from, limit)
   def getIsreHistory(from: Int = 0, limit: Int = 0): List[TrajectoryEntry] = window(isreHistory, from, limit)
 
   private def window(entries: Vector[TrajectoryEntry], from: Int, limit: Int): List[TrajectoryEntry] = {

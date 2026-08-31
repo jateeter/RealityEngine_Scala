@@ -28,7 +28,7 @@ class PerceptionEngine(initialDimension: Int = sys.env.getOrElse("VECTOR_DIMENSI
   // Boot used to restore these straight into `sources`. On a 12-machine corpus
   // that left scala-1 holding 815 sources against cpp-1 and lsp-1's 0, growing
   // the perceptual space to 16942 against their 14388 — and space length is
-  // part of every ISRE and OREV entry, so the runtimes diverged at step 0
+  // part of every ISRE and OSRE entry, so the runtimes diverged at step 0
   // before any stimulus (#58).
   private var cachedFromStore: Map[String, SourceConfig] = Map.empty
   // Persistent perceptual space — carries machine outputs forward.  Grows
@@ -200,9 +200,9 @@ class PerceptionEngine(initialDimension: Int = sys.env.getOrElse("VECTOR_DIMENSI
     * 0, and emitted `localai` output cells at step 0 that neither of the others
     * did (#54):
     *
-    *     orev cpp-1   set=0 []
-    *     orev lsp-1   set=0 []
-    *     orev scala-1 set=4 [7449, 7457, 7581, 7589]
+    *     osre cpp-1   set=0 []
+    *     osre lsp-1   set=0 []
+    *     osre scala-1 set=4 [7449, 7457, 7581, 7589]
     *
     * Every value in a `localai` window is a *response* to a dispatch this
     * process has not yet made, so a value present at step 0 is last run's
