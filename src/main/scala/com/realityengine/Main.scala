@@ -3,7 +3,7 @@ package com.realityengine
 import akka.actor.ActorSystem
 import akka.http.scaladsl.{ConnectionContext, Http}
 import com.realityengine.api.Routes
-import com.realityengine.engine.{PerceptualSpaceSimulator, RealityEngine}
+import com.realityengine.engine.{PerceptualSpaceRuntime, RealityEngine}
 import com.realityengine.logging.{AuditConfig, AuditLogger}
 import com.realityengine.services.VectorStore
 
@@ -53,14 +53,14 @@ object Main extends App {
 
   val vectorStore  = new VectorStore()
   val engine       = new RealityEngine(vectorStore)
-  val simulator    = new PerceptualSpaceSimulator(sys.env.getOrElse("VECTOR_DIMENSION", "7680").toIntOption.getOrElse(7680))
+  val spaceRuntime    = new PerceptualSpaceRuntime(sys.env.getOrElse("VECTOR_DIMENSION", "7680").toIntOption.getOrElse(7680))
 
-  simulator.setOnStepComplete { (_, spaceVector) =>
+  spaceRuntime.setOnStepComplete { (_, spaceVector) =>
     engine.perceptionEngine.getPerceptualSpace.setPerceptualVector(spaceVector)
   }
   // Share the engine's coverage registry so /api/perceive transitions
   // route through to /api/metrics without a second instance drifting.
-  simulator.setCoverageRegistry(engine.coverage)
+  spaceRuntime.setCoverageRegistry(engine.coverage)
 
   val startup = for {
     _ <- vectorStore.initialize()
@@ -81,7 +81,7 @@ object Main extends App {
       com.realityengine.engine.ArbitrationRegistry.load(
         sys.env.getOrElse("MACHINES_DIR", "../RealityEngine_Machines/machines"))
 
-      val routes   = new Routes(engine, simulator, auditCfg)
+      val routes   = new Routes(engine, spaceRuntime, auditCfg)
       routes.loadDefaultMachines()
 
       val serverAt = Http().newServerAt(host, port)

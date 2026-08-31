@@ -33,7 +33,7 @@ import com.realityengine.logging.{AuditConfig, AuditLogger}
 // Routes — Akka HTTP route definitions mirroring all TypeScript /api/... endpoints.
 class Routes(
   engine:      RealityEngine,
-  simulator:   PerceptualSpaceSimulator,
+  spaceRuntime:   PerceptualSpaceRuntime,
   auditCfg:    AuditConfig,
   machinesDir: String = sys.env.getOrElse("MACHINES_DIR", "../RealityEngine_Machines/machines")
 )(implicit system: ActorSystem, ec: ExecutionContext) {
@@ -242,7 +242,7 @@ class Routes(
   private def startAutoPlay(delayMs: Long): Unit = {
     cancelAutoPlay()
     val task = system.scheduler.scheduleWithFixedDelay(0.milliseconds, delayMs.milliseconds) { () =>
-      simulator.step() match {
+      spaceRuntime.step() match {
         case None       => cancelAutoPlay()
         case Some(step) => sseQueue.offer(step); ()
       }
@@ -296,8 +296,8 @@ class Routes(
   private def addMachineToSystem(machine: Machine): Unit = {
     engine.addMachine(machine)
     if (machine.perceptualMapping.isDefined) {
-      simulator.addMachine(machine)
-      println(s"""  ✓ Machine "${machine.name}" registered with perceptual simulator""")
+      spaceRuntime.addMachine(machine)
+      println(s"""  ✓ Machine "${machine.name}" registered with the perceptual space runtime""")
     }
   }
 
@@ -478,10 +478,10 @@ class Routes(
     val totalVecs   = stats.get[Int]("totalVectors").getOrElse(0)
     val totalActive = stats.get[Int]("totalActiveVectors").getOrElse(0)
     val historySize = engine.getHistory().size
-    val simStep     = simulator.getCurrentStep
+    val simStep     = spaceRuntime.getCurrentStep
 
     // ── Engine totals — match dashboard queries ────────────────────────────
-    emitMeta("ces_machines_total",  "Total machines registered with the engine.", "gauge")
+    emitMeta("ces_machines_total",  "Number of machines loaded into the reality engine.", "gauge")
     emit   ("ces_machines_total",   machines.size.toDouble)
 
     emitMeta("ces_sequences_total", "Total CES sequences across all machines.",   "gauge")
@@ -496,8 +496,8 @@ class Routes(
     emitMeta("ces_history_size", "Length of the transition history.", "gauge")
     emit   ("ces_history_size",  historySize.toDouble)
 
-    emitMeta("ces_simulator_current_step", "Current step of the configured simulation.", "gauge")
-    emit   ("ces_simulator_current_step",  simStep.toDouble)
+    emitMeta("ces_engine_current_step", "Current step of the configured simulation.", "gauge")
+    emit   ("ces_engine_current_step",  simStep.toDouble)
 
     // ── Per-machine gauges + counter-label baselines ──────────────────────
     // Per-machine series back the `$machine` template variable and let
@@ -613,7 +613,7 @@ class Routes(
     }
 
     // ── Runtime parity gauges — cross-runtime-parity.json dashboard ────────
-    val vectorDim = simulator.getPerceptualSpace.getPerceptualVector.length
+    val vectorDim = spaceRuntime.getPerceptualSpace.getPerceptualVector.length
     emitMeta("re_runtime_dimension",          "Current perceptual-space dimension.", "gauge")
     emit   ("re_runtime_dimension",           vectorDim.toDouble)
     emitMeta("re_runtime_required_dimension", "Dimension required to fit all machine mappings.", "gauge")
@@ -807,15 +807,15 @@ class Routes(
             //
             // The three calls mirror C++'s handler one for one:
             //   for (auto& m : machines) m.reset();  -> engine.resetAllSequences()
-            //   simulator.reset();                   -> simulator.reset()
+            //   spaceRuntime.reset();                   -> spaceRuntime.reset()
             //   perception.reset();                  -> perceptionEngine space
-            // simulator.reset() also resets its own machines, history, step
+            // spaceRuntime.reset() also resets its own machines, history, step
             // counter and latched event bits; the perception engine keeps a
             // separate perceptual space, which is the one C++'s PerceptionMapper
             // ::reset() clears and which nothing here was clearing.
             path("reset") { post {
               engine.resetAllSequences()
-              simulator.reset()
+              spaceRuntime.reset()
               engine.perceptionEngine.getPerceptualSpace.reset()
               complete(Json.obj("success" -> Json.fromBoolean(true)))
             } },
@@ -846,10 +846,10 @@ class Routes(
             } } },
             // Trajectory histories — SURFACE_SPEC.md, "Trajectory histories".
             path("orev-history") { get { parameters("from".as[Int].?, "limit".as[Int].?) { (from, limit) =>
-              complete(Json.obj("history" -> simulator.getOrevHistory(from.getOrElse(0), limit.getOrElse(0)).asJson))
+              complete(Json.obj("history" -> spaceRuntime.getOrevHistory(from.getOrElse(0), limit.getOrElse(0)).asJson))
             } } },
             path("isre-history") { get { parameters("from".as[Int].?, "limit".as[Int].?) { (from, limit) =>
-              complete(Json.obj("history" -> simulator.getIsreHistory(from.getOrElse(0), limit.getOrElse(0)).asJson))
+              complete(Json.obj("history" -> spaceRuntime.getIsreHistory(from.getOrElse(0), limit.getOrElse(0)).asJson))
             } } }
           )
         },
@@ -1092,7 +1092,7 @@ class Routes(
                     val updated     = new Machine(newName, newDesc, newMetadata, existing.getArbiter.getRule, existing.perceptualMapping, id)
                     updated.matchAlgorithm = existing.matchAlgorithm
                     existing.getAllSequences.foreach(updated.addSequence)
-                    engine.removeMachine(id); simulator.removeMachine(id)
+                    engine.removeMachine(id); spaceRuntime.removeMachine(id)
                     addMachineToSystem(updated)
                     complete(Json.obj("success" -> Json.fromBoolean(true), "machine" -> updated.toJson))
                   }
@@ -1101,12 +1101,12 @@ class Routes(
                   Try(MachineLoader.loadFromJson(body.noSpaces, Some(id))) match {
                     case Failure(e) => complete(StatusCodes.BadRequest -> Json.obj("error" -> Json.fromString(e.getMessage)))
                     case Success(machine) =>
-                      engine.removeMachine(id); simulator.removeMachine(id)
+                      engine.removeMachine(id); spaceRuntime.removeMachine(id)
                       addMachineToSystem(machine)
                       complete(Json.obj("success" -> Json.fromBoolean(true), "machine" -> machine.toJson))
                   }
                 } },
-                delete { engine.removeMachine(id); simulator.removeMachine(id); complete(Json.obj("success" -> Json.fromBoolean(true))) }
+                delete { engine.removeMachine(id); spaceRuntime.removeMachine(id); complete(Json.obj("success" -> Json.fromBoolean(true))) }
               )
             },
             path(Segment / "process") { id => post { entity(as[Json]) { body =>
@@ -1246,7 +1246,7 @@ class Routes(
         },
 
         // Machine graph
-        path("machine-graph") { get { complete(simulator.getMachineGraphData) } },
+        path("machine-graph") { get { complete(spaceRuntime.getMachineGraphData) } },
 
         // Arbitration records for the most recent step (ARBITER_CONTRACT.md 6).
         // A resolution nobody can observe is indistinguishable from no
@@ -1254,7 +1254,7 @@ class Routes(
         // attributable — "the agent's answer was discarded" is exactly the
         // operational fact the domain bus exists to surface.
         path("arbitration") { get {
-          val recs = simulator.getLastArbitration
+          val recs = spaceRuntime.getLastArbitration
           complete(Json.obj(
             "registryEntries" -> Json.fromInt(com.realityengine.engine.ArbitrationRegistry.size),
             "registrySource"  -> com.realityengine.engine.ArbitrationRegistry.source
@@ -1311,38 +1311,38 @@ class Routes(
                 case None => complete(StatusCodes.BadRequest -> Json.obj("error" -> Json.fromString("No config buffered. Send a chunk with config first.")))
                 case Some((region, delay, maxS)) =>
                   val cfg = SimulationConfig(sequenceBuffer.get(), region, delay, maxS)
-                  simulator.configure(cfg)
+                  spaceRuntime.configure(cfg)
                   sequenceBuffer.set(Vector.empty); sequenceBufferConfig.set(None)
                   complete(Json.obj("success" -> Json.fromBoolean(true)))
               }
             } },
             path("start")   { post {
               try {
-                simulator.start()
-                val delayMs = simulator.getStepDelayMs
+                spaceRuntime.start()
+                val delayMs = spaceRuntime.getStepDelayMs
                 startAutoPlay(delayMs)
                 complete(Json.obj("success" -> Json.fromBoolean(true)))
               } catch { case e: Exception =>
                 complete(StatusCodes.BadRequest -> Json.obj("error" -> Json.fromString(e.getMessage)))
               }
             } },
-            path("stop")    { post { cancelAutoPlay(); simulator.stop(); complete(Json.obj("success" -> Json.fromBoolean(true))) } },
-            path("step")    { post { simulator.step() match {
+            path("stop")    { post { cancelAutoPlay(); spaceRuntime.stop(); complete(Json.obj("success" -> Json.fromBoolean(true))) } },
+            path("step")    { post { spaceRuntime.step() match {
               case None    => complete(Json.obj("done" -> Json.fromBoolean(true), "success" -> Json.fromBoolean(true)))
               case Some(s) => complete(Json.obj("success" -> Json.fromBoolean(true), "step" -> s.asJson))
             } } },
-            path("reset")   { post { simulator.reset(); complete(Json.obj("success" -> Json.fromBoolean(true))) } },
+            path("reset")   { post { spaceRuntime.reset(); complete(Json.obj("success" -> Json.fromBoolean(true))) } },
             path("state")   { get {
-              val ps = simulator.getPerceptualSpace.getPerceptualVector
+              val ps = spaceRuntime.getPerceptualSpace.getPerceptualVector
               val stateObj = Json.obj(
                 "perceptualSpace" -> Json.arr(ps.map(Json.fromDoubleOrNull): _*),
-                "currentStep"     -> Json.fromInt(simulator.getCurrentStep),
-                "isRunning"       -> Json.fromBoolean(simulator.getIsRunning),
-                "machines"        -> simulator.toJson.hcursor.downField("machines").as[Json].getOrElse(Json.arr())
+                "currentStep"     -> Json.fromInt(spaceRuntime.getCurrentStep),
+                "isRunning"       -> Json.fromBoolean(spaceRuntime.getIsRunning),
+                "machines"        -> spaceRuntime.toJson.hcursor.downField("machines").as[Json].getOrElse(Json.arr())
               )
               complete(Json.obj("success" -> Json.fromBoolean(true), "state" -> stateObj))
             } },
-            path("history") { get { complete(Json.obj("history" -> simulator.getHistory.asJson)) } }
+            path("history") { get { complete(Json.obj("history" -> spaceRuntime.getHistory.asJson)) } }
           )
         },
 
@@ -1356,7 +1356,7 @@ class Routes(
         path("perceive") { post { entity(as[Json]) { body =>
           val vec      = body.hcursor.downField("vector").as[Vector[Double]].getOrElse(Vector.empty)
           val matchOvr = body.hcursor.get[String]("matchAlgorithmOverride").toOption.map(ComparatorType.fromString)
-          val step     = simulator.processImmediate(vec, matchOvr)
+          val step     = spaceRuntime.processImmediate(vec, matchOvr)
           // Sync PerceptionEngine's space with post-merge state
           engine.perceptionEngine.getPerceptualSpace.setPerceptualVector(step.perceptualSpace)
           // Non-blocking push to the SSE broadcast hub so observers never stall the caller
@@ -1371,14 +1371,14 @@ class Routes(
             "domainWorkerPool" -> Json.obj("semantics" -> Json.fromString("akka-futures"))
           )) } },
           path("vector-space") { get {
-            val dim    = simulator.getPerceptualSpace.getPerceptualVector.length
+            val dim    = spaceRuntime.getPerceptualSpace.getPerceptualVector.length
             val reqDim = engine.getAllMachines.flatMap(_.perceptualMapping).map(m => m.input.offset + m.input.length).foldLeft(dim)(math.max)
             complete(Json.obj(
               "dimension"                 -> Json.fromInt(dim),
               "requiredDimension"         -> Json.fromInt(reqDim),
               "encoding"                  -> Json.fromString("dense-float64-clamped-0-1"),
               "mappingVersion"            -> Json.fromInt(100),
-              "eventBusSubscriptionCount" -> Json.fromInt(simulator.eventBusSubscriptionCount)
+              "eventBusSubscriptionCount" -> Json.fromInt(spaceRuntime.eventBusSubscriptionCount)
             ))
           } },
           path("storage-footprint") { get { complete(storageFootprintJson()) } },

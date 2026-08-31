@@ -57,9 +57,9 @@ class SemanticAuditSpec extends AnyFlatSpec with Matchers with ScalatestRouteTes
 
   private val vectorStore = new VectorStore()
   private val engine      = new RealityEngine(vectorStore)
-  private val simulator   = new PerceptualSpaceSimulator()
+  private val spaceRuntime   = new PerceptualSpaceRuntime()
   private val auditCfg    = AuditConfig(enabled = false, level = 0, service = "semantic-audit-test")
-  private val testRoutes  = new Routes(engine, simulator, auditCfg, machinesDir.toString).routes
+  private val testRoutes  = new Routes(engine, spaceRuntime, auditCfg, machinesDir.toString).routes
 
   "machine processing" should "emit IRI-joined sequence observations served by /api/audit/semantics" in {
     val machine = buildMachine()

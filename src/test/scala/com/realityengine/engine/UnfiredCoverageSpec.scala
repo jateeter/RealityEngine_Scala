@@ -53,7 +53,7 @@ class UnfiredCoverageSpec extends AnyFlatSpec with Matchers {
     val mapping = machine.perceptualMapping.get
     val dim = math.max(mapping.input.offset + mapping.input.length, mapping.output.offset + mapping.output.length)
     val cov = new CesCoverageRegistry()
-    val sim = new PerceptualSpaceSimulator(dim)
+    val sim = new PerceptualSpaceRuntime(dim)
     sim.setCoverageRegistry(cov)
     sim.addMachine(machine)
 

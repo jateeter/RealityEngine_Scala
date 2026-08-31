@@ -70,8 +70,8 @@ class FoldPlacementSpec extends AnyFlatSpec with Matchers {
     new Machine(id, "compose subscriber", meta, ArbiterRule.PASSTHROUGH, Some(mapping), id)
   }
 
-  private def simulatorWith(ms: Machine*): PerceptualSpaceSimulator = {
-    val sim = new PerceptualSpaceSimulator(Dimension)
+  private def simulatorWith(ms: Machine*): PerceptualSpaceRuntime = {
+    val sim = new PerceptualSpaceRuntime(Dimension)
     ms.foreach(sim.addMachine)
     sim
   }
@@ -134,7 +134,7 @@ class FoldPlacementSpec extends AnyFlatSpec with Matchers {
     // machineId is unique per operation now, so the secondary sort keys the
     // comparator used to need — sequenceId and outputIndex — are gone and the
     // ordering is still total.
-    val sim = new PerceptualSpaceSimulator(Dimension)
+    val sim = new PerceptualSpaceRuntime(Dimension)
     // Added out of order, and each given its own output region so the machines
     // do not contend with one another — this is about batch ordering, not
     // resolution.
@@ -415,7 +415,7 @@ class FoldPlacementSpec extends AnyFlatSpec with Matchers {
     m.getSequence("s-multi").get.deprecatedAt = Some("2026-01-01")
 
     val registry = new com.realityengine.services.CesCoverageRegistry
-    val sim = new PerceptualSpaceSimulator(Dimension)
+    val sim = new PerceptualSpaceRuntime(Dimension)
     sim.setCoverageRegistry(registry)
     sim.addMachine(m)
     val op = sim.processImmediate(input).mergeBatch.head
@@ -432,7 +432,7 @@ class FoldPlacementSpec extends AnyFlatSpec with Matchers {
       ragRule("s-1", Vector(1.0, 0.0), "AMBER"),
       ragRule("s-2", Vector(0.0, 1.0), "RED"))
     val registry = new com.realityengine.services.CesCoverageRegistry
-    val sim = new PerceptualSpaceSimulator(Dimension)
+    val sim = new PerceptualSpaceRuntime(Dimension)
     sim.setCoverageRegistry(registry)
     sim.addMachine(machine("m-gov", Seq(
       "s-1" -> Vector(1.0, 0.0),

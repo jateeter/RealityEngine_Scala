@@ -24,9 +24,9 @@ import org.scalatest.matchers.should.Matchers
 class OutputMergeEndpointSpec extends AnyFlatSpec with Matchers with ScalatestRouteTest {
 
   private val engine     = new RealityEngine(new VectorStore())
-  private val simulator  = new PerceptualSpaceSimulator()
+  private val spaceRuntime  = new PerceptualSpaceRuntime()
   private val auditCfg   = AuditConfig(enabled = false, level = 0, service = "output-merge-test")
-  private val testRoutes = new Routes(engine, simulator, auditCfg).routes
+  private val testRoutes = new Routes(engine, spaceRuntime, auditCfg).routes
 
   private val machineId = "machine-merge"
   engine.addMachine(new Machine("Merge Machine", "", Map.empty,

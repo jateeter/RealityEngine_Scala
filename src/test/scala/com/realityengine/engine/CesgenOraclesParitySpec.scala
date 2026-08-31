@@ -27,9 +27,9 @@ import scala.io.Source
   * differs in what it asserts cannot demonstrate parity of what it asserts
   * about.
   *
-  * Each oracle runs against a simulator holding only its own machine. That is
+  * Each oracle runs against a spaceRuntime holding only its own machine. That is
   * the isolation the oracle was generated under: it names one machine's
-  * sequences and one machine's output region, and a corpus-wide simulator would
+  * sequences and one machine's output region, and a corpus-wide spaceRuntime would
   * let other machines write the same region.
   */
 class CesgenOraclesParitySpec extends AnyFlatSpec with Matchers {
@@ -151,7 +151,7 @@ class CesgenOraclesParitySpec extends AnyFlatSpec with Matchers {
         // the space grow, which comes to the same thing per oracle.
         val dimension = math.max(o.inputRegion._1 + o.inputRegion._2,
                                  o.expectedRegion._1 + o.expectedRegion._2)
-        val sim       = new PerceptualSpaceSimulator(dimension)
+        val sim       = new PerceptualSpaceRuntime(dimension)
         sim.addMachine(machine)
 
         var last: SimulationStep = null

@@ -47,9 +47,9 @@ class SemanticIdentitySpec extends AnyFlatSpec with Matchers with ScalatestRoute
 
   private val vectorStore = new VectorStore()
   private val engine      = new RealityEngine(vectorStore)
-  private val simulator   = new PerceptualSpaceSimulator()
+  private val spaceRuntime   = new PerceptualSpaceRuntime()
   private val auditCfg    = AuditConfig(enabled = false, level = 0, service = "semantics-test")
-  private val testRoutes  = new Routes(engine, simulator, auditCfg, machinesDir.toString).routes
+  private val testRoutes  = new Routes(engine, spaceRuntime, auditCfg, machinesDir.toString).routes
 
   "GET /api/machines/semantics/:name" should "return the manifest identity for a known machine" in {
     Get("/api/machines/semantics/Test%20Machine") ~> testRoutes ~> check {
