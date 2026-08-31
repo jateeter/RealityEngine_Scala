@@ -6,7 +6,7 @@ import org.scalatest.matchers.should.Matchers
 import java.io.File
 import scala.io.Source
 
-/** ces_unfired_sequences must fall as sequences fire (RealityEngine_CI#215).
+/** ces_unfired_sequences must fall as sequences fire (RealityEngine_CI#218).
   *
   * The metric previously counted sequences with no active vectors, which
   * CriticalEventSequence's invariant makes impossible, so it read 0 forever.

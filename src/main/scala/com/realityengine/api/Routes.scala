@@ -550,7 +550,7 @@ class Routes(
       // v.clearActive()`. So `getActiveVectors.isEmpty` was false for every
       // sequence always, and this runtime reported 0 unfired for every machine
       // permanently — a flat zero on "Unfired Critical Event Sequences by
-      // runtime" that no corpus change could move (RealityEngine_CI#215).
+      // runtime" that no corpus change could move (RealityEngine_CI#218).
       //
       // The counts below come from the coverage counters, which are written at
       // the transition touch point in the engine's step path, not read back off
@@ -572,7 +572,7 @@ class Routes(
       emit("ces_unfired_vectors",        unfiredVecs.toDouble,  machineLabel)
       // Machine-level rollups. These were hardcoded 0.0 and stayed 0.0 no
       // matter what the engine did, so every per-machine aggregation of them
-      // read zero (RealityEngine_CI#215). Event-keyed series carrying sequence
+      // read zero (RealityEngine_CI#218). Event-keyed series carrying sequence
       // and vector sub-labels are emitted separately below.
       emit("ces_vector_matched_total",   machineTotal(matchedSnap, covBase),   machineLabel)
       emit("ces_vector_activated_total", machineTotal(activatedSnap, covBase), machineLabel)
