@@ -517,6 +517,12 @@ class Routes(
     emitMeta("ces_deprecated_fires_total", "Fires from machines tagged deprecated.",            "counter")
 
     val stepsSnap     = engine.coverage.stepsSnap
+    // Sum every counter belonging to one machine. Keys are tab-joined and
+    // prefixed by machineId \t machineName, so a prefix match is the machine's
+    // whole contribution.
+    def machineTotal(snap: Map[String, Long], base: String): Double =
+      snap.iterator.collect { case (k, v) if k == base || k.startsWith(base + "\t") => v }.sum.toDouble
+
     val matchedSnap   = engine.coverage.matchedSnap
     val activatedSnap = engine.coverage.activatedSnap
     val outputsSnap   = engine.coverage.outputsSnap
@@ -532,18 +538,45 @@ class Routes(
       val machineLabel = Map("machine" -> m.name, "machine_id" -> m.id)
       val seqs         = m.getAllSequences
       val allVecs      = seqs.flatMap(_.getAllVectors)
-      // "Unfired" semantics: a sequence is currently inactive (no live
-      // active vectors); a vector is currently inactive.  Engine state
-      // at scrape time, which is what the dashboard top-K panels need.
-      val unfiredSeqs  = seqs.count(_.getActiveVectors.isEmpty)
-      val unfiredVecs  = allVecs.count(!_.isActive)
+      // "Unfired" is coverage, not live state: a sequence that has never
+      // produced an output, a vector that has never been matched or activated,
+      // accumulated since the process started. That is what C++ and LSP report
+      // under these names, and what the help text above says.
+      //
+      // This counted sequences with no currently-active vectors instead, which
+      // CriticalEventSequence guarantees can never happen: "at least one
+      // InitialRealityVector is always Active" is its stated invariant, and
+      // `transition` upholds it with `if (v.isInitial) v.setActive() else
+      // v.clearActive()`. So `getActiveVectors.isEmpty` was false for every
+      // sequence always, and this runtime reported 0 unfired for every machine
+      // permanently — a flat zero on "Unfired Critical Event Sequences by
+      // runtime" that no corpus change could move (RealityEngine_CI#218).
+      //
+      // The counts below come from the coverage counters, which are written at
+      // the transition touch point in the engine's step path, not read back off
+      // any machine collection. Keys are tab-joined machineId \t machineName
+      // [\t sequenceId [\t vectorId]] — the wire format C++ and LSP use, so
+      // these are the same membership tests those runtimes make.
+      val covBase      = m.id + "\t" + m.name
+      val unfiredSeqs  = seqs.count(sq => !outputsSnap.contains(covBase + "\t" + sq.id))
+      val unfiredVecs  = seqs.map { sq =>
+        val seqBase = covBase + "\t" + sq.id
+        sq.getAllVectors.count { v =>
+          val vk = seqBase + "\t" + v.id
+          !matchedSnap.contains(vk) && !activatedSnap.contains(vk)
+        }
+      }.sum
       emit("ces_machine_sequence_count", seqs.size.toDouble,    machineLabel)
       emit("ces_machine_vector_count",   allVecs.size.toDouble, machineLabel)
       emit("ces_unfired_sequences",      unfiredSeqs.toDouble,  machineLabel)
       emit("ces_unfired_vectors",        unfiredVecs.toDouble,  machineLabel)
-      emit("ces_vector_matched_total",   0.0,                   machineLabel)
-      emit("ces_vector_activated_total", 0.0,                   machineLabel)
-      emit("ces_sequence_outputs_total", 0.0,                   machineLabel)
+      // Machine-level rollups. These were hardcoded 0.0 and stayed 0.0 no
+      // matter what the engine did, so every per-machine aggregation of them
+      // read zero (RealityEngine_CI#218). Event-keyed series carrying sequence
+      // and vector sub-labels are emitted separately below.
+      emit("ces_vector_matched_total",   machineTotal(matchedSnap, covBase),   machineLabel)
+      emit("ces_vector_activated_total", machineTotal(activatedSnap, covBase), machineLabel)
+      emit("ces_sequence_outputs_total", machineTotal(outputsSnap, covBase),   machineLabel)
       emit("ces_deprecated_fires_total", 0.0,                   machineLabel)
       emit("ces_paging_decisions_total", 0.0,
            machineLabel ++ Map("owner_team" -> "unknown", "rag_status_code" -> "GREEN"))
