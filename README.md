@@ -38,7 +38,7 @@ lifecycle fields, and the cross-runtime field support matrix.
 
 | Concept | Scala class | Responsibility |
 |---|---|---|
-| `RealityVector` | `com.realityengine.models.RealityVector` | Comparator matching and output assertions |
+| `RealityEvent` | `com.realityengine.models.RealityEvent` | Comparator matching and output assertions |
 | `CriticalEventSequence` | `com.realityengine.models.CriticalEventSequence` | Deferred activation over active vector graph |
 | `OutputArbiter` | `com.realityengine.models.OutputArbiter` | Machine output arbiter — rules and default in `RealityEngine_CI/ARBITER_ARCHITECTURE.md` |
 | `Machine` | `com.realityengine.models.Machine` | Runs CES graphs, emits machine transition results |
