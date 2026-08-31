@@ -46,7 +46,7 @@ class ResetClearsRestoredMembershipSpec extends AnyFlatSpec with Matchers {
   it should "not grow the perceptual space" in {
     // The window that made this a step-0 divergence: boot restored a record
     // with a high region, the space grew to fit it, and the space length is
-    // part of every ISRE and OREV entry. An engine cannot un-grow within a run,
+    // part of every ISRE and OSRE entry. An engine cannot un-grow within a run,
     // so correcting it at reset was already too late.
     val engine = new PerceptionEngine(7680)
     engine.restoreSource(sensor("restored-high", 16938, 4))

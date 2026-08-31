@@ -5,7 +5,7 @@ import com.realityengine.models._
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
-/** ISRE/OREV trajectory histories — SURFACE_SPEC.md, "Trajectory histories".
+/** ISRE/OSRE trajectory histories — SURFACE_SPEC.md, "Trajectory histories".
   *
   * Nothing proved the claim the multi-engine deployment rests on: that every
   * engine given the same seed evolves the same way. Single-step comparisons
@@ -48,21 +48,21 @@ class TrajectoryHistorySpec extends AnyFlatSpec with Matchers {
     isre.head.nonZero shouldBe List(TrajectoryCell(0, 1.0))
   }
 
-  "OREV" should "record what the corpus produced, not what it read" in {
+  "OSRE" should "record what the corpus produced, not what it read" in {
     val sim = fixture
     sim.processImmediate(input)
 
-    val orev = sim.getOrevHistory()
-    orev should have size 1
-    orev.head.stepNumber shouldBe 0
-    orev.head.nonZero shouldBe List(TrajectoryCell(20, 1.0))
+    val osre = sim.getOsreHistory()
+    osre should have size 1
+    osre.head.stepNumber shouldBe 0
+    osre.head.nonZero shouldBe List(TrajectoryCell(20, 1.0))
   }
 
   it should "record nothing where the corpus produced nothing" in {
     val sim = fixture
     sim.processImmediate(Vector.fill(32)(0.0))
 
-    sim.getOrevHistory().head.nonZero shouldBe empty
+    sim.getOsreHistory().head.nonZero shouldBe empty
     // The ISRE is still recorded: a step where nothing fired is a step, and a
     // history that skipped it would misalign against an engine that did not.
     sim.getIsreHistory() should have size 1
@@ -77,7 +77,7 @@ class TrajectoryHistorySpec extends AnyFlatSpec with Matchers {
     // Compared by index across engines, so a newest-first history would report
     // every step as the first divergence.
     sim.getIsreHistory().map(_.stepNumber) shouldBe List(0, 1, 2)
-    sim.getOrevHistory().map(_.stepNumber) shouldBe List(0, 1, 2)
+    sim.getOsreHistory().map(_.stepNumber) shouldBe List(0, 1, 2)
   }
 
   it should "be appended together, one entry each per step" in {
@@ -87,7 +87,7 @@ class TrajectoryHistorySpec extends AnyFlatSpec with Matchers {
     // The pair is recorded in one action at the end of the step. Unequal
     // lengths would mean an observer can read a step whose trajectories are
     // half-written, which is what makes the history authoritative or not.
-    sim.getIsreHistory().length shouldBe sim.getOrevHistory().length
+    sim.getIsreHistory().length shouldBe sim.getOsreHistory().length
     sim.getIsreHistory() should have size 4
   }
 
@@ -106,14 +106,14 @@ class TrajectoryHistorySpec extends AnyFlatSpec with Matchers {
     sim.reset()
 
     sim.getIsreHistory() shouldBe empty
-    sim.getOrevHistory() shouldBe empty
+    sim.getOsreHistory() shouldBe empty
 
     // The step counter used to survive the reset that cleared the histories,
     // so a reset engine's first entry was stepNumber 2 here and 0 on LSP —
     // and these histories are compared by stepNumber.
     sim.processImmediate(input)
     sim.getIsreHistory().head.stepNumber shouldBe 0
-    sim.getOrevHistory().head.stepNumber shouldBe 0
+    sim.getOsreHistory().head.stepNumber shouldBe 0
   }
 
   "the step" should "carry mergeBatch" in {
