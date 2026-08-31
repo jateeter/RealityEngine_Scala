@@ -55,9 +55,6 @@ object Main extends App {
   val engine       = new RealityEngine(vectorStore)
   val spaceRuntime    = new PerceptualSpaceRuntime(sys.env.getOrElse("VECTOR_DIMENSION", "7680").toIntOption.getOrElse(7680))
 
-  spaceRuntime.setOnStepComplete { (_, spaceVector) =>
-    engine.perceptionEngine.getPerceptualSpace.setPerceptualVector(spaceVector)
-  }
   // Share the engine's coverage registry so /api/perceive transitions
   // route through to /api/metrics without a second instance drifting.
   spaceRuntime.setCoverageRegistry(engine.coverage)

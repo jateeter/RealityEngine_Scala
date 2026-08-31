@@ -1357,8 +1357,17 @@ class Routes(
           val vec      = body.hcursor.downField("vector").as[Vector[Double]].getOrElse(Vector.empty)
           val matchOvr = body.hcursor.get[String]("matchAlgorithmOverride").toOption.map(ComparatorType.fromString)
           val step     = spaceRuntime.processImmediate(vec, matchOvr)
-          // Sync PerceptionEngine's space with post-merge state
-          engine.perceptionEngine.getPerceptualSpace.setPerceptualVector(step.perceptualSpace)
+          // No shadow copy of the space is kept in step with this call. The
+          // engine's own PerceptionEngine holds a second PerceptualSpace, and
+          // this line — plus an onStepComplete hook doing the same thing on
+          // every step — mirrored the post-merge vector into it twice per push.
+          // Nothing in the engine ever read that copy: its only other readers
+          // are tests, and its only other writer is the output merge in
+          // RealityEngine.processInput. It was state maintained in lockstep
+          // with stepping for no observer, and a second place for the space to
+          // be wrong. LSP does adopt the RE's post-merge space, but in its PE,
+          // across the process boundary, from the /api/perceive response —
+          // which is the observable path. C++ has no step mirror at all.
           // Non-blocking push to the SSE broadcast hub so observers never stall the caller
           sseQueue.offer(step)
           complete(step.asJson)

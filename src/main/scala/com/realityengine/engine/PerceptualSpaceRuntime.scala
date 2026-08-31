@@ -25,7 +25,6 @@ class PerceptualSpaceRuntime(dimension: Int = sys.env.getOrElse("VECTOR_DIMENSIO
   private var immediateStepCount: Int                 = 0
   private var isRunning:         Boolean              = false
   private var config:            Option[SimulationConfig] = None
-  private var onStepComplete:    Option[(SimulationStep, Vector[Double]) => Unit] = None
   private var cachedEdges:       List[Json]           = Nil
   // Arbitration records for the most recent step. Observability is not optional:
   // the domain bus exists to make dynamic operation visible, and a resolution
@@ -102,9 +101,6 @@ class PerceptualSpaceRuntime(dimension: Int = sys.env.getOrElse("VECTOR_DIMENSIO
     }
 
   // ── Configuration ─────────────────────────────────────────────────────────
-
-  def setOnStepComplete(cb: (SimulationStep, Vector[Double]) => Unit): Unit =
-    { onStepComplete = Some(cb) }
 
   def setCoverageRegistry(reg: com.realityengine.services.CesCoverageRegistry): Unit =
     { coverageRegistry = Some(reg) }
@@ -187,7 +183,6 @@ class PerceptualSpaceRuntime(dimension: Int = sys.env.getOrElse("VECTOR_DIMENSIO
     val result = runPhases(currentStep)
     currentStep += 1
     history = result :: history
-    onStepComplete.foreach(_(result, perceptualSpace.getPerceptualVector))
     if (isRunning && currentStep >= cfg.inputSequence.length) stop()
     Some(result)
   }
@@ -201,7 +196,6 @@ class PerceptualSpaceRuntime(dimension: Int = sys.env.getOrElse("VECTOR_DIMENSIO
     val result = runPhases(immediateStepCount, matchAlgorithmOverride)
     immediateStepCount += 1
     history = result :: history
-    onStepComplete.foreach(_(result, perceptualSpace.getPerceptualVector))
     result
   }
 
