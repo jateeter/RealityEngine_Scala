@@ -89,7 +89,7 @@ object MachineLoader {
 
     // First pass — create all vectors
     val vectorOrder = scala.collection.mutable.ListBuffer.empty[String]
-    val vectorMap   = scala.collection.mutable.Map.empty[String, RealityVector]
+    val vectorMap   = scala.collection.mutable.Map.empty[String, RealityEvent]
 
     for (vj <- vectorsJson) {
       val vc        = vj.hcursor
@@ -104,7 +104,7 @@ object MachineLoader {
         )
       }
 
-      val vector = new RealityVector(elements, isInitial, vectorId)
+      val vector = new RealityEvent(elements, isInitial, vectorId)
       vector.matchAlgorithm = matchAlgo
       vector.metadata = vc.downField("metadata").as[Map[String, Json]].getOrElse(Map.empty)
 

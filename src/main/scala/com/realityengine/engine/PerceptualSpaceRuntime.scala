@@ -4,7 +4,7 @@ import com.realityengine.models._
 import io.circe.Json
 
 /**
- * PerceptualSpaceRuntime — simulates reality vector flows through interconnected machines.
+ * PerceptualSpaceRuntime — runs Reality Event flows through interconnected machines.
  *
  * Manages a shared PerceptualSpace and orchestrates the 3-phase
  * snapshot → process → merge loop over all registered machines.

@@ -38,11 +38,11 @@ class SemanticAuditSpec extends AnyFlatSpec with Matchers with ScalatestRouteTes
     val machine = new Machine("Audit Machine", "two-step CES", Map.empty,
       ArbiterRule.PASSTHROUGH, None, "machine-audit")
     val seq = new CriticalEventSequence("Escalation", "seq-a")
-    val v1 = new RealityVector(
+    val v1 = new RealityEvent(
       Vector(VectorElement(1.0, Some(ComparatorType.Equals), Some(0.5))),
       isInitial = true, "v1")
     v1.addNextVector("v2")
-    val v2 = new RealityVector(
+    val v2 = new RealityEvent(
       Vector(VectorElement(2.0, Some(ComparatorType.Equals), Some(0.5))),
       isInitial = false, "v2")
     v2.addOutputVector(OutputVector("out-red", Vector(4.0), Map(

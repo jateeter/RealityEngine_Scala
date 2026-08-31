@@ -641,7 +641,7 @@ class PerceptionRoutes(
 
         // Semantic audit (SEMANTIC_AUDIT_CONTRACT.md): one re:PerceptionEvent
         // per active source whose region this push wrote into the universal
-        // reality vector, attributed to the upstream that produced it and
+        // Reality Event, attributed to the upstream that produced it and
         // joined to the corpus ABox when the source names a machine.
         engine.getSources.filter(_.active).foreach { src =>
           val machineName = src match {

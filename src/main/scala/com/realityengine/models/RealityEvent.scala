@@ -4,13 +4,13 @@ import java.util.UUID
 import io.circe.Json
 
 /**
- * RealityVector — core unit of the Reality Engine.
+ * RealityEvent — core unit of the Reality Engine.
  *
  * Mutable state (active, wasJustMatched) mirrors the
  * TypeScript implementation exactly.  Callers are responsible for
  * synchronising access when vectors are shared across threads.
  */
-class RealityVector(
+class RealityEvent(
   val elements:  Vector[VectorElement],
   val isInitial: Boolean,
   val id:        String = UUID.randomUUID().toString
@@ -46,7 +46,7 @@ class RealityVector(
   }
 
   /** predecessorChain + this id — the evidence for a Reality Event this vector
-    * completes. Mirrors `RealityVector::provenance_chain()` in C++. */
+    * completes. Mirrors `RealityEvent::provenance_chain()` in C++. */
   def provenanceChain: List[String] = _predecessorChain :+ id
 
   def setWasJustMatched(): Unit  = { _wasJustMatched = true  }
@@ -146,8 +146,8 @@ class RealityVector(
 
   // ── Clone ────────────────────────────────────────────────────────────────
 
-  override def clone(): RealityVector = {
-    val c = new RealityVector(elements, isInitial, id)
+  override def clone(): RealityEvent = {
+    val c = new RealityEvent(elements, isInitial, id)
     c.matchAlgorithm   = matchAlgorithm
     c.state            = state
     c._nextVectorIds   = _nextVectorIds
@@ -184,8 +184,8 @@ class RealityVector(
   )
 }
 
-object RealityVector {
-  def fromJson(json: Json): RealityVector = {
+object RealityEvent {
+  def fromJson(json: Json): RealityEvent = {
     val c = json.hcursor
     val id        = c.get[String]("id").getOrElse(UUID.randomUUID().toString)
     val isInitial = c.get[Boolean]("isInitial").getOrElse(false)
@@ -197,7 +197,7 @@ object RealityVector {
         threshold      = ec.get[Double]("threshold").toOption
       )
     }
-    val v = new RealityVector(elements, isInitial, id)
+    val v = new RealityEvent(elements, isInitial, id)
     v.matchAlgorithm  = c.get[String]("matchAlgorithm").toOption.map(ComparatorType.fromString).getOrElse(ComparatorType.GTE)
     v.state           = if (c.get[String]("state").toOption.contains("active")) VectorState.Active else VectorState.Inactive
     v._nextVectorIds  = c.downField("nextVectorIds").as[List[String]].getOrElse(Nil)

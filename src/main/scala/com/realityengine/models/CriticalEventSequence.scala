@@ -16,7 +16,7 @@ class CriticalEventSequence(
   val name: String,
   val id:   String = UUID.randomUUID().toString
 ) {
-  private var vectors:        Map[String, RealityVector] = Map.empty
+  private var vectors:        Map[String, RealityEvent] = Map.empty
   private var initialVectorIds: Set[String]              = Set.empty
   private var outputVectorIds:  Set[String]              = Set.empty
   var metadata:      Map[String, Json] = Map.empty
@@ -34,7 +34,7 @@ class CriticalEventSequence(
 
   // ── Mutations ────────────────────────────────────────────────────────────
 
-  def addVector(vector: RealityVector): Unit = {
+  def addVector(vector: RealityEvent): Unit = {
     vectors = vectors + (vector.id -> vector)
     if (vector.isInitial) initialVectorIds = initialVectorIds + vector.id
     if (vector.getOutputVectors.nonEmpty) outputVectorIds = outputVectorIds + vector.id
@@ -42,9 +42,9 @@ class CriticalEventSequence(
 
   // ── Accessors ────────────────────────────────────────────────────────────
 
-  def getVector(vectorId: String): Option[RealityVector] = vectors.get(vectorId)
-  def getAllVectors: List[RealityVector]                  = vectors.values.toList
-  def getInitialVectors: List[RealityVector]             = initialVectorIds.flatMap(vectors.get).toList
+  def getVector(vectorId: String): Option[RealityEvent] = vectors.get(vectorId)
+  def getAllVectors: List[RealityEvent]                  = vectors.values.toList
+  def getInitialVectors: List[RealityEvent]             = initialVectorIds.flatMap(vectors.get).toList
 
   /** Ids of this sequence's Initial Reality Event vectors — at least one, by
     * the CES invariant `validate` enforces.
@@ -54,7 +54,7 @@ class CriticalEventSequence(
     * runtimes emit the same bytes for the same sequence. */
   def getInitialVectorIds: List[String]                  = initialVectorIds.toList.sorted
   def getOutputVectorIds: List[String]                   = outputVectorIds.toList.sorted
-  def getActiveVectors: List[RealityVector]              = vectors.values.filter(_.isActive).toList
+  def getActiveVectors: List[RealityEvent]              = vectors.values.filter(_.isActive).toList
 
   // ── Lifecycle ────────────────────────────────────────────────────────────
 
@@ -129,8 +129,8 @@ class CriticalEventSequence(
     val pendingChains = scala.collection.mutable.LinkedHashMap.empty[String, List[String]]
 
     for (vector <- getActiveVectors) {
-      // Read the chain BEFORE transitioning. RealityVector.transition
-      // deactivates a transitional vector on a match (RealityVector.scala:142),
+      // Read the chain BEFORE transitioning. RealityEvent.transition
+      // deactivates a transitional vector on a match (RealityEvent.scala:142),
       // and clearActive() drops the predecessor chain with the activation — so
       // reading provenanceChain afterwards returns just the vector's own id and
       // the trail is lost one hop at a time. That truncated dlx-017 to
@@ -229,7 +229,7 @@ object CriticalEventSequence {
     val name      = c.get[String]("name").getOrElse("unnamed")
     val seq       = new CriticalEventSequence(name, id)
     val vectorsJs = c.downField("vectors").as[Vector[Json]].getOrElse(Vector.empty)
-    vectorsJs.foreach(vj => seq.addVector(RealityVector.fromJson(vj)))
+    vectorsJs.foreach(vj => seq.addVector(RealityEvent.fromJson(vj)))
     seq.metadata      = c.downField("metadata").as[Map[String, Json]].getOrElse(Map.empty)
     seq.schemaVersion = c.get[String]("schemaVersion").toOption
     seq.deprecatedAt  = c.get[String]("deprecatedAt").toOption
