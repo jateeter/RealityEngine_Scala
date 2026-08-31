@@ -21,7 +21,7 @@ class TrajectoryHistorySpec extends AnyFlatSpec with Matchers {
     val mapping  = PerceptualMapping(RegionMapping(0, 1), RegionMapping(20, 1))
     val machine  = new Machine(id, "trajectory test", Map.empty, ArbiterRule.PASSTHROUGH, Some(mapping), id)
     val sequence = new CriticalEventSequence("Immediate output", s"seq-$id")
-    val start    = new RealityVector(
+    val start    = new RealityEvent(
       Vector(VectorElement(1.0, Some(ComparatorType.GTE), Some(0.5))), isInitial = true, id = s"start-$id")
     start.addOutputVector(OutputVector(s"out-$id", Vector(1.0), Map.empty, System.currentTimeMillis()))
     sequence.addVector(start)

@@ -6,9 +6,9 @@ import io.circe.Json
  * Machine — a collection of CriticalEventSequences that work together.
  *
  * Implements the 3-phase Reality Engine workflow:
- *   Phase 1: Resolve new input reality vector
+ *   Phase 1: Resolve new input Reality Event
  *   Phase 2: Apply input to all active sequences
- *   Phase 3: Resolve output reality vector via arbiter
+ *   Phase 3: Resolve output Reality Event via arbiter
  */
 class Machine(
   val name:             String,
@@ -196,7 +196,7 @@ class Machine(
     * subject is not a snapshot.
     *
     * `CriticalEventSequence.clone()` deep-copies its vectors and
-    * `RealityVector.clone()` carries `state`, so cloning each sequence here is
+    * `RealityEvent.clone()` carries `state`, so cloning each sequence here is
     * enough to capture the active RE list — which is what a back-step restores.
     */
   def deepClone(): Machine = {

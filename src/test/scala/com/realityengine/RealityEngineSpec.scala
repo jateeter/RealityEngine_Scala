@@ -10,11 +10,11 @@ import org.scalatest.matchers.should.Matchers
  */
 class RealityEngineSpec extends AnyFlatSpec with Matchers {
 
-  // ── RealityVector ─────────────────────────────────────────────────────────
+  // ── RealityEvent ─────────────────────────────────────────────────────────
 
-  "RealityVector" should "match with GTE comparator (both HIGH)" in {
+  "RealityEvent" should "match with GTE comparator (both HIGH)" in {
     val elem   = VectorElement(value = 0.9, threshold = Some(0.5))
-    val vector = new RealityVector(Vector(elem), isInitial = true)
+    val vector = new RealityEvent(Vector(elem), isInitial = true)
     vector.matchAlgorithm = ComparatorType.GTE
     val result = vector.match_(Vector(0.8))
     result.matched shouldBe true
@@ -23,7 +23,7 @@ class RealityEngineSpec extends AnyFlatSpec with Matchers {
 
   it should "not match with GTE when input is LOW and value is HIGH" in {
     val elem   = VectorElement(value = 0.9, threshold = Some(0.5))
-    val vector = new RealityVector(Vector(elem), isInitial = true)
+    val vector = new RealityEvent(Vector(elem), isInitial = true)
     vector.matchAlgorithm = ComparatorType.GTE
     val result = vector.match_(Vector(0.2))
     result.matched shouldBe false
@@ -31,14 +31,14 @@ class RealityEngineSpec extends AnyFlatSpec with Matchers {
 
   it should "match with GTE when both are LOW" in {
     val elem   = VectorElement(value = 0.1, threshold = Some(0.5))
-    val vector = new RealityVector(Vector(elem), isInitial = true)
+    val vector = new RealityEvent(Vector(elem), isInitial = true)
     vector.matchAlgorithm = ComparatorType.GTE
     val result = vector.match_(Vector(0.2))
     result.matched shouldBe true
   }
 
   it should "return dimension mismatch error for wrong input length" in {
-    val vector = new RealityVector(Vector(VectorElement(0.5), VectorElement(0.5)), isInitial = true)
+    val vector = new RealityEvent(Vector(VectorElement(0.5), VectorElement(0.5)), isInitial = true)
     val result = vector.match_(Vector(0.5))
     result.matched shouldBe false
     result.metadata.get("error") shouldBe defined
@@ -46,7 +46,7 @@ class RealityEngineSpec extends AnyFlatSpec with Matchers {
 
   it should "match with Equals comparator" in {
     val elem   = VectorElement(value = 0.5, comparatorType = Some(ComparatorType.Equals))
-    val vector = new RealityVector(Vector(elem), isInitial = true)
+    val vector = new RealityEvent(Vector(elem), isInitial = true)
     vector.match_(Vector(0.5)).matched shouldBe true
     vector.match_(Vector(0.6)).matched shouldBe false
   }
@@ -54,7 +54,7 @@ class RealityEngineSpec extends AnyFlatSpec with Matchers {
   it should "match with Exact comparator" in {
     ComparatorType.fromString("exact") shouldBe ComparatorType.Exact
     ComparatorType.serialize(ComparatorType.Exact) shouldBe "exact"
-    val vector = new RealityVector(Vector(VectorElement(value = 0.5)), isInitial = true)
+    val vector = new RealityEvent(Vector(VectorElement(value = 0.5)), isInitial = true)
     vector.matchAlgorithm = ComparatorType.Exact
     vector.match_(Vector(0.5)).matched shouldBe true
     vector.match_(Vector(0.6)).matched shouldBe false
@@ -62,17 +62,17 @@ class RealityEngineSpec extends AnyFlatSpec with Matchers {
 
   it should "match with Threshold comparator within tolerance" in {
     val elem   = VectorElement(value = 0.5, comparatorType = Some(ComparatorType.Threshold), threshold = Some(0.1))
-    val vector = new RealityVector(Vector(elem), isInitial = true)
+    val vector = new RealityEvent(Vector(elem), isInitial = true)
     vector.match_(Vector(0.55)).matched shouldBe true
     vector.match_(Vector(0.65)).matched shouldBe false
   }
 
   it should "serialize and deserialize via toJson/fromJson" in {
     val elem   = VectorElement(value = 0.7, threshold = Some(0.5))
-    val vector = new RealityVector(Vector(elem), isInitial = true)
+    val vector = new RealityEvent(Vector(elem), isInitial = true)
     vector.addNextVector("next-1")
     val json      = vector.toJson
-    val recovered = RealityVector.fromJson(json)
+    val recovered = RealityEvent.fromJson(json)
     recovered.id           shouldBe vector.id
     recovered.isInitial    shouldBe true
     recovered.getNextVectorIds should contain("next-1")
@@ -82,12 +82,12 @@ class RealityEngineSpec extends AnyFlatSpec with Matchers {
 
   "CriticalEventSequence" should "activate successors after transition (deferred)" in {
     val seqElem   = VectorElement(value = 0.9, threshold = Some(0.5))
-    val initial   = new RealityVector(Vector(seqElem), isInitial = true)
-    val successor = new RealityVector(Vector(seqElem), isInitial = false)
+    val initial   = new RealityEvent(Vector(seqElem), isInitial = true)
+    val successor = new RealityEvent(Vector(seqElem), isInitial = false)
     initial.addNextVector(successor.id)
 
     val outputElem = VectorElement(value = 1.0, threshold = Some(0.5))
-    val outVec = new RealityVector(Vector(outputElem), isInitial = false)
+    val outVec = new RealityEvent(Vector(outputElem), isInitial = false)
     outVec.addOutputVector(OutputVector("out-1", Vector(1.0), Map.empty, System.currentTimeMillis()))
     successor.addNextVector(outVec.id)
 
@@ -142,7 +142,7 @@ class RealityEngineSpec extends AnyFlatSpec with Matchers {
 
   "Machine" should "process input and produce output via PASSTHROUGH arbiter" in {
     val elem    = VectorElement(value = 0.9, threshold = Some(0.5))
-    val initial = new RealityVector(Vector(elem), isInitial = true)
+    val initial = new RealityEvent(Vector(elem), isInitial = true)
     initial.matchAlgorithm = ComparatorType.GTE
     initial.addOutputVector(OutputVector("out-1", Vector(1.0), Map.empty, System.currentTimeMillis()))
 
@@ -160,7 +160,7 @@ class RealityEngineSpec extends AnyFlatSpec with Matchers {
 
   it should "clone independently" in {
     val elem    = VectorElement(value = 0.9, threshold = Some(0.5))
-    val initial = new RealityVector(Vector(elem), isInitial = true)
+    val initial = new RealityEvent(Vector(elem), isInitial = true)
     initial.matchAlgorithm = ComparatorType.GTE
 
     val seq = new CriticalEventSequence("s1")
@@ -260,7 +260,7 @@ class RealityEngineSpec extends AnyFlatSpec with Matchers {
   "RealityEngine (no VectorStore)" should "process universal input through machine with perceptual mapping" in {
     // Build a simple machine: monitors offset [0,2) of the universal 10-byte space
     val elem    = VectorElement(value = 0.9, threshold = Some(0.5))
-    val initial = new RealityVector(Vector(elem, elem), isInitial = true)
+    val initial = new RealityEvent(Vector(elem, elem), isInitial = true)
     initial.matchAlgorithm = ComparatorType.GTE
     initial.addOutputVector(OutputVector("out-1", Vector(0.5, 0.5), Map.empty, System.currentTimeMillis()))
 

@@ -80,7 +80,7 @@ class VectorStore(
 
   // ── Vector storage ────────────────────────────────────────────────────────
 
-  def storeVector(vector: RealityVector): Future[Unit] = {
+  def storeVector(vector: RealityEvent): Future[Unit] = {
     val point = Json.obj(
       "id"      -> Json.fromString(vector.id),
       "vector"  -> normalizeVector(vector.getVector).asJson,
@@ -89,7 +89,7 @@ class VectorStore(
     upsertPoints(collectionName, Vector(point))
   }
 
-  def storeVectors(vectors: List[RealityVector]): Future[Unit] = {
+  def storeVectors(vectors: List[RealityEvent]): Future[Unit] = {
     val points = vectors.map { v =>
       Json.obj(
         "id"      -> Json.fromString(v.id),
@@ -100,7 +100,7 @@ class VectorStore(
     upsertPoints(collectionName, points.toVector)
   }
 
-  def getVector(id: String): Future[Option[RealityVector]] =
+  def getVector(id: String): Future[Option[RealityEvent]] =
     basicRequest
       .post(uri"$qdrantUrl/collections/$collectionName/points")
       .contentType("application/json")
@@ -112,14 +112,14 @@ class VectorStore(
         result.hcursor.downField("result").as[Vector[Json]].toOption
           .flatMap(_.headOption)
           .flatMap(_.hcursor.downField("payload").as[Json].toOption)
-          .map(RealityVector.fromJson)
+          .map(RealityEvent.fromJson)
       }
 
   def searchSimilar(
     queryVector: Vector[Double],
     limit:       Int = 10,
     threshold:   Option[Double] = None
-  ): Future[List[(RealityVector, Double)]] = {
+  ): Future[List[(RealityEvent, Double)]] = {
     val bodyFields = scala.collection.mutable.Map(
       "vector"       -> normalizeVector(queryVector).asJson,
       "limit"        -> Json.fromInt(limit),
@@ -139,7 +139,7 @@ class VectorStore(
           for {
             payload <- pt.hcursor.downField("payload").as[Json].toOption
             score   <- pt.hcursor.get[Double]("score").toOption
-          } yield (RealityVector.fromJson(payload), score)
+          } yield (RealityEvent.fromJson(payload), score)
         }
       }
   }

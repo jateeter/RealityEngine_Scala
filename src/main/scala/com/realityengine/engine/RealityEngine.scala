@@ -23,7 +23,7 @@ case class MachineCheckpoint(
 )
 
 /**
- * RealityEngine — core processing engine for Reality Vectors.
+ * RealityEngine — core processing engine for Reality Events.
  *
  * Responsibilities:
  *  - Manage Machines and CriticalEventSequences
@@ -309,7 +309,7 @@ class RealityEngine(
 
   // ── Sequences active vectors ──────────────────────────────────────────────
 
-  def getAllActiveVectors: Map[String, List[RealityVector]] =
+  def getAllActiveVectors: Map[String, List[RealityEvent]] =
     sequences.iterator
       .map { case (seqId, seq) => seqId -> seq.getActiveVectors }
       .filter { case (_, active) => active.nonEmpty }
@@ -338,7 +338,7 @@ class RealityEngine(
       optSeq
     }
 
-  def searchVectors(queryVector: Vector[Double], limit: Int = 10, threshold: Option[Double] = None): Future[List[(RealityVector, Double)]] =
+  def searchVectors(queryVector: Vector[Double], limit: Int = 10, threshold: Option[Double] = None): Future[List[(RealityEvent, Double)]] =
     vectorStore.searchSimilar(queryVector, limit, threshold)
 
   // ── Stats ─────────────────────────────────────────────────────────────────

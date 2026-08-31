@@ -34,7 +34,7 @@ REALITY_ENGINE_URL="${REALITY_ENGINE_URL:-http://localhost:${REALITY_ENGINE_PORT
 # shared by every instance, and one that survives a corpus change. A run that
 # loaded the full corpus left 1,361 sources behind; every 12-machine deployment
 # after it restored all of them and pushed 1,180 active sources into the shared
-# reality vector, while C++ and LSP pushed none (RealityEngine_Scala#43).
+# Reality Event, while C++ and LSP pushed none (RealityEngine_Scala#43).
 #
 # Scoping the store per instance means a corpus change cannot leak across
 # instances, and PRUNE_CORPUS gives the operator a way to reconcile a store that

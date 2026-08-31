@@ -75,7 +75,7 @@ class Routes(
       item.asNumber.map(n => stableNumber(n.toDouble)).getOrElse(item)
     }: _*)
 
-  private def activeVectorJson(vector: RealityVector): Json = {
+  private def activeVectorJson(vector: RealityEvent): Json = {
     val src = vector.toJson.hcursor
     val elements = src.downField("elements").as[Vector[Json]].getOrElse(Vector.empty).map { element =>
       val c = element.hcursor
@@ -487,10 +487,10 @@ class Routes(
     emitMeta("ces_sequences_total", "Total CES sequences across all machines.",   "gauge")
     emit   ("ces_sequences_total",  totalSeqs.toDouble)
 
-    emitMeta("ces_vectors_total",   "Total reality vectors across all sequences.","gauge")
+    emitMeta("ces_vectors_total",   "Total Reality Events across all sequences.","gauge")
     emit   ("ces_vectors_total",    totalVecs.toDouble)
 
-    emitMeta("ces_active_vectors_total", "Currently-active reality vectors.",     "gauge")
+    emitMeta("ces_active_vectors_total", "Currently-active Reality Events.",     "gauge")
     emit   ("ces_active_vectors_total",  totalActive.toDouble)
 
     emitMeta("ces_history_size", "Length of the transition history.", "gauge")
@@ -692,7 +692,7 @@ class Routes(
                   threshold      = ec.get[Double]("threshold").toOption
                 )
               }
-              val vector = new RealityVector(elems, isInitial)
+              val vector = new RealityEvent(elems, isInitial)
               complete(Json.obj("success" -> Json.fromBoolean(true), "vector" -> vector.toJson))
             } } },
             path(Segment) { id =>
@@ -729,7 +729,7 @@ class Routes(
                         threshold      = ej.hcursor.get[Double]("threshold").toOption
                       )
                     }
-                    val vec = new RealityVector(elems, vc.get[Boolean]("isInitial").getOrElse(false),
+                    val vec = new RealityEvent(elems, vc.get[Boolean]("isInitial").getOrElse(false),
                       vc.get[String]("id").getOrElse(java.util.UUID.randomUUID().toString))
                     vc.downField("nextVectorIds").as[Vector[String]].getOrElse(Vector.empty).foreach(vec.addNextVector)
                     vc.downField("outputVectors").as[Vector[Json]].getOrElse(Vector.empty).foreach { oj =>
@@ -771,7 +771,7 @@ class Routes(
                         threshold      = ej.hcursor.get[Double]("threshold").toOption
                       )
                     }
-                    val vec = new RealityVector(elems, body.hcursor.get[Boolean]("isInitial").getOrElse(false))
+                    val vec = new RealityEvent(elems, body.hcursor.get[Boolean]("isInitial").getOrElse(false))
                     seq.addVector(vec)
                     complete(Json.obj("success" -> Json.fromBoolean(true), "vector" -> vec.toJson))
                 }

@@ -48,7 +48,7 @@ class FoldPlacementSpec extends AnyFlatSpec with Matchers {
     m.outputMergeTransformation = transformation
     asserts.foreach { case (seqId, out) =>
       val seq = new CriticalEventSequence(seqId, seqId)
-      val v   = new RealityVector(
+      val v   = new RealityEvent(
         Vector(VectorElement(1.0, Some(ComparatorType.GTE), Some(0.5))), isInitial = true, id = s"start-$seqId")
       v.addOutputVector(OutputVector(s"out-$seqId", out, Map.empty, System.currentTimeMillis()))
       seq.addVector(v)
@@ -408,7 +408,7 @@ class FoldPlacementSpec extends AnyFlatSpec with Matchers {
     // deduplicated sequenceIds would silently change what the metric means.
     val m = machine("m-dep", Seq("s-multi" -> Vector(1.0, 0.0)))
     // A second asserted output on the same sequence.
-    val extra = new RealityVector(
+    val extra = new RealityEvent(
       Vector(VectorElement(1.0, Some(ComparatorType.GTE), Some(0.5))), isInitial = true, id = "start-extra")
     extra.addOutputVector(OutputVector("out-extra", Vector(0.0, 1.0), Map.empty, System.currentTimeMillis()))
     m.getSequence("s-multi").get.addVector(extra)

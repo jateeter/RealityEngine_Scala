@@ -219,7 +219,7 @@ object PerceptionMain extends App {
             // MachineCorpus.testSourceFor.  This used to build sources inline,
             // one per input sequence and unconditionally active, which meant
             // every corpus scenario played itself forward into the shared
-            // reality vector on every push and machines reached outcomes the
+            // Reality Event on every push and machines reached outcomes the
             // input never asked for (#36).
             MachineCorpus.testSourceFor(m, activateOnLoad) match {
               case Some(src) =>
@@ -241,7 +241,7 @@ object PerceptionMain extends App {
         // never reconciled — so a source whose machine left the corpus stays
         // forever. A full-corpus run left 1,361 sources on disk, and every
         // 12-machine deployment afterwards restored all of them and pushed
-        // 1,180 active sources into the shared reality vector on every push,
+        // 1,180 active sources into the shared Reality Event on every push,
         // while C++ and LSP pushed none.
         //
         // That is not a small drift. It put this runtime one CES transition
@@ -272,7 +272,7 @@ object PerceptionMain extends App {
         // on their own startup — localAIStack's register_sensors() posts them
         // every time the bridge comes up — so a provider that is running gets
         // its sensors back, and one that is not should not be contributing to
-        // the reality vector in the first place.
+        // the Reality Event in the first place.
         val prunedStray =
           if (pruneCorpus && strays.nonEmpty) {
             val ids = engine.getSources.collect {
