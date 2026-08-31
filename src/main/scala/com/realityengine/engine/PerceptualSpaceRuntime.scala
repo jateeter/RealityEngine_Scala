@@ -4,7 +4,7 @@ import com.realityengine.models._
 import io.circe.Json
 
 /**
- * PerceptualSpaceSimulator — simulates reality vector flows through interconnected machines.
+ * PerceptualSpaceRuntime — simulates reality vector flows through interconnected machines.
  *
  * Manages a shared PerceptualSpace and orchestrates the 3-phase
  * snapshot → process → merge loop over all registered machines.
@@ -13,7 +13,7 @@ import io.circe.Json
 private case class ComposeSubscription(subscriberMachineId: String, bitOffset: Int,
                                        producerMachineId: String, producerSequenceId: String)
 
-class PerceptualSpaceSimulator(dimension: Int = sys.env.getOrElse("VECTOR_DIMENSION", "7680").toIntOption.getOrElse(7680)) {
+class PerceptualSpaceRuntime(dimension: Int = sys.env.getOrElse("VECTOR_DIMENSION", "7680").toIntOption.getOrElse(7680)) {
   private val perceptualSpace    = new PerceptualSpace(dimension)
   private var machines:          Map[String, Machine] = Map.empty
   private var history:           List[SimulationStep] = Nil
@@ -25,7 +25,6 @@ class PerceptualSpaceSimulator(dimension: Int = sys.env.getOrElse("VECTOR_DIMENS
   private var immediateStepCount: Int                 = 0
   private var isRunning:         Boolean              = false
   private var config:            Option[SimulationConfig] = None
-  private var onStepComplete:    Option[(SimulationStep, Vector[Double]) => Unit] = None
   private var cachedEdges:       List[Json]           = Nil
   // Arbitration records for the most recent step. Observability is not optional:
   // the domain bus exists to make dynamic operation visible, and a resolution
@@ -36,7 +35,7 @@ class PerceptualSpaceSimulator(dimension: Int = sys.env.getOrElse("VECTOR_DIMENS
   // bump the same counters that /api/metrics emits.
   private var coverageRegistry:  Option[com.realityengine.services.CesCoverageRegistry] = None
 
-  // Compose / meta-CES event bus — mirrors C++ PerceptualSpaceSimulator.
+  // Compose / meta-CES event bus — mirrors C++ PerceptualSpaceRuntime.
   // Keyed by "producerMachineId|producerSequenceId" → list of subscribers.
   private var eventBusSubscriptions: Map[String, List[ComposeSubscription]] = Map.empty
   private var latchedEventBits:      Set[Int]                               = Set.empty
@@ -102,9 +101,6 @@ class PerceptualSpaceSimulator(dimension: Int = sys.env.getOrElse("VECTOR_DIMENS
     }
 
   // ── Configuration ─────────────────────────────────────────────────────────
-
-  def setOnStepComplete(cb: (SimulationStep, Vector[Double]) => Unit): Unit =
-    { onStepComplete = Some(cb) }
 
   def setCoverageRegistry(reg: com.realityengine.services.CesCoverageRegistry): Unit =
     { coverageRegistry = Some(reg) }
@@ -187,7 +183,6 @@ class PerceptualSpaceSimulator(dimension: Int = sys.env.getOrElse("VECTOR_DIMENS
     val result = runPhases(currentStep)
     currentStep += 1
     history = result :: history
-    onStepComplete.foreach(_(result, perceptualSpace.getPerceptualVector))
     if (isRunning && currentStep >= cfg.inputSequence.length) stop()
     Some(result)
   }
@@ -201,7 +196,6 @@ class PerceptualSpaceSimulator(dimension: Int = sys.env.getOrElse("VECTOR_DIMENS
     val result = runPhases(immediateStepCount, matchAlgorithmOverride)
     immediateStepCount += 1
     history = result :: history
-    onStepComplete.foreach(_(result, perceptualSpace.getPerceptualVector))
     result
   }
 

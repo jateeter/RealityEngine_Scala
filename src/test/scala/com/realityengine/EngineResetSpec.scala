@@ -29,28 +29,28 @@ class EngineResetSpec extends AnyFlatSpec with Matchers with ScalatestRouteTest 
   private def fixture = {
     val vectorStore = new VectorStore()
     val engine      = new RealityEngine(vectorStore)
-    val simulator   = new PerceptualSpaceSimulator()
+    val spaceRuntime   = new PerceptualSpaceRuntime()
     val auditCfg    = AuditConfig(enabled = false, level = 0, service = "reset-test")
-    (engine, simulator, new Routes(engine, simulator, auditCfg).routes)
+    (engine, spaceRuntime, new Routes(engine, spaceRuntime, auditCfg).routes)
   }
 
   private def nonZero(space: PerceptualSpace): Int =
     space.getPerceptualVector.count(_ != 0.0)
 
-  "POST /api/engine/reset" should "zero the simulator's perceptual space" in {
-    val (_, simulator, routes) = fixture
-    simulator.getPerceptualSpace.updateRegion(10, Vector(1.0, 1.0, 1.0))
-    nonZero(simulator.getPerceptualSpace) should be > 0
+  "POST /api/engine/reset" should "zero the spaceRuntime's perceptual space" in {
+    val (_, spaceRuntime, routes) = fixture
+    spaceRuntime.getPerceptualSpace.updateRegion(10, Vector(1.0, 1.0, 1.0))
+    nonZero(spaceRuntime.getPerceptualSpace) should be > 0
 
     Post("/api/engine/reset") ~> routes ~> check {
       status shouldBe StatusCodes.OK
     }
-    nonZero(simulator.getPerceptualSpace) shouldBe 0
+    nonZero(spaceRuntime.getPerceptualSpace) shouldBe 0
   }
 
   it should "zero the perception engine's perceptual space" in {
     // C++ clears this one via PerceptionMapper::reset(); it is a separate space
-    // from the simulator's, and nothing was clearing it here.
+    // from the spaceRuntime's, and nothing was clearing it here.
     val (engine, _, routes) = fixture
     engine.perceptionEngine.getPerceptualSpace.updateRegion(20, Vector(1.0, 1.0))
     nonZero(engine.perceptionEngine.getPerceptualSpace) should be > 0
@@ -62,25 +62,25 @@ class EngineResetSpec extends AnyFlatSpec with Matchers with ScalatestRouteTest 
   }
 
   it should "clear simulation history and the step counter" in {
-    val (_, simulator, routes) = fixture
-    simulator.getPerceptualSpace.updateRegion(0, Vector(1.0))
+    val (_, spaceRuntime, routes) = fixture
+    spaceRuntime.getPerceptualSpace.updateRegion(0, Vector(1.0))
 
     Post("/api/engine/reset") ~> routes ~> check {
       status shouldBe StatusCodes.OK
     }
-    simulator.getHistory shouldBe empty
-    simulator.getCurrentStep shouldBe 0
+    spaceRuntime.getHistory shouldBe empty
+    spaceRuntime.getCurrentStep shouldBe 0
   }
 
   it should "be idempotent" in {
-    val (engine, simulator, routes) = fixture
-    simulator.getPerceptualSpace.updateRegion(5, Vector(1.0, 1.0))
+    val (engine, spaceRuntime, routes) = fixture
+    spaceRuntime.getPerceptualSpace.updateRegion(5, Vector(1.0, 1.0))
 
     for (_ <- 1 to 3) Post("/api/engine/reset") ~> routes ~> check {
       status shouldBe StatusCodes.OK
     }
-    nonZero(simulator.getPerceptualSpace) shouldBe 0
+    nonZero(spaceRuntime.getPerceptualSpace) shouldBe 0
     nonZero(engine.perceptionEngine.getPerceptualSpace) shouldBe 0
-    simulator.getHistory shouldBe empty
+    spaceRuntime.getHistory shouldBe empty
   }
 }

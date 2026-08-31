@@ -1,7 +1,7 @@
 package com.realityengine
 
 import akka.actor.ActorSystem
-import com.realityengine.engine.{PerceptualSpaceSimulator, RealityEngine}
+import com.realityengine.engine.{PerceptualSpaceRuntime, RealityEngine}
 import com.realityengine.services.{MachineLoader, VectorStore}
 import org.scalatest.BeforeAndAfterAll
 import org.scalatest.flatspec.AnyFlatSpec
@@ -61,7 +61,7 @@ class MachineCorpusRegistrySpec extends AnyFlatSpec with Matchers with BeforeAnd
     files should not be empty
 
     val engine = new RealityEngine(new VectorStore(vectorDimension = 7680), universalDimension = 7680)
-    val simulator = new PerceptualSpaceSimulator(7680)
+    val spaceRuntime = new PerceptualSpaceRuntime(7680)
 
     val loaded = Console.withOut(silentOut) {
       files.map { file =>
@@ -72,7 +72,7 @@ class MachineCorpusRegistrySpec extends AnyFlatSpec with Matchers with BeforeAnd
         Try {
           val machine = MachineLoader.loadFromJson(text, Some(machineIdFromFile(file)))
           engine.addMachine(machine)
-          machine.perceptualMapping.foreach(_ => simulator.addMachine(machine))
+          machine.perceptualMapping.foreach(_ => spaceRuntime.addMachine(machine))
           machine
         } match {
           case Success(machine) => Right(file.getName -> machine)
@@ -95,6 +95,6 @@ class MachineCorpusRegistrySpec extends AnyFlatSpec with Matchers with BeforeAnd
       "machine-agx055-yuma-facility-ai-synthesis-bridge"
     )
     engine.getAllMachines.size shouldBe files.size
-    simulator.getMachines.size shouldBe machines.count(_.perceptualMapping.isDefined)
+    spaceRuntime.getMachines.size shouldBe machines.count(_.perceptualMapping.isDefined)
   }
 }

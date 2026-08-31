@@ -14,9 +14,9 @@ class CorsSpec extends AnyFlatSpec with Matchers with ScalatestRouteTest {
   // ScalatestRouteTest provides implicit system (ActorSystem) and executor (ExecutionContext).
   private val vectorStore = new VectorStore()
   private val engine      = new RealityEngine(vectorStore)
-  private val simulator   = new PerceptualSpaceSimulator()
+  private val spaceRuntime   = new PerceptualSpaceRuntime()
   private val auditCfg    = AuditConfig(enabled = false, level = 0, service = "cors-test")
-  private val testRoutes  = new Routes(engine, simulator, auditCfg).routes
+  private val testRoutes  = new Routes(engine, spaceRuntime, auditCfg).routes
 
   "OPTIONS preflight" should "return 204 with CORS headers" in {
     Options("/api/engine/stats") ~> testRoutes ~> check {

@@ -29,8 +29,8 @@ class TrajectoryHistorySpec extends AnyFlatSpec with Matchers {
     machine
   }
 
-  private def fixture: PerceptualSpaceSimulator = {
-    val sim = new PerceptualSpaceSimulator(32)
+  private def fixture: PerceptualSpaceRuntime = {
+    val sim = new PerceptualSpaceRuntime(32)
     sim.addMachine(outputMachine("machine-traj"))
     sim
   }

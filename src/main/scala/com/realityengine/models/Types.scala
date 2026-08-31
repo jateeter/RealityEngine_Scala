@@ -98,7 +98,7 @@ case class SequenceResult(
   // Deliberately not serialized. JsonProtocol emits matchedVectors,
   // activatedVectors and assertedOutputs, and C++ and LSP emit the same three;
   // adding a fourth would be the payload divergence class of #176/#197. This
-  // exists so the simulator can build MergeOperation.provenance, which IS on
+  // exists so the spaceRuntime can build MergeOperation.provenance, which IS on
   // the wire and which all three runtimes carry.
   provenance:       List[String] = Nil
 )
