@@ -237,7 +237,7 @@ class PerceptionRoutes(
 
   private val ollamaBaseUrl      = sys.env.getOrElse("OLLAMA_BASE_URL",   "http://localhost:11434")
   // Canonical default shared by every runtime; override per engine with
-  // OLLAMA_MODEL. See RealityEngine_CI/docs/INTEGRATION_ARCHITECTURE.md.
+  // OLLAMA_MODEL. See RealityEngine_CI/docs/OLLAMA_INTEGRATION.md.
   private val ollamaModel        = sys.env.getOrElse("OLLAMA_MODEL",      "llama3.1:8b")
   private val ollamaCompletionSourceMappingId = sys.env.getOrElse("OLLAMA_COMPLETION_SOURCE_MAPPING_ID", "agent-completion-risk")
   private val openAiBaseUrl      = sys.env.getOrElse("OPENAI_BASE_URL",   "https://api.openai.com/v1")
