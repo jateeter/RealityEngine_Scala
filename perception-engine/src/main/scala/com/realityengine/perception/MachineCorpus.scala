@@ -174,7 +174,7 @@ object MachineCorpus {
     val segments = inputSeqs.flatMap { seq =>
       val sc      = seq.hcursor
       val seqName = sc.get[String]("name").getOrElse("Test sequence")
-      val vectors = sc.downField("vectors").as[Vector[Vector[Double]]].getOrElse(Vector.empty)
+      val vectors = sc.downField("events").as[Vector[Vector[Double]]].orElse(sc.downField("vectors").as[Vector[Vector[Double]]]).getOrElse(Vector.empty)
       // An explicit corpus opt-in is still honoured. It is no longer the only
       // way a source becomes active: see activateOnLoad below.
       val optedIn = sc.get[Boolean]("active").getOrElse(false)
