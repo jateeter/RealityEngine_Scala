@@ -51,7 +51,20 @@ class RealityEngine(
   // TrieMap: lock-free reads via a RDCSS snapshot; writes use CAS.
   // Machine registration is rare; reads during processing dominate → ideal fit.
 
-  private val sequences:    TrieMap[String, CriticalEventSequence]                 = TrieMap.empty
+  // Sequences created directly over the API (`POST /api/sequences`), and only
+  // those. Machines are **not** mirrored in here.
+  //
+  // They used to be: `addMachine` pushed every machine's sequences into this
+  // map, making it a shadow copy of machine state keyed by sequence id. Ids are
+  // unique within a machine but deliberately reused across machines — the
+  // corpus contract says so, and `rs-set-sequence` appears in three flip-flops
+  // — so `put(seq.id, seq)` silently collapsed 30 entries into 10 and the
+  // engine disagreed with its own machine list by 20 sequences and 28 events
+  // (RealityEngine_Scala#92).
+  //
+  // Machine state has exactly one home: `machines`. Anything that wants to
+  // count, walk or reset a machine's sequences reads it from there.
+  private val apiSequences: TrieMap[String, CriticalEventSequence]                 = TrieMap.empty
   private val machines:     TrieMap[String, Machine]                                = TrieMap.empty
   private val machineActors: TrieMap[String, ActorRef]                              = TrieMap.empty
   private val checkpoints:  TrieMap[String, TrieMap[String, MachineCheckpoint]]    = TrieMap.empty
@@ -82,13 +95,13 @@ class RealityEngine(
   def addSequence(seq: CriticalEventSequence): Unit = {
     val (valid, errors) = seq.validate()
     require(valid, s"Invalid sequence: ${errors.mkString(", ")}")
-    sequences.put(seq.id, seq)
+    apiSequences.put(seq.id, seq)
     println(s"Added sequence: ${seq.name} (${seq.id})")
   }
 
-  def removeSequence(sequenceId: String): Unit = sequences.remove(sequenceId)
-  def getSequence(id: String): Option[CriticalEventSequence] = sequences.get(id)
-  def getAllSequences: List[CriticalEventSequence] = sequences.values.toList
+  def removeSequence(sequenceId: String): Unit = apiSequences.remove(sequenceId)
+  def getSequence(id: String): Option[CriticalEventSequence] = apiSequences.get(id)
+  def getAllSequences: List[CriticalEventSequence] = apiSequences.values.toList
 
   // ── Machine management ────────────────────────────────────────────────────
 
@@ -96,7 +109,6 @@ class RealityEngine(
     val actor = system.actorOf(MachineActor.props(machine))
     machines.put(machine.id, machine)
     machineActors.put(machine.id, actor)
-    machine.getAllSequences.foreach(addSequence)
     println(s"Added machine: ${machine.name} (${machine.id}) with ${machine.getSequenceCount} sequences")
   }
 
@@ -104,11 +116,20 @@ class RealityEngine(
     machines.remove(machineId) match {
       case None => false
       case Some(machine) =>
-        machine.getSequenceIds.foreach(sequences.remove)
         machineActors.remove(machineId).foreach(system.stop)
         inputCache.remove(machineId)
         true
     }
+
+  /** Every machine's sequences, paired with the id each machine knows it by.
+    *
+    * A `List`, not a `Map`: sequence ids are unique within a machine and
+    * deliberately reused across machines, so keying by id here would collapse
+    * them again — which is the whole of #92. Canonical machine order, then each
+    * machine's own `getAllSequences` order, so the walk is deterministic.
+    */
+  private def machineSequences: List[(String, CriticalEventSequence)] =
+    getAllMachines.flatMap(m => m.getAllSequences.map(s => s.id -> s))
 
   def getMachine(id: String): Option[Machine]  = machines.get(id)
   /** Canonical order — see Machine.canonicalOrder. */
@@ -289,8 +310,12 @@ class RealityEngine(
 
   // ── Legacy sequence-level processing ─────────────────────────────────────
 
+  // Machines first, then anything created over the API. This used to walk a
+  // map that mirrored machine sequences keyed by sequence id, so 20 of them —
+  // every id shared between machines — were silently skipped (#92).
   def processInputLegacy(inputVector: Vector[Double]): TransitionResult = {
-    val outputs = sequences.flatMap { case (seqId, seq) =>
+    val walked = machineSequences ++ apiSequences.toList.map { case (id, s) => (id, s) }
+    val outputs = walked.flatMap { case (seqId, seq) =>
       val sr = seq.transition(inputVector)
       sr.assertedOutputs.map(o =>
         o.copy(metadata = o.metadata ++
@@ -310,27 +335,35 @@ class RealityEngine(
   // ── Sequences active vectors ──────────────────────────────────────────────
 
   def getAllActiveVectors: Map[String, List[RealityEvent]] =
-    sequences.iterator
+    (machineSequences ++ apiSequences.toList)
       .map { case (seqId, seq) => seqId -> seq.getActiveVectors }
       .filter { case (_, active) => active.nonEmpty }
       .toMap
 
   def resetAllSequences(): Unit = {
     machineActors.values.foreach(_ ! MachineActor.Reset)
-    sequences.values.foreach(_.reset())
+    apiSequences.values.foreach(_.reset())
     inputCache.clear()
     println("All sequences reset to initial state")
   }
 
   def resetSequence(sequenceId: String): Boolean =
-    sequences.get(sequenceId).exists { seq => seq.reset(); true }
+    apiSequences.get(sequenceId).exists { seq => seq.reset(); true }
 
   // ── VectorStore bridge ────────────────────────────────────────────────────
-
-  def persistAllSequences()(implicit ec: ExecutionContext): Future[Unit] =
-    Future.sequence(sequences.values.map(vectorStore.storeSequence).toList).map { _ =>
-      println(s"Persisted ${sequences.size} sequences to vector store")
-    }
+  //
+  // `persistAllSequences` used to live here, backing `POST /api/sequences/persist`.
+  // It wrote whatever the engine-level mirror happened to hold — which was a
+  // deduplicated copy of machine state, so it persisted 5108 of 5128 sequences
+  // and reported success (#92).
+  //
+  // Removed rather than repaired. Bulk-populating Qdrant from a registry that
+  // shadows machine state is the shortcut that produced the defect: the mirror
+  // existed to make persistence and counting convenient, and being a mirror is
+  // exactly what made it wrong. The store itself stays — `storeVector`,
+  // `storeSequence`, `getSequence` and `searchSimilar` are all still here, and
+  // the collection is created at boot — so repopulating it later is a matter of
+  // choosing a writer that reads `machines` directly, not of restoring this.
 
   def loadSequence(sequenceId: String)(implicit ec: ExecutionContext): Future[Option[CriticalEventSequence]] =
     vectorStore.getSequence(sequenceId).map { optSeq =>
@@ -343,11 +376,16 @@ class RealityEngine(
 
   // ── Stats ─────────────────────────────────────────────────────────────────
 
+  // Derived from `machines`, which is the single source of truth for machine
+  // state. C++ (`reality.cpp`, `for machines / for m.all_sequences()`) and LSP
+  // compute the same totals the same way; this used to report the size of an
+  // id-keyed mirror and so under-reported by 20 sequences and 28 events (#92).
   def getStats: Json = {
     import io.circe.syntax._
-    val totalVectors  = sequences.values.map(_.getAllVectors.length).sum
-    val totalActive   = sequences.values.map(_.getActiveVectors.length).sum
-    val seqStats = sequences.values.toList.map { seq =>
+    val allSeqs       = machineSequences.map(_._2) ++ apiSequences.values.toList
+    val totalVectors  = allSeqs.map(_.getAllVectors.length).sum
+    val totalActive   = allSeqs.map(_.getActiveVectors.length).sum
+    val seqStats = allSeqs.map { seq =>
       Json.obj(
         "id"    -> Json.fromString(seq.id),
         "name"  -> Json.fromString(seq.name),
@@ -355,7 +393,7 @@ class RealityEngine(
       )
     }
     Json.obj(
-      "totalSequences"     -> Json.fromInt(sequences.size),
+      "totalSequences"     -> Json.fromInt(allSeqs.size),
       "totalEvents"       -> Json.fromInt(totalVectors),
       "totalActiveEvents"  -> Json.fromInt(totalActive),
       "sequenceStats"      -> Json.arr(seqStats: _*)

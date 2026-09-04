@@ -710,10 +710,19 @@ class Routes(
         // Sequences
         pathPrefix("sequences") {
           concat(
-            path("persist") { post { onComplete(engine.persistAllSequences()) {
-              case Success(_) => complete(Json.obj("success" -> Json.fromBoolean(true)))
-              case Failure(e) => complete(StatusCodes.InternalServerError -> Json.obj("error" -> Json.fromString(e.getMessage)))
-            } } },
+            // Declared in SURFACE_SPEC and implemented by all three runtimes, so
+            // the route stays. C++ (`reality_engine_server.cpp:101`) and LSP
+            // (`reality-service.lisp:1776`) both answer `{"success": true}`
+            // without writing anything; Scala was the only one doing real work
+            // here, and it did it from the engine-level sequence mirror — which
+            // held a deduplicated copy of machine state and so persisted 5108 of
+            // 5128 sequences while reporting success (#92).
+            //
+            // Now a no-op, matching the other two. Repopulating Qdrant is still
+            // open — `VectorStore` is untouched and the collection is created at
+            // boot — but it wants a writer that reads `machines` directly rather
+            // than a mirror kept in step by hand.
+            path("persist") { post { complete(Json.obj("success" -> Json.fromBoolean(true))) } },
             pathEnd {
               concat(
                 get  { complete(Json.obj("sequences" -> Json.arr(engine.getAllSequences.map(_.toJson): _*))) },
