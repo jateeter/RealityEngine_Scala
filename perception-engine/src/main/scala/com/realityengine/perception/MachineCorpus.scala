@@ -39,8 +39,7 @@ final class MachineCorpus(machinesById: Map[String, Json]) {
       // #220 layer 2: the RE supplying this corpus may be any runtime at any
       // point in the rename, so accept both spellings. Drop the legacy arm
       // when every runtime has migrated.
-      .flatMap(j => j.hcursor.get[Vector[String]]("initialEventIds").toOption
-        .orElse(j.hcursor.get[Vector[String]]("initialVectorIds").toOption))
+      .flatMap(_.hcursor.get[Vector[String]]("initialEventIds").toOption)
       .getOrElse(Vector.empty)
 
   /** Resolve the governance contract for a fired sequence, or `None` when the

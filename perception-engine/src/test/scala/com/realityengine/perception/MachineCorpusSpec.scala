@@ -191,11 +191,11 @@ class MachineCorpusSpec extends AnyWordSpec with Matchers {
         "name": "Document Signing Workflow Monitor",
         "sequences": [
           { "id": "signing-complete",            "name": "Signing Complete",
-            "initialVectorIds": ["ds-complete"] },
+            "initialEventIds": ["ds-complete"] },
           { "id": "signing-blocked-escalation",  "name": "Signing Blocked",
-            "initialVectorIds": ["ds-active"] },
+            "initialEventIds": ["ds-active"] },
           { "id": "signing-multi",               "name": "Multiple initials",
-            "initialVectorIds": ["ds-a", "ds-b"] }
+            "initialEventIds": ["ds-a", "ds-b"] }
         ]
       }
       """
