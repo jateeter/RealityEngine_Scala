@@ -66,6 +66,26 @@ class Routes(
     sys.env.getOrElse("VECTOR_DIMENSION", "7680").toIntOption.getOrElse(7680))
   private val sampler = new AtomicReference[Option[RealitySampler]](None)
 
+  /** One observation, two spellings, during the Reality Event rename.
+    *
+    * Request bodies name the same value `inputEvent` or `inputVector`
+    * depending on how old the caller is, and an engine accepting only one
+    * breaks every caller still sending the other (RealityEngine_CI#220).
+    *
+    * The canonical name is tried first, so a client emitting both during its
+    * own transition is read as the new one. A field that is absent, null, or
+    * not decodable as a vector falls through to the legacy spelling rather
+    * than yielding empty — an empty vector here is a silently wrong answer
+    * rather than an error.
+    *
+    * Deleted when the rename completes, along with the old spelling at every
+    * call site.
+    */
+  private def eventVector(body: Json, canonical: String, legacy: String): Vector[Double] =
+    body.hcursor.downField(canonical).as[Vector[Double]].toOption
+      .orElse(body.hcursor.downField(legacy).as[Vector[Double]].toOption)
+      .getOrElse(Vector.empty)
+
   private def stableNumber(value: Double): Json =
     if (value.isWhole && value >= Int.MinValue && value <= Int.MaxValue) Json.fromInt(value.toInt)
     else Json.fromDoubleOrNull(value)
@@ -1110,7 +1130,7 @@ class Routes(
               )
             },
             path(Segment / "process") { id => post { entity(as[Json]) { body =>
-              val vec = body.hcursor.downField("inputVector").as[Vector[Double]].getOrElse(Vector.empty)
+              val vec = eventVector(body, "inputEvent", "inputVector")
               onComplete(engine.processMachineInput(id, vec)) {
                 case Success(r) => complete(r.asJson)
                 case Failure(e: NoSuchElementException)  => complete(StatusCodes.NotFound  -> Json.obj("error" -> Json.fromString(e.getMessage)))
@@ -1126,7 +1146,7 @@ class Routes(
               }
             } } },
             path(Segment / "whatif") { id => post { entity(as[Json]) { body =>
-              val vec = body.hcursor.downField("inputVector").as[Vector[Double]].getOrElse(Vector.empty)
+              val vec = eventVector(body, "inputEvent", "inputVector")
               Try(engine.processWhatIf(id, vec)) match {
                 case Success(r) => complete(r.asJson)
                 case Failure(e) => complete(StatusCodes.BadRequest -> Json.obj("error" -> Json.fromString(e.getMessage)))
