@@ -38,7 +38,7 @@ class VectorAggregatorSpec extends AnyWordSpec with Matchers {
         "transitionResult": {
           "arbiterMetadata": { "shouldOutput": true },
           "sequenceResults": {
-            "signing-complete": { "matchedVectors": [ "ds-complete" ], "assertedOutputs": [ { "vector": [0, 0, 0, 1] } ] }
+            "signing-complete": { "matchedEvents": [ "ds-complete" ], "assertedOutputs": [ { "vector": [0, 0, 0, 1] } ] }
           }
         }
       },
@@ -211,7 +211,7 @@ class VectorAggregatorSpec extends AnyWordSpec with Matchers {
         "name": "Document Signing Workflow Monitor",
         "sequences": [
           { "id": "signing-complete", "name": "Signing Complete",
-            "initialVectorIds": ["ds-complete"] }
+            "initialEventIds": ["ds-complete"] }
         ],
         "metadata": {
           "governance": { "ownerTeam": "social-services" },
@@ -286,8 +286,8 @@ class VectorAggregatorSpec extends AnyWordSpec with Matchers {
           "id": "m-join",
           "name": "Join Machine",
           "sequences": [
-            { "id": "s-amber", "name": "Amber", "initialVectorIds": ["iv-amber"] },
-            { "id": "s-red",   "name": "Red",   "initialVectorIds": ["iv-red"] }
+            { "id": "s-amber", "name": "Amber", "initialEventIds": ["iv-amber"] },
+            { "id": "s-red",   "name": "Red",   "initialEventIds": ["iv-red"] }
           ],
           "metadata": {
             "triggerConfig": {
@@ -309,8 +309,8 @@ class VectorAggregatorSpec extends AnyWordSpec with Matchers {
             "transitionResult": {
               "arbiterMetadata": { "shouldOutput": true },
               "sequenceResults": {
-                "s-amber": { "matchedVectors": [ "iv-amber" ], "assertedOutputs": [ { "vector": [1, 0] } ] },
-                "s-red":   { "matchedVectors": [ "iv-red" ],   "assertedOutputs": [ { "vector": [0, 1] } ] }
+                "s-amber": { "matchedEvents": [ "iv-amber" ], "assertedOutputs": [ { "vector": [1, 0] } ] },
+                "s-red":   { "matchedEvents": [ "iv-red" ],   "assertedOutputs": [ { "vector": [0, 1] } ] }
               }
             }
           }
@@ -336,7 +336,7 @@ class VectorAggregatorSpec extends AnyWordSpec with Matchers {
         {
           "id": "m-fold",
           "name": "Fold Machine",
-          "sequences": [{ "id": "s-1", "name": "One", "initialVectorIds": [] }],
+          "sequences": [{ "id": "s-1", "name": "One", "initialEventIds": [] }],
           "metadata": {
             "triggerConfig": {
               "rules": [

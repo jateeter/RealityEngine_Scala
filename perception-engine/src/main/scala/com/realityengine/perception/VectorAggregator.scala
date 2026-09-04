@@ -181,9 +181,7 @@ object VectorAggregator {
               // rename here instead of a fallback would silently yield Nil against an
               // engine that has not moved — no error, just a sequence that never
               // contributes. Drop the legacy arm when every runtime has migrated.
-              sequenceResult.hcursor.get[List[String]]("matchedEvents")
-                .orElse(sequenceResult.hcursor.get[List[String]]("matchedVectors"))
-                .getOrElse(Nil)
+              sequenceResult.hcursor.get[List[String]]("matchedEvents").getOrElse(Nil)
             }
             .distinct
           if (contributors.isEmpty) Nil
