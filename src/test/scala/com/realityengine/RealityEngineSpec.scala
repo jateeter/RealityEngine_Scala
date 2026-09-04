@@ -212,7 +212,7 @@ class RealityEngineSpec extends AnyFlatSpec with Matchers {
           "sequences": [
             {
               "name": "seq1",
-              "vectors": [
+              "events": [
                 { "elements": [{"value": 0.5}], "isInitial": true }
               ]
             }
@@ -236,9 +236,9 @@ class RealityEngineSpec extends AnyFlatSpec with Matchers {
           "sequences": [
             {
               "name": "seq1",
-              "vectors": [
+              "events": [
                 { "elements": [{"value": 0.9, "threshold": 0.5}], "isInitial": true,
-                  "outputVectors": [{"vector": [1.0]}] }
+                  "outputEvents": [{"vector": [1.0]}] }
               ]
             }
           ]

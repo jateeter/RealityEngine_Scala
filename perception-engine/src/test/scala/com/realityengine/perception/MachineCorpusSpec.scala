@@ -54,7 +54,7 @@ class MachineCorpusSpec extends AnyWordSpec with Matchers {
           ]
         },
         "inputSequences": [
-          { "name": "Interconnect Saturation Drift", "vectors": [[0.66, 0.63], [0.64, 0.61]] }
+          { "name": "Interconnect Saturation Drift", "events": [[0.66, 0.63], [0.64, 0.61]] }
         ]
       }
     }
@@ -231,7 +231,7 @@ class MachineCorpusSpec extends AnyWordSpec with Matchers {
         .downField("inputSequences")
         .withFocus(_.mapArray(_ :+ Json.obj(
           "name"    -> Json.fromString("Thermal Excursion"),
-          "vectors" -> Json.arr(Json.arr(Json.fromDouble(0.9).get, Json.fromDouble(0.9).get)),
+          "events" -> Json.arr(Json.arr(Json.fromDouble(0.9).get, Json.fromDouble(0.9).get)),
         ))).top.getOrElse(fail("could not rebuild the fixture"))
 
       val src = MachineCorpus.testSourceFor(twoSeqs).getOrElse(fail("expected a source"))
