@@ -22,8 +22,8 @@ object JsonProtocol {
 
   implicit val encodeSequenceResult: Encoder[SequenceResult] = Encoder.instance { sr =>
     Json.obj(
-      "matchedVectors"   -> sr.matchedVectors.asJson,
-      "activatedVectors" -> sr.activatedVectors.asJson,
+      "matchedEvents"   -> sr.matchedVectors.asJson,
+      "activatedEvents" -> sr.activatedVectors.asJson,
       "assertedOutputs"  -> sr.assertedOutputs.asJson
     )
   }
@@ -39,7 +39,7 @@ object JsonProtocol {
 
   implicit val encodeMachineTransitionResult: Encoder[MachineTransitionResult] = Encoder.instance { r =>
     Json.obj(
-      "inputVector"     -> r.inputVector.asJson,
+      "inputEvent"     -> r.inputVector.asJson,
       "timestamp"       -> Json.fromLong(r.timestamp),
       "sequenceResults" -> Json.fromFields(r.sequenceResults.view.mapValues(_.asJson).toSeq),
       "machineOutput"   -> r.machineOutput.asJson,
@@ -49,7 +49,7 @@ object JsonProtocol {
 
   implicit val encodeTransitionResult: Encoder[TransitionResult] = Encoder.instance { r =>
     Json.obj(
-      "inputVector"  -> r.inputVector.asJson,
+      "inputEvent"  -> r.inputVector.asJson,
       "timestamp"    -> Json.fromLong(r.timestamp),
       "totalOutputs" -> r.totalOutputs.asJson
     )
@@ -63,7 +63,7 @@ object JsonProtocol {
     Json.obj(
       "machineId"        -> Json.fromString(mr.machineId),
       "machineName"      -> Json.fromString(mr.machineName),
-      "inputVector"      -> mr.inputVector.asJson,
+      "inputEvent"      -> mr.inputVector.asJson,
       "outputVector"     -> mr.outputVector.asJson,
       "mergedOutputVector"        -> mr.mergedOutputVector.asJson,
       "outputMergeTransformation" -> mr.outputMergeTransformation.asJson,

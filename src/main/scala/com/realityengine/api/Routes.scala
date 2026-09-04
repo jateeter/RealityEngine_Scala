@@ -495,7 +495,7 @@ class Routes(
     val stats       = engine.getStats.hcursor
     val machines    = engine.getAllMachines
     val totalSeqs   = stats.get[Int]("totalSequences").getOrElse(0)
-    val totalVecs   = stats.get[Int]("totalVectors").getOrElse(0)
+    val totalVecs   = stats.get[Int]("totalEvents").orElse(stats.get[Int]("totalVectors")).getOrElse(0)
     val totalActive = stats.get[Int]("totalActiveVectors").getOrElse(0)
     val historySize = engine.getHistory().size
     val simStep     = spaceRuntime.getCurrentStep
@@ -674,7 +674,7 @@ class Routes(
         pathPrefix("config") {
           concat(
             pathEnd { get { complete(Json.obj(
-              "vectorDimension"   -> Json.fromInt(sys.env.getOrElse("VECTOR_DIMENSION", "7680").toIntOption.getOrElse(7680)),
+              "eventDimension"   -> Json.fromInt(sys.env.getOrElse("VECTOR_DIMENSION", "7680").toIntOption.getOrElse(7680)),
               "matchThreshold"    -> Json.fromDouble(0.5).get,
               "qdrantUrl"         -> Json.fromString(sys.env.getOrElse("QDRANT_URL", "http://localhost:4333")),
               "collectionName"    -> Json.fromString(sys.env.getOrElse("COLLECTION_NAME", "reality-vectors"))
@@ -856,7 +856,7 @@ class Routes(
                   }
                 }
               }
-              complete(Json.obj("activeVectors" -> Json.arr(rows: _*)))
+              complete(Json.obj("activeEvents" -> Json.arr(rows: _*)))
             } },
             path("history") { get { parameter("limit".as[Int].?) { limit =>
               import scala.jdk.CollectionConverters._
@@ -883,7 +883,7 @@ class Routes(
           val perceived = perception.perceive(obs)
           complete(Json.obj(
             "success"            -> Json.fromBoolean(true),
-            "inputVector"        -> perceived.inputVector.asJson,
+            "inputEvent"        -> perceived.inputVector.asJson,
             "transformations"    -> perceived.transformations.asJson,
             "processingTimestamp" -> Json.fromLong(perceived.processingTimestamp)
           ))
