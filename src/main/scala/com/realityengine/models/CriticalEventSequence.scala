@@ -214,9 +214,9 @@ class CriticalEventSequence(
     Json.fromFields(Seq(
       "id"               -> Json.fromString(id),
       "name"             -> Json.fromString(name),
-      "vectors"          -> Json.arr(getAllVectors.map(_.toJson): _*),
+      "events"           -> Json.arr(getAllVectors.map(_.toJson): _*),
       "initialEventIds" -> Json.arr(getInitialVectorIds.map(Json.fromString): _*),
-      "outputVectorIds"  -> Json.arr(getOutputVectorIds.map(Json.fromString): _*),
+      "outputEventIds"   -> Json.arr(getOutputVectorIds.map(Json.fromString): _*),
       "metadata"         -> metadata.asJson
     ) ++ lifecycleFields)
   }

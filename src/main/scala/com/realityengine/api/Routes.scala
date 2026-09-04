@@ -101,7 +101,7 @@ class Routes(
       ).flatten
       Json.obj(fields: _*)
     }
-    val outputs = src.downField("outputVectors").as[Vector[Json]].getOrElse(Vector.empty).map { output =>
+    val outputs = src.downField("outputEvents").as[Vector[Json]].getOrElse(Vector.empty).map { output =>
       val c = output.hcursor
       Json.obj(
         "id"       -> c.downField("id").focus.getOrElse(Json.fromString("")),
@@ -116,8 +116,8 @@ class Routes(
       "isInitial"       -> src.downField("isInitial").focus.getOrElse(Json.fromBoolean(false)),
       "matchAlgorithm"  -> src.downField("matchAlgorithm").focus.getOrElse(Json.fromString("gte")),
       "metadata"        -> src.downField("metadata").focus.getOrElse(Json.obj()),
-      "nextVectorIds"   -> src.downField("nextVectorIds").focus.getOrElse(Json.arr()),
-      "outputVectors"   -> Json.arr(outputs: _*),
+      "nextEventIds"    -> src.downField("nextEventIds").focus.getOrElse(Json.arr()),
+      "outputEvents"    -> Json.arr(outputs: _*),
       "state"           -> src.downField("state").focus.getOrElse(Json.fromString("inactive")),
       "wasJustMatched"  -> src.downField("wasJustMatched").focus.getOrElse(Json.fromBoolean(false))
     )
