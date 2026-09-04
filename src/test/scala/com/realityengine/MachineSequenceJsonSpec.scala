@@ -53,7 +53,7 @@ class MachineSequenceJsonSpec extends AnyWordSpec with Matchers {
       val initialsBySequence = sequences.flatMap { s =>
         for {
           id       <- s.hcursor.get[String]("id").toOption
-          initials <- s.hcursor.get[Vector[String]]("initialVectorIds").toOption
+          initials <- s.hcursor.get[Vector[String]]("initialEventIds").toOption
         } yield id -> initials
       }.toMap
 
@@ -93,7 +93,7 @@ class MachineSequenceJsonSpec extends AnyWordSpec with Matchers {
       )
 
       machine.toJson.hcursor.downField("sequences").downArray
-        .get[Vector[String]]("initialVectorIds") shouldBe Right(Vector("v-a", "v-z"))
+        .get[Vector[String]]("initialEventIds") shouldBe Right(Vector("v-a", "v-z"))
     }
   }
 }

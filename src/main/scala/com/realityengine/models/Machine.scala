@@ -242,7 +242,7 @@ class Machine(
       "outputMergeLocked" -> Json.fromBoolean(outputMergeLocked),
       "arbiterRule"      -> Json.fromString(ArbiterRule.serialize(arbiter.getRule)),
       "sequenceCount"    -> Json.fromInt(getSequenceCount),
-      "totalVectors"     -> Json.fromInt(getTotalVectorCount),
+      "totalEvents"     -> Json.fromInt(getTotalVectorCount),
       "sequenceIds"      -> Json.arr(getSequenceIds.map(Json.fromString): _*),
       // initialVectorIds travels with the shallow summary because the
       // Perception Engine owns the mapping from a fired sequence to the next
@@ -256,7 +256,7 @@ class Machine(
         Json.obj(
           "id"               -> Json.fromString(seq.id),
           "name"             -> Json.fromString(seq.name),
-          "initialVectorIds" -> Json.arr(seq.getInitialVectorIds.map(Json.fromString): _*),
+          "initialEventIds" -> Json.arr(seq.getInitialVectorIds.map(Json.fromString): _*),
         )
       ): _*),
       "metadata"         -> metadata.asJson,

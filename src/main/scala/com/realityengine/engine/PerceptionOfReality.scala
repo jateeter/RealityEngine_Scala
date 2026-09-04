@@ -77,7 +77,7 @@ class PerceptionOfReality(
     }
 
   def getConfig: Map[String, Any] = Map(
-    "vectorDimension"      -> vectorDimension,
+    "eventDimension"      -> vectorDimension,
     "preprocessingEnabled" -> preprocessingEnabled,
     "transformerCount"     -> transformers.length
   )

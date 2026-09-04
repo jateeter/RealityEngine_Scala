@@ -184,8 +184,8 @@ class CriticalEventSequence(
   // ── Stats ─────────────────────────────────────────────────────────────────
 
   def getStats: Map[String, Int] = Map(
-    "totalVectors"   -> vectors.size,
-    "activeVectors"  -> getActiveVectors.length,
+    "totalEvents"   -> vectors.size,
+    "activeEvents"  -> getActiveVectors.length,
     "initialVectors" -> initialVectorIds.size,
     "outputVectors"  -> outputVectorIds.size
   )
@@ -215,7 +215,7 @@ class CriticalEventSequence(
       "id"               -> Json.fromString(id),
       "name"             -> Json.fromString(name),
       "vectors"          -> Json.arr(getAllVectors.map(_.toJson): _*),
-      "initialVectorIds" -> Json.arr(getInitialVectorIds.map(Json.fromString): _*),
+      "initialEventIds" -> Json.arr(getInitialVectorIds.map(Json.fromString): _*),
       "outputVectorIds"  -> Json.arr(getOutputVectorIds.map(Json.fromString): _*),
       "metadata"         -> metadata.asJson
     ) ++ lifecycleFields)

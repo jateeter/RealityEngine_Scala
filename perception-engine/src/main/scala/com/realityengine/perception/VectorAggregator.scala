@@ -176,7 +176,14 @@ object VectorAggregator {
             .sortBy(_._1)
             .filter { case (sequenceId, _) => contributingIds.contains(sequenceId) }
             .flatMap { case (_, sequenceResult) =>
-              sequenceResult.hcursor.get[List[String]]("matchedVectors").getOrElse(Nil)
+              // RealityEngine_CI#220 layer 2: the Reality Engine this PE reads may be
+              // any runtime at any point in the rename, so accept both spellings. A
+              // rename here instead of a fallback would silently yield Nil against an
+              // engine that has not moved — no error, just a sequence that never
+              // contributes. Drop the legacy arm when every runtime has migrated.
+              sequenceResult.hcursor.get[List[String]]("matchedEvents")
+                .orElse(sequenceResult.hcursor.get[List[String]]("matchedVectors"))
+                .getOrElse(Nil)
             }
             .distinct
           if (contributors.isEmpty) Nil
