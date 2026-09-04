@@ -83,7 +83,7 @@ class MachineSequenceJsonSpec extends AnyWordSpec with Matchers {
             "perceptualMapping": { "input":  { "offset": 0, "length": 2 },
                                    "output": { "offset": 2, "length": 2 } },
             "sequences": [
-              { "id": "s", "name": "s", "vectors": [
+              { "id": "s", "name": "s", "events": [
                   { "id": "v-z", "isInitial": true,  "elements": [ { "value": 1 } ] },
                   { "id": "v-a", "isInitial": true,  "elements": [ { "value": 1 } ] },
                   { "id": "v-m", "isInitial": false, "elements": [ { "value": 1 } ] }
