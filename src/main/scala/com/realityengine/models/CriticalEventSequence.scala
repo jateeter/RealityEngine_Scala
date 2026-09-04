@@ -228,7 +228,7 @@ object CriticalEventSequence {
     val id        = c.get[String]("id").getOrElse(UUID.randomUUID().toString)
     val name      = c.get[String]("name").getOrElse("unnamed")
     val seq       = new CriticalEventSequence(name, id)
-    val vectorsJs = c.downField("events").as[Vector[Json]].orElse(c.downField("vectors").as[Vector[Json]]).getOrElse(Vector.empty)
+    val vectorsJs = c.downField("events").as[Vector[Json]].getOrElse(Vector.empty)
     vectorsJs.foreach(vj => seq.addVector(RealityEvent.fromJson(vj)))
     seq.metadata      = c.downField("metadata").as[Map[String, Json]].getOrElse(Map.empty)
     seq.schemaVersion = c.get[String]("schemaVersion").toOption

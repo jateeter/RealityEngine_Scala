@@ -416,8 +416,7 @@ class Routes(
         val inputSeqs = machine.metadata.getOrElse("inputSequences", Json.arr())
         val inputVectorCount = inputSeqs.asArray
           .flatMap(_.headOption)
-          .flatMap(h => h.hcursor.downField("events").as[Vector[Json]]
-            .orElse(h.hcursor.downField("vectors").as[Vector[Json]]).toOption)
+          .flatMap(h => h.hcursor.downField("events").as[Vector[Json]].toOption)
           .map(_.length)
           .getOrElse(0)
         val extraMeta = Json.obj(
@@ -722,7 +721,6 @@ class Routes(
                   val name  = body.hcursor.get[String]("name").getOrElse("unnamed")
                   val seq   = new CriticalEventSequence(name)
                   body.hcursor.downField("events").as[Vector[Json]]
-                    .orElse(body.hcursor.downField("vectors").as[Vector[Json]])
                     .getOrElse(Vector.empty).foreach { vj =>
                     val vc = vj.hcursor
                     val elems = vc.downField("elements").as[Vector[Json]].getOrElse(Vector.empty).map { ej =>
@@ -735,10 +733,8 @@ class Routes(
                     val vec = new RealityEvent(elems, vc.get[Boolean]("isInitial").getOrElse(false),
                       vc.get[String]("id").getOrElse(java.util.UUID.randomUUID().toString))
                     vc.downField("nextEventIds").as[Vector[String]]
-                      .orElse(vc.downField("nextVectorIds").as[Vector[String]])
                       .getOrElse(Vector.empty).foreach(vec.addNextVector)
                     vc.downField("outputEvents").as[Vector[Json]]
-                      .orElse(vc.downField("outputVectors").as[Vector[Json]])
                       .getOrElse(Vector.empty).foreach { oj =>
                       vec.addOutputVector(OutputVector(
                         id        = oj.hcursor.get[String]("id").getOrElse(java.util.UUID.randomUUID().toString),

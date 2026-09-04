@@ -200,8 +200,8 @@ object RealityEvent {
     val v = new RealityEvent(elements, isInitial, id)
     v.matchAlgorithm  = c.get[String]("matchAlgorithm").toOption.map(ComparatorType.fromString).getOrElse(ComparatorType.GTE)
     v.state           = if (c.get[String]("state").toOption.contains("active")) VectorState.Active else VectorState.Inactive
-    v._nextVectorIds  = c.downField("nextEventIds").as[List[String]].orElse(c.downField("nextVectorIds").as[List[String]]).getOrElse(Nil)
-    v._outputVectors  = c.downField("outputEvents").as[Vector[io.circe.Json]].orElse(c.downField("outputVectors").as[Vector[io.circe.Json]]).getOrElse(Vector.empty).toList.map(parseOutputVector)
+    v._nextVectorIds  = c.downField("nextEventIds").as[List[String]].getOrElse(Nil)
+    v._outputVectors  = c.downField("outputEvents").as[Vector[io.circe.Json]].getOrElse(Vector.empty).toList.map(parseOutputVector)
     v._wasJustMatched = c.get[Boolean]("wasJustMatched").getOrElse(false)
     v.metadata = c.downField("metadata").as[Map[String, Json]].getOrElse(Map.empty)
     v

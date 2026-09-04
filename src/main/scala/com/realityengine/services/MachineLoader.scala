@@ -85,7 +85,7 @@ object MachineLoader {
     seq.deprecatedAt  = sc.get[String]("deprecatedAt").toOption
     seq.replacedBy    = sc.get[String]("replacedBy").toOption
 
-    val vectorsJson = sc.downField("events").as[Vector[Json]].orElse(sc.downField("vectors").as[Vector[Json]]).getOrElse(Vector.empty)
+    val vectorsJson = sc.downField("events").as[Vector[Json]].getOrElse(Vector.empty)
 
     // First pass — create all vectors
     val vectorOrder = scala.collection.mutable.ListBuffer.empty[String]
@@ -108,7 +108,7 @@ object MachineLoader {
       vector.matchAlgorithm = matchAlgo
       vector.metadata = vc.downField("metadata").as[Map[String, Json]].getOrElse(Map.empty)
 
-      vc.downField("outputEvents").as[Vector[Json]].orElse(vc.downField("outputVectors").as[Vector[Json]]).getOrElse(Vector.empty).foreach { oj =>
+      vc.downField("outputEvents").as[Vector[Json]].getOrElse(Vector.empty).foreach { oj =>
         val oc = oj.hcursor
         vector.addOutputVector(OutputVector(
           id        = oc.get[String]("id").getOrElse(UUID.randomUUID().toString),
@@ -126,7 +126,7 @@ object MachineLoader {
     // Second pass — wire up nextVectorIds
     vectorsJson.zip(vectorOrder.toList).foreach { case (vj, vectorId) =>
       val vc = vj.hcursor
-      vc.downField("nextEventIds").as[Vector[String]].orElse(vc.downField("nextVectorIds").as[Vector[String]]).getOrElse(Vector.empty).foreach { nextId =>
+      vc.downField("nextEventIds").as[Vector[String]].getOrElse(Vector.empty).foreach { nextId =>
         vectorMap.get(vectorId).foreach(_.addNextVector(nextId))
       }
     }
@@ -221,7 +221,7 @@ object MachineLoader {
       m.downField("sequences").as[Vector[Json]].getOrElse(Vector.empty).zipWithIndex.foreach { case (sj, si) =>
         val sc = sj.hcursor
         if (sc.get[String]("name").isLeft) errors = errors :+ s"Sequence $si: Missing required field: name"
-        sc.downField("events").as[Vector[Json]].orElse(sc.downField("vectors").as[Vector[Json]]).getOrElse(Vector.empty).zipWithIndex.foreach { case (vj, vi) =>
+        sc.downField("events").as[Vector[Json]].getOrElse(Vector.empty).zipWithIndex.foreach { case (vj, vi) =>
           val vc = vj.hcursor
           if (vc.downField("elements").as[Vector[Json]].isLeft) errors = errors :+ s"Sequence $si, Vector $vi: Missing or invalid field: elements"
           if (vc.get[Boolean]("isInitial").isLeft) errors = errors :+ s"Sequence $si, Vector $vi: Missing required field: isInitial"
