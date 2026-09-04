@@ -18,11 +18,15 @@ class UnfiredCoverageSpec extends AnyFlatSpec with Matchers {
 
   // inputSequences is a corpus-JSON field, not a Machine member: it is interned
   // as a test source at load time. It sits under `machine` and each entry is a
-  // named scenario carrying a `vectors` array — the rows to drive.
+  // named scenario carrying its rows under `events` — or `vectors` in a corpus
+  // written before RealityEngine_CI#220 layer 1b. Both are read, because the
+  // `assume` below turns a missed read into a *cancelled* test rather than a
+  // failing one: the spec would go quiet instead of going red.
   private def inputRows(raw: String): List[Vector[Double]] =
     io.circe.parser.parse(raw).toOption.toList.flatMap { j =>
       j.hcursor.downField("machine").downField("inputSequences").values.toList.flatten
-        .flatMap(_.hcursor.get[List[Vector[Double]]]("vectors").toOption.toList.flatten)
+        .flatMap(e => e.hcursor.get[List[Vector[Double]]]("events")
+          .orElse(e.hcursor.get[List[Vector[Double]]]("vectors")).toOption.toList.flatten)
     }
 
   private def firstMappedMachine: Option[(com.realityengine.models.Machine, String, List[Vector[Double]])] = {

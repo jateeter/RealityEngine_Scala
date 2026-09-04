@@ -169,8 +169,8 @@ class RealityEvent(
                           )): _*),
     "state"            -> Json.fromString(if (state == VectorState.Active) "active" else "inactive"),
     "isActive"         -> Json.fromBoolean(isActive),
-    "nextVectorIds"    -> Json.arr(_nextVectorIds.map(Json.fromString): _*),
-    "outputVectors"    -> Json.arr(_outputVectors.map(outputVectorToJson): _*),
+    "nextEventIds"     -> Json.arr(_nextVectorIds.map(Json.fromString): _*),
+    "outputEvents"     -> Json.arr(_outputVectors.map(outputVectorToJson): _*),
     "isInitial"        -> Json.fromBoolean(isInitial),
     "wasJustMatched"   -> Json.fromBoolean(_wasJustMatched),
     "metadata"         -> Json.fromFields(metadata.toSeq)

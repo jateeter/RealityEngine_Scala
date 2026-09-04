@@ -146,7 +146,7 @@ object MachineLoader {
         "name"     -> Json.fromString(seq.name),
         "metadata" -> seq.metadata.asJson
       ) ++ lifecycleFields ++ Seq(
-        "vectors"  -> Json.arr(seq.getAllVectors.map { vec =>
+        "events"   -> Json.arr(seq.getAllVectors.map { vec =>
           val elements = vec.getElements.map { elem =>
             val base = Map("value" -> Json.fromDoubleOrNull(elem.value))
             val withComp = elem.comparatorType match {
@@ -162,8 +162,8 @@ object MachineLoader {
             "elements"     -> Json.arr(elements: _*),
             "isInitial"    -> Json.fromBoolean(vec.isInitial),
             "metadata"     -> vec.metadata.asJson,
-            "nextVectorIds" -> Json.arr(vec.getNextVectorIds.map(Json.fromString): _*),
-            "outputVectors" -> Json.arr(vec.getOutputVectors.map { ov =>
+            "nextEventIds"  -> Json.arr(vec.getNextVectorIds.map(Json.fromString): _*),
+            "outputEvents"  -> Json.arr(vec.getOutputVectors.map { ov =>
               Json.obj(
                 "id"       -> Json.fromString(ov.id),
                 "vector"   -> ov.vector.asJson,
