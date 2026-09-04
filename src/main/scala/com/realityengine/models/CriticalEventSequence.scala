@@ -186,8 +186,8 @@ class CriticalEventSequence(
   def getStats: Map[String, Int] = Map(
     "totalEvents"   -> vectors.size,
     "activeEvents"  -> getActiveVectors.length,
-    "initialVectors" -> initialVectorIds.size,
-    "outputVectors"  -> outputVectorIds.size
+    "initialEvents" -> initialVectorIds.size,
+    "outputEvents"  -> outputVectorIds.size
   )
 
   // ── Clone ─────────────────────────────────────────────────────────────────

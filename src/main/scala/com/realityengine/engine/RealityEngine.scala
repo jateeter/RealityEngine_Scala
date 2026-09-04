@@ -357,7 +357,7 @@ class RealityEngine(
     Json.obj(
       "totalSequences"     -> Json.fromInt(sequences.size),
       "totalEvents"       -> Json.fromInt(totalVectors),
-      "totalActiveVectors" -> Json.fromInt(totalActive),
+      "totalActiveEvents"  -> Json.fromInt(totalActive),
       "sequenceStats"      -> Json.arr(seqStats: _*)
     )
   }
