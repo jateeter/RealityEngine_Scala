@@ -16,7 +16,7 @@ import scala.concurrent.{ExecutionContext, Future}
  */
 class VectorStore(
   qdrantUrl:       String  = sys.env.getOrElse("QDRANT_URL", "http://localhost:4333"),
-  collectionName:  String  = sys.env.getOrElse("COLLECTION_NAME", "reality-vectors"),
+  collectionName:  String  = sys.env.getOrElse("COLLECTION_NAME", "reality-events"),
   vectorDimension: Int     = sys.env.getOrElse("VECTOR_DIMENSION", "7680").toIntOption.getOrElse(7680)
 )(implicit system: ActorSystem) {
 

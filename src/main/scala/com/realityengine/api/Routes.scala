@@ -657,7 +657,7 @@ class Routes(
               "eventDimension"   -> Json.fromInt(sys.env.getOrElse("VECTOR_DIMENSION", "7680").toIntOption.getOrElse(7680)),
               "matchThreshold"    -> Json.fromDouble(0.5).get,
               "qdrantUrl"         -> Json.fromString(sys.env.getOrElse("QDRANT_URL", "http://localhost:4333")),
-              "collectionName"    -> Json.fromString(sys.env.getOrElse("COLLECTION_NAME", "reality-vectors"))
+              "collectionName"    -> Json.fromString(sys.env.getOrElse("COLLECTION_NAME", "reality-events"))
             )) } },
             path("dimension") { put { parameter("dimension".as[Int].?(sys.env.getOrElse("VECTOR_DIMENSION", "7680").toIntOption.getOrElse(7680))) { dim =>
               complete(Json.obj("success" -> Json.fromBoolean(true), "dimension" -> Json.fromInt(dim)))
