@@ -308,6 +308,47 @@ class RealityEngine(
   def deleteCheckpoint(machineId: String, checkpointId: String): Boolean =
     checkpoints.get(machineId).exists(_.remove(checkpointId).isDefined)
 
+  // ── Engine-wide processing — POST /api/engine/process ────────────────────
+  //
+  // SURFACE_SPEC, "POST /api/engine/process — map across machines, in parallel":
+  // the unit of iteration is the machine, never the sequence. Driving the input
+  // through the machine is what applies its arbiter rule, its output-merge
+  // transformation and its perceptual mapping; a walk over sequences skips all
+  // three and reports raw assertions no consumer can resolve back to a machine's
+  // actual output. That is what this route did until #254.
+  //
+  // Three properties, in order:
+  //
+  //   1. Atomic collection — `machines` is snapshotted once, before any actor is
+  //      asked. TrieMap's iterator is already a consistent O(1) snapshot, so a
+  //      machine registered mid-call joins the next call or none, never half of
+  //      this one.
+  //   2. Machine-level parallelism — one ask per machine, dispatched together.
+  //      Each MachineActor's FIFO mailbox serialises calls *within* a machine
+  //      while machines advance concurrently, which is the property RC-1 was
+  //      built for and the reason the machine is the only safe unit here.
+  //   3. Atomic join — `Future.sequence` completes the whole fan-in before any
+  //      output is emitted. A partial join is not a shorter answer, it is a
+  //      wrong one.
+  //
+  // Canonical machine order so the emitted `outputs` sequence is deterministic
+  // across runs and comparable across runtimes.
+  def processAcrossMachines(inputVector: Vector[Double]): Future[List[OutputVector]] = {
+    val snapshot = getAllMachines
+    val asks: List[Future[Option[OutputVector]]] =
+      snapshot.flatMap { machine =>
+        machineActors.get(machine.id).map { actor =>
+          (actor ? MachineActor.ProcessInput(inputVector))
+            .mapTo[MachineActor.ProcessInputResult]
+            .map { pr =>
+              coverage.record(machine, pr.result)
+              pr.result.machineOutput
+            }
+        }
+      }
+    Future.sequence(asks).map(_.flatten)
+  }
+
   // ── Legacy sequence-level processing ─────────────────────────────────────
 
   // Machines first, then anything created over the API. This used to walk a

@@ -148,6 +148,27 @@ class Routes(
   private val engineHistory      = new java.util.concurrent.ConcurrentLinkedDeque[Json]()
   private val EngineHistoryLimit = 256
 
+  /** One `outputs` element of `POST /api/engine/process`.
+    *
+    * Field-for-field with C++ `to_json(const OutputVector&)`
+    * (`reality.cpp`) and LSP `output-vector-json` (`model.lisp`), so the three
+    * runtimes emit the same element shape.
+    *
+    * `provenance` is emitted empty. C++ and LSP both carry a provenance chain on
+    * `OutputVector`; Scala's `OutputVector` (`models/Types.scala:62`) has no such
+    * field, so there is nothing to populate it from. Emitting the key keeps the
+    * shape uniform — a consumer reading `provenance` gets an array on all three
+    * rather than `undefined` on one — and the missing field is a model gap
+    * tracked separately, not something to paper over by dropping the key.
+    */
+  private def engineOutputJson(ov: OutputVector): Json = Json.obj(
+    "id"         -> Json.fromString(ov.id),
+    "vector"     -> Json.arr(ov.vector.map(Json.fromDoubleOrNull): _*),
+    "metadata"   -> Json.fromFields(ov.metadata.toSeq),
+    "timestamp"  -> Json.fromLong(ov.timestamp),
+    "provenance" -> Json.arr()
+  )
+
   private def recordEngineHistory(item: Json): Unit = {
     engineHistory.addFirst(item)
     while (engineHistory.size() > EngineHistoryLimit) engineHistory.pollLast()
@@ -795,14 +816,30 @@ class Routes(
         // Engine
         pathPrefix("engine") {
           concat(
+            // Maps across machines, in parallel — SURFACE_SPEC, "POST
+            // /api/engine/process". `outputs` is one arbitrated output per
+            // machine that fired, matching C++ (`reality_engine_server.cpp:279`)
+            // and LSP (`reality-service.lisp:2270`). It used to walk sequences
+            // and emit raw per-sequence assertions, so the arbiters never ran
+            // and the response shape differed from the other two (#254).
             path("process") { post { entity(as[Json]) { body =>
               val vec = body.hcursor.downField("vector").as[Vector[Double]].getOrElse(Vector.empty)
-              val result = engine.processInputLegacy(vec)
-              recordEngineHistory(Json.obj(
-                "type"   -> Json.fromString("engine-process"),
-                "result" -> result.asJson
-              ))
-              complete(Json.obj("result" -> result.asJson))
+              onComplete(engine.processAcrossMachines(vec)) {
+                case Success(outputs) =>
+                  val result = Json.obj(
+                    "inputEvent" -> Json.arr(vec.map(Json.fromDoubleOrNull): _*),
+                    "timestamp"  -> Json.fromLong(System.currentTimeMillis()),
+                    "outputs"    -> Json.arr(outputs.map(engineOutputJson): _*)
+                  )
+                  recordEngineHistory(Json.obj(
+                    "type"   -> Json.fromString("engine-process"),
+                    "result" -> result
+                  ))
+                  complete(Json.obj("result" -> result))
+                case Failure(e) =>
+                  complete(StatusCodes.InternalServerError ->
+                    Json.obj("error" -> Json.fromString(e.getMessage)))
+              }
             } } },
             // Full reset, matching C++ and LSP. This called resetAllSequences()
             // alone, so the endpoint meant "reset sequences" here and "reset
