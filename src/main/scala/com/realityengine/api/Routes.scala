@@ -131,6 +131,36 @@ class Routes(
   private val historyLimitRef           = new AtomicReference[Int](1000)
   private val includeMachineResultsRef  = new AtomicReference[Boolean](true)
   private val includePerceptualSpaceRef = new AtomicReference[Boolean](true)
+  // Defaults stay full so no existing caller changes shape and the parity gates
+  // keep comparing identical key sets until a caller opts out (SURFACE_SPEC.md,
+  // "Requesting less than the full step").
+  private val includeActiveRegionsRef   = new AtomicReference[Boolean](true)
+
+  // Drop the observation surfaces the caller did not ask for.
+  //
+  // Omitted, not emptied: an empty array is the claim that nothing was active,
+  // which is a different statement from "not requested", and the parity stage
+  // compares key sets — an emptied field reads as agreement between a runtime
+  // with nothing to report and one that was never asked.
+  //
+  // This route previously ignored the flags entirely and always emitted both
+  // fields, which SURFACE_SPEC calls out directly: "A runtime that ignores
+  // `compact` does not satisfy the contract."
+  private def trimStepJson(step: Json, body: Json): Json = {
+    val c = body.hcursor
+    val compact = c.get[Boolean]("compact").getOrElse(false)
+    val includeMachineResults =
+      c.get[Boolean]("includeMachineResults").toOption
+        .getOrElse(if (compact) false else includeMachineResultsRef.get())
+    // Deliberately not implied by `compact`, which omits exactly machineResults
+    // and nothing else.
+    val includeActiveRegions =
+      c.get[Boolean]("includeActiveRegions").toOption.getOrElse(includeActiveRegionsRef.get())
+    var out = step
+    if (!includeMachineResults) out = out.mapObject(_.remove("machineResults"))
+    if (!includeActiveRegions)  out = out.mapObject(_.remove("activeRegions"))
+    out
+  }
 
   // Audit trail for POST /api/engine/process — what GET /api/engine/history
   // serves, on every runtime.
@@ -327,10 +357,12 @@ class Routes(
   private def runtimeOptionsJson(): Json = Json.obj(
     "historyLimit"           -> Json.fromInt(historyLimitRef.get()),
     "includeMachineResults"  -> Json.fromBoolean(includeMachineResultsRef.get()),
+    "includeActiveRegions"   -> Json.fromBoolean(includeActiveRegionsRef.get()),
     "includePerceptualSpace" -> Json.fromBoolean(includePerceptualSpaceRef.get()),
     "projectionControls"     -> Json.obj(
       "includeMachineResults"  -> Json.fromString("boolean request field on /api/perceive"),
       "includePerceptualSpace" -> Json.fromString("boolean request field on /api/perceive"),
+      "includeActiveRegions"   -> Json.fromString("boolean request field on /api/perceive"),
       "compact"                -> Json.fromString("sets includeMachineResults false when includeMachineResults is omitted")
     )
   )
@@ -1418,8 +1450,10 @@ class Routes(
           // across the process boundary, from the /api/perceive response —
           // which is the observable path. C++ has no step mirror at all.
           // Non-blocking push to the SSE broadcast hub so observers never stall the caller
+          // The SSE hub gets the whole step: subscribers are observation
+          // points and asked for everything by subscribing.
           sseQueue.offer(step)
-          complete(step.asJson)
+          complete(trimStepJson(step.asJson, body))
         } } },
 
         // Runtime introspection — parity with /api/runtime/* on LSP and CPP runtimes
@@ -1447,6 +1481,7 @@ class Routes(
               c.get[Int]("historyLimit").toOption.foreach(historyLimitRef.set)
               c.get[Boolean]("includeMachineResults").toOption.foreach(includeMachineResultsRef.set)
               c.get[Boolean]("includePerceptualSpace").toOption.foreach(includePerceptualSpaceRef.set)
+              c.get[Boolean]("includeActiveRegions").toOption.foreach(includeActiveRegionsRef.set)
               complete(runtimeOptionsJson())
             } }
           ) }
