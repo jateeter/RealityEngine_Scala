@@ -34,6 +34,15 @@ class Machine(
   // it does not. Every restart comes up locked.
   var outputMergeLocked: Boolean = true
 
+  // SURFACE_SPEC.md, "transitionsInhibited". Defaults FALSE — the declared
+  // default, not this runtime's choice: a machine flows the Universal Reality
+  // Event through unless something inhibits it.
+  //
+  // Runtime state like the interlock above, not a corpus property. It says
+  // whether this deployment currently carries the event forward for this
+  // machine, which does not travel with the machine definition.
+  var transitionsInhibited: Boolean = false
+
   private var sequences: Map[String, CriticalEventSequence] = Map.empty
   private val arbiter = new OutputArbiter(arbiterRule)
 
@@ -83,6 +92,28 @@ class Machine(
     matchAlgorithmOverride: Option[ComparatorType] = None,
     audit:                  Boolean                = true
   ): MachineTransitionResult = {
+    // transitionsInhibited: accept the Universal Reality Event and do not pass
+    // it forward (SURFACE_SPEC.md). The event is ADMITTED — this is not a
+    // refusal — so the result is the shape of a machine that matched nothing,
+    // arbiter metadata included. Omitting that metadata would let a caller
+    // distinguish an inhibited machine from an unmatched one by the SHAPE of
+    // the reply rather than by asking the control; C++ and LSP both return the
+    // rule and zeros for the same reason.
+    if (transitionsInhibited) {
+      return MachineTransitionResult(
+        inputVector     = inputVector,
+        timestamp       = System.currentTimeMillis(),
+        sequenceResults = Map.empty,
+        machineOutput   = None,
+        arbiterMetadata = ArbiterMetadata(
+          rule                = ArbiterRule.serialize(arbiterRule),
+          totalInputs         = 0,
+          sequencesWithOutput = 0,
+          shouldOutput        = false
+        )
+      )
+    }
+
     val seqResultsBuffer = new scala.collection.mutable.HashMap[String, SequenceResult]
     val seqOutputsBuffer = new scala.collection.mutable.HashMap[String, List[OutputVector]]
 

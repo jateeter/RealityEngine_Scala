@@ -354,6 +354,21 @@ class Routes(
 
   // ── Helpers ───────────────────────────────────────────────────────────────
 
+  /** The transitionsInhibited control, in the shape SURFACE_SPEC declares.
+    *
+    * `default` is the specification's value, restated in the reply so a reader
+    * sees what the runtime is supposed to hold as well as what it does.
+    */
+  private def transitionsInhibitedControl(): Json =
+    Json.obj(
+      "name"    -> Json.fromString("transitionsInhibited"),
+      "scope"   -> Json.fromString("machine"),
+      "value"   -> Json.fromFields(
+        engine.getAllMachines.map(m => m.id -> Json.fromBoolean(m.transitionsInhibited))),
+      "default" -> Json.False,
+      "mutable" -> Json.True
+    )
+
   private def runtimeOptionsJson(): Json = Json.obj(
     "historyLimit"           -> Json.fromInt(historyLimitRef.get()),
     "includeMachineResults"  -> Json.fromBoolean(includeMachineResultsRef.get()),
@@ -1455,6 +1470,57 @@ class Routes(
           sseQueue.offer(step)
           complete(trimStepJson(step.asJson, body))
         } } },
+
+        // ── /api/engine/config — one pathway for every runtime control ────
+        //
+        // SURFACE_SPEC.md, "/api/engine/config". The control's name, scope and
+        // default come from that document, not from here: three runtimes each
+        // choosing a reasonable value is how historyLimit became 256/250/1000.
+        pathPrefix("engine" / "config") { concat(
+          pathEnd { get { complete(Json.obj("controls" -> Json.arr(transitionsInhibitedControl()))) } },
+          path(Segment) { control => concat(
+            get {
+              if (control != "transitionsInhibited")
+                complete(StatusCodes.NotFound, Json.obj("error" -> Json.fromString(s"Unknown control: $control")))
+              else complete(transitionsInhibitedControl())
+            },
+            put { entity(as[Json]) { body =>
+              val c = body.hcursor
+              if (control != "transitionsInhibited")
+                complete(StatusCodes.NotFound, Json.obj("error" -> Json.fromString(s"Unknown control: $control")))
+              else c.get[Boolean]("value").toOption match {
+                case None =>
+                  complete(StatusCodes.BadRequest,
+                           Json.obj("error" -> Json.fromString("transitionsInhibited requires a boolean `value`")))
+                case Some(value) =>
+                  c.get[String]("machine").toOption match {
+                    // A write naming a machine that does not exist is 404, never
+                    // a silent no-op answering 200.
+                    case Some(id) =>
+                      engine.getMachine(id) match {
+                        case None => complete(StatusCodes.NotFound,
+                                              Json.obj("error" -> Json.fromString(s"Machine not found: $id")))
+                        case Some(m) => m.transitionsInhibited = value
+                                        complete(transitionsInhibitedControl())
+                      }
+                    case None =>
+                      engine.getAllMachines.foreach(_.transitionsInhibited = value)
+                      complete(transitionsInhibitedControl())
+                  }
+              }
+            } },
+            delete {
+              if (control != "transitionsInhibited")
+                complete(StatusCodes.NotFound, Json.obj("error" -> Json.fromString(s"Unknown control: $control")))
+              else {
+                // "Restore the declared default", not "remove the control" —
+                // controls are fixed by the specification.
+                engine.getAllMachines.foreach(_.transitionsInhibited = false)
+                complete(transitionsInhibitedControl())
+              }
+            }
+          ) }
+        ) },
 
         // Runtime introspection — parity with /api/runtime/* on LSP and CPP runtimes
         pathPrefix("runtime") { concat(
