@@ -84,13 +84,42 @@ object VectorAggregator {
     val sorted = records.sortBy(_.sortKey)
 
     val buf = mutable.ArrayBuffer[Double](baseVector: _*)
+
+    // A cell covered by more than one gated contributor was ARBITRATED by the
+    // Reality Engine, and baseVector already carries that resolution. Writing it
+    // here would replace the arbiter's answer with last-writer-wins in
+    // machineName order — the merge the arbiter exists to replace
+    // (ARBITER_CONTRACT.md §2.1, "Nothing bypasses the arbiter").
+    //
+    // Reproduced before this guard: cell 2437 read 1 in the arbitrated space and
+    // 0 after aggregation. Four Legal Services machines share region
+    // [2435:2439] and the registry declares the cell PRECEDENCE-contended; the
+    // arbiter resolved 1 and the later-sorted contributor's zero overwrote it.
+    // The three aggregating runtimes advanced with 0, the TypeScript PE with 1
+    // (RealityEngine_CI#263).
+    //
+    // Contention is derived from the gated contributors rather than read from
+    // the step: `arbitration` is not on the push wire — SURFACE_SPEC lists the
+    // step's keys and it is not among them — and §6 observability is a separate
+    // GET, so consulting it would cost a round trip per step.
+    val writers = mutable.Map.empty[Int, Int].withDefaultValue(0)
+    for (rec <- sorted) {
+      val writeLen = math.min(rec.outputVector.length, rec.outputLength)
+      for (i <- 0 until writeLen) {
+        val cell = rec.outputOffset + i
+        writers(cell) = writers(cell) + 1
+      }
+    }
+
     for (rec <- sorted) {
       val writeLen = math.min(rec.outputVector.length, rec.outputLength)
       val needed   = rec.outputOffset + writeLen
       if (needed > buf.length)
         buf.appendAll(Array.fill(needed - buf.length)(0.0))
-      for (i <- 0 until writeLen)
-        buf(rec.outputOffset + i) = rec.outputVector(i)
+      for (i <- 0 until writeLen) {
+        val cell = rec.outputOffset + i
+        if (writers(cell) <= 1) buf(cell) = rec.outputVector(i)
+      }
     }
     buf.toVector
   }
