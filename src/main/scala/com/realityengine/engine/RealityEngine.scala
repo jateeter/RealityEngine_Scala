@@ -333,12 +333,36 @@ class RealityEngine(
   //
   // Canonical machine order so the emitted `outputs` sequence is deterministic
   // across runs and comparable across runtimes.
+  /** A Universal Reality Event is decomposed; anything else is applied whole.
+    *
+    * Length decides, against the declared dimension (SURFACE_SPEC.md). This
+    * route used to hand the raw vector to every machine, so a universal event
+    * met a machine whose input region is a handful of cells, matched nothing,
+    * and returned a well-formed empty result — indistinguishable from a
+    * universe in which nothing fired (RealityEngine_CI#267).
+    *
+    * A machine mapped outside the presented space contributes nothing rather
+    * than raising: the universe is larger than any one deployment's space, and
+    * refusing would make a partial space unusable rather than partial.
+    */
+  private def machineSlice(machine: Machine, universal: Vector[Double]): Vector[Double] =
+    machine.perceptualMapping match {
+      case Some(m) =>
+        val off = m.input.offset
+        val len = m.input.length
+        if (off < 0 || len < 0 || off + len > universal.length) Vector.empty
+        else universal.slice(off, off + len)
+      case None => Vector.empty
+    }
+
   def processAcrossMachines(inputVector: Vector[Double]): Future[List[OutputVector]] = {
     val snapshot = getAllMachines
+    val universal = inputVector.length == universalDimension
     val asks: List[Future[Option[OutputVector]]] =
       snapshot.flatMap { machine =>
+        val applied = if (universal) machineSlice(machine, inputVector) else inputVector
         machineActors.get(machine.id).map { actor =>
-          (actor ? MachineActor.ProcessInput(inputVector))
+          (actor ? MachineActor.ProcessInput(applied))
             .mapTo[MachineActor.ProcessInputResult]
             .map { pr =>
               coverage.record(machine, pr.result)
