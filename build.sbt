@@ -6,7 +6,6 @@ organization := "com.realityengine"
 val AkkaVersion     = "2.8.6"
 val AkkaHttpVersion = "10.5.3"
 val CirceVersion    = "0.14.7"
-val SttpVersion     = "3.9.7"
 
 libraryDependencies ++= Seq(
   // Akka HTTP
@@ -19,11 +18,6 @@ libraryDependencies ++= Seq(
   "io.circe"                      %% "circe-generic"          % CirceVersion,
   "io.circe"                      %% "circe-parser"           % CirceVersion,
   "de.heikoseeberger"             %% "akka-http-circe"        % "1.39.2",
-
-  // sttp for Qdrant REST calls
-  "com.softwaremill.sttp.client3" %% "core"                   % SttpVersion,
-  "com.softwaremill.sttp.client3" %% "circe"                  % SttpVersion,
-  "com.softwaremill.sttp.client3" %% "akka-http-backend"      % SttpVersion,
 
   // Logging
   "ch.qos.logback"                %  "logback-classic"        % "1.5.6",
