@@ -786,10 +786,11 @@ class Routes(
             // held a deduplicated copy of machine state and so persisted 5108 of
             // 5128 sequences while reporting success (#92).
             //
-            // Now a no-op, matching the other two. Repopulating Qdrant is still
-            // open — `VectorStore` is untouched and the collection is created at
-            // boot — but it wants a writer that reads `machines` directly rather
-            // than a mirror kept in step by hand.
+            // Now a no-op, matching the other two. The follow-up this comment
+            // used to name — repopulating Qdrant from a writer that reads
+            // `machines` directly — no longer applies: the engine has been
+            // decoupled from Qdrant entirely, and `VectorStore` is in-memory.
+            // Durable state is being taken up as engine snapshotting instead.
             path("persist") { post { complete(Json.obj("success" -> Json.fromBoolean(true))) } },
             pathEnd {
               concat(
