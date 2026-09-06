@@ -355,9 +355,22 @@ class RealityEngine(
       case None => Vector.empty
     }
 
-  def processAcrossMachines(inputVector: Vector[Double]): Future[List[OutputVector]] = {
+  /** @param spaceDimension the live perceptual space's length — the same number
+    *   `GET /api/runtime/vector-space` reports, supplied by the caller because
+    *   the space is owned by `PerceptualSpaceRuntime`, not by this class.
+    *
+    *   NOT `universalDimension`. That field is `VECTOR_DIMENSION` or 7680, which
+    *   is the Perception Engine's input width and has nothing to do with how
+    *   wide this deployment's space actually is. Gating on it meant a genuine
+    *   16934-cell universal event failed the length test, was applied whole to
+    *   every machine, matched nothing, and returned zero outputs — while C++ and
+    *   LSP, which both compare against their real space, returned nine. The
+    *   route reported one dimension and decided on another.
+    */
+  def processAcrossMachines(inputVector: Vector[Double],
+                            spaceDimension: Int): Future[List[OutputVector]] = {
     val snapshot = getAllMachines
-    val universal = inputVector.length == universalDimension
+    val universal = inputVector.length == spaceDimension
     val asks: List[Future[Option[OutputVector]]] =
       snapshot.flatMap { machine =>
         val applied = if (universal) machineSlice(machine, inputVector) else inputVector

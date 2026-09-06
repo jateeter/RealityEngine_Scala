@@ -872,7 +872,12 @@ class Routes(
             // and the response shape differed from the other two (#254).
             path("process") { post { entity(as[Json]) { body =>
               val vec = body.hcursor.downField("vector").as[Vector[Double]].getOrElse(Vector.empty)
-              onComplete(engine.processAcrossMachines(vec)) {
+              // The live space length, which is exactly what
+              // `/api/runtime/vector-space` reports as `dimension`. Read here
+              // rather than inside the engine so the route decides against the
+              // same number it publishes.
+              val spaceDim = spaceRuntime.getPerceptualSpace.getPerceptualVector.length
+              onComplete(engine.processAcrossMachines(vec, spaceDim)) {
                 case Success(outputs) =>
                   val result = Json.obj(
                     "inputEvent" -> Json.arr(vec.map(Json.fromDoubleOrNull): _*),
