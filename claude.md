@@ -23,12 +23,38 @@ This repo contains the Scala/Akka Reality Engine and a standalone Scala Percepti
 - `perception-engine/src/mqtt/`: MQTT bridge.
 - `src/test/`, `perception-engine/tests/`: test coverage.
 
+## Building
+
+**Builds are controlled through `RealityEngine_CI`, not from here.** This repo is
+an independent git repository, not a subproject of CI or of any other engine.
+Read the contract before building or deploying:
+
+    RealityEngine_CI/docs/BUILD_CONTROL_CONTRACT.md
+
+```bash
+cd ../RealityEngine_CI && ./scripts/regression-test.sh --build-only
+```
+
+**This repository contains two independent sbt builds, not one build with two
+subprojects.** The root `build.sbt` declares no `lazy val` subprojects, no
+`aggregate` and no `dependsOn`, so **the root assembly does not produce the
+perception engine**. Each needs its own invocation from its own directory:
+
+```bash
+sbt clean assembly                          # → target/scala-2.13/reality-engine.jar
+(cd perception-engine && sbt clean assembly) # → perception-engine/target/scala-2.13/perception-engine.jar
+```
+
+`compile` is not `assembly`. `startUniverse.sh` launches fat jars; building with
+`compile` produces classes and leaves the jars untouched, and `start.sh` rebuilds
+stale jars on the way up so a local run hides the mistake entirely
+(`RealityEngine_CI#173`).
+
 ## Key Commands
 
 ```bash
 sbt test
-cd perception-engine && make compile
-cd perception-engine && make test
+cd perception-engine && sbt test
 cd perception-engine && make e2e-healthkit-spezi
 ```
 
