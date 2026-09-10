@@ -21,7 +21,7 @@ RUN --mount=type=cache,target=/root/.sbt,sharing=locked \
     sbt assembly
 
 # ── Stage 2: Runtime ────────────────────────────────────────────────────────
-FROM eclipse-temurin:17-jre-jammy
+FROM eclipse-temurin:25-jre-jammy
 
 WORKDIR /app
 
