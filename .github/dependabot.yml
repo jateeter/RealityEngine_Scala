@@ -1,0 +1,34 @@
+version: 2
+
+# Dependency currency for the Scala runtime.
+#
+# **sbt is not a Dependabot ecosystem.** `build.sbt` and
+# `perception-engine/build.sbt` cannot be tracked here, so Akka, Circe and the
+# rest stay manual — that is a limitation of the tool, not a decision, and it
+# is written down so nobody reads this file as covering the JVM dependencies.
+# Scala Steward is the usual answer if that gap becomes worth closing.
+#
+# What is tracked: the two images the runtime ships in. House policy across
+# this workspace is weekly, with **majors proposed too** — Dependabot opens the
+# PR, a human still merges it. Take a JDK major deliberately: it is a runtime
+# migration, and `startUniverse.sh` launches these jars.
+
+updates:
+
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: America/Chicago
+    open-pull-requests-limit: 3
+
+  - package-ecosystem: docker
+    directory: /perception-engine
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: America/Chicago
+    open-pull-requests-limit: 3
