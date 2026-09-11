@@ -30,17 +30,41 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# Wait for a service to answer, with a budget sized for the slowest thing it
+# waits on: a JVM cold start that loads the machine corpus.
+#
+# This was `40 * sleep 0.25` — ten seconds total. Measured, this Reality Engine
+# takes **30 seconds** to become ready: the JVM starts, then `loadDefaultMachines()`
+# walks MACHINES_DIR, which under the deployment gate is the full 1,328-machine
+# corpus (the log fills with HSPH177, HSPH178 … before the poll expires). So the
+# suite failed with "Reality Engine did not become ready" on a Reality Engine
+# that was starting perfectly well, just not in ten seconds.
+#
+# The C++ and LSP equivalents pass on the same budget because their runtimes
+# start in well under it. A timeout tuned against a native binary is untested
+# against the JVM — which is the second time that has bitten (RealityEngine_CI#328
+# was the same shape in the native lane).
+#
+# 240 * 0.5 = 120s, generous rather than tight: on a loaded CI box or a cold
+# page cache 30s is a floor, not a ceiling. Failing slow is recoverable; failing
+# fast on a healthy service costs an investigation.
+#
+# The deeper waste is that this suite does not need the corpus at all — it POSTs
+# the three machines it asserts on. Booting it against an isolated empty corpus
+# would make it start in seconds, but Scala's Main calls loadDefaultMachines()
+# unconditionally with no env gate, so that is an engine change rather than a
+# script one. RealityEngine_Scala#110.
 wait_for_http() {
   local url="$1"
   local name="$2"
   local i
-  for i in $(seq 1 40); do
+  for i in $(seq 1 "${WAIT_FOR_HTTP_TRIES:-240}"); do
     if curl -sf "$url" >/dev/null 2>&1; then
       return 0
     fi
-    sleep 0.25
+    sleep "${WAIT_FOR_HTTP_INTERVAL:-0.5}"
   done
-  echo "$name did not become ready at $url" >&2
+  echo "$name did not become ready at $url after ~$(( ${WAIT_FOR_HTTP_TRIES:-240} / 2 ))s" >&2
   return 1
 }
 
