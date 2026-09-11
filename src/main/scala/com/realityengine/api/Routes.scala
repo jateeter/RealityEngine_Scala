@@ -35,7 +35,7 @@ class Routes(
   engine:      RealityEngine,
   spaceRuntime:   PerceptualSpaceRuntime,
   auditCfg:    AuditConfig,
-  machinesDir: String = sys.env.getOrElse("MACHINES_DIR", "../RealityEngine_Machines/machines")
+  machinesDir: String = com.realityengine.MachineCorpus.dir
 )(implicit system: ActorSystem, ec: ExecutionContext) {
 
   // Canonical JSON key order: sorted.  C++ emits every object key-sorted
