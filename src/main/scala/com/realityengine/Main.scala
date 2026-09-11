@@ -76,7 +76,7 @@ object Main extends App {
       // before the corpus so the first step already arbitrates rather than
       // falling back (ARBITER_CONTRACT.md §5).
       com.realityengine.engine.ArbitrationRegistry.load(
-        sys.env.getOrElse("MACHINES_DIR", "../RealityEngine_Machines/machines"))
+        com.realityengine.MachineCorpus.dir)
 
       val routes   = new Routes(engine, spaceRuntime, auditCfg)
       routes.loadDefaultMachines()

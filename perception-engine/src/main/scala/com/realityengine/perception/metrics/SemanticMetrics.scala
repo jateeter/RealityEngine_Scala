@@ -29,6 +29,14 @@ object SemanticMetrics {
   private def manifestFile: Option[File] = {
     val explicit = sys.env.get("SEMANTICS_MANIFEST").filter(_.nonEmpty).map(new File(_))
     explicit.orElse {
+      // Deliberately duplicated from com.realityengine.MachineCorpus in the RE
+      // module. perception-engine is a *separate* sbt build — the root
+      // build.sbt declares no aggregate and no dependsOn
+      // (RealityEngine_CI/docs/BUILD_CONTROL_CONTRACT.md §2.1) — so there is no
+      // shared classpath to import it from. Keep the two in step: MACHINES_DIR
+      // is the machines directory itself, not the repository root, and
+      // startUniverse.sh passes the corpus it selected rather than the whole
+      // repo (RealityEngine_CI/docs/MACHINES_DIR_SWEEP.md).
       val machinesDir = sys.env.getOrElse("MACHINES_DIR", "../RealityEngine_Machines/machines")
       val start = new File(machinesDir).getAbsoluteFile
       Iterator.iterate(start)(_.getParentFile)
