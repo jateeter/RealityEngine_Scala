@@ -129,24 +129,35 @@ class PerceptionEngine(initialDimension: Int = sys.env.getOrElse("VECTOR_DIMENSI
     // whether storage or serialization owns expiry, and here that is settled.
     // The TypeScript PE uses this same rule.
     case s: SensorSourceConfig => s.withActive(s.active && s.lastUpdated.isDefined)
-    // Test and simulated are evaluated here too (RealityEngine_CI#358, settled in
-    // RealityEngine_CI SURFACE_SPEC.md "Already-settled instances" 2026-09-12).
-    // The point-3 rules are *the* activity rules, evaluated wherever activity is
-    // computed; a test source's term — its interned sequence is non-empty — is
-    // answerable the moment the source is declared. Deferring them to the first
-    // reset made registration and reset disagree about the same unchanged state.
-    //
-    // Point 2(a)'s "declares ... inactive" is scoped to integration sources,
-    // matching 2(b), so the sensor case above keeps its conjunction: activation
-    // is earned by ingress and never asserted by a caller (#199).
-    case t: TestSourceConfig   => t.withActive(t.inputs.nonEmpty)
-    case s: SimulatedSourceConfig => s.withActive(true)
     case other                 => other
+  }
+
+  /** Activity for the kinds whose rule is answerable at registration.
+    *
+    * RealityEngine_CI#358, settled in RealityEngine_CI SURFACE_SPEC.md
+    * "Already-settled instances" (2026-09-12): the point-3 rules are *the*
+    * activity rules, evaluated wherever activity is computed. A test source's
+    * term — its interned sequence is non-empty — is answerable the moment the
+    * source is declared, so it is answered then rather than deferred to the
+    * first reset. This runtime declared 21 of 41 active at registration and 26
+    * after a reset against the same unchanged state; two observation points
+    * evaluating the same rules must agree.
+    *
+    * Sensors are deliberately excluded. Point 2(a)'s "declares ... inactive" is
+    * scoped to integration sources, matching 2(b)'s "a source from an
+    * integration", so activation stays earned by ingress and never asserted by
+    * a caller (#199) — and `SourceDeclarationSpec` pins exactly that for
+    * `addSource`, which honours the activity a sensor is given.
+    */
+  private def deriveRegistrationActivity(src: SourceConfig): SourceConfig = src match {
+    case t: TestSourceConfig      => t.withActive(t.inputs.nonEmpty)
+    case s: SimulatedSourceConfig => s.withActive(true)
+    case other                    => other
   }
 
   def addSource(config: SourceConfig): SourceConfig = synchronized {
     val id  = if (config.id.nonEmpty) config.id else uuidGen.generate().toString
-    val src = applyId(config, id)
+    val src = deriveRegistrationActivity(applyId(config, id))
     ensureCapacity(src.region.offset + src.region.length)
     val withCached = inheritCached(src)
     sources = sources + (id -> withCached)
