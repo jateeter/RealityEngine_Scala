@@ -303,8 +303,11 @@ class PerceptualSpaceRuntime(dimension: Int = sys.env.getOrElse("VECTOR_DIMENSIO
       // plausible wrong severity is not (RealityEngine_CI#158).
       merged.foreach { values =>
         val sequenceIds = contributors.map(_._1).distinct.sorted
-        val governance  = Arbiter.joinGovernance(
-                            machine, contributors.map { case (s, ao) => (s, ao.vector) })
+        val governance  = Arbiter.joinGovernanceWithActions(
+                            machine,
+                            contributors.map { case (s, ao) =>
+                              (s, ao.vector, ao.metadata.get("action").flatMap(_.asString))
+                            })
 
         // Deprecation — attached when ANY contributor's sequence is deprecated,
         // reporting the lexicographically smallest one so the mark is

@@ -109,6 +109,7 @@ object JsonProtocol {
       "machineName"      -> Json.fromString(d.machineName),
       "sequenceId"       -> Json.fromString(d.sequenceId),
       "ragStatusCode"    -> d.ragStatusCode.fold(Json.Null)(Json.fromString),
+      "actionCode"       -> d.actionCode.fold(Json.Null)(Json.fromString),
       "processStatus"    -> d.processStatus.fold(Json.Null)(Json.fromString),
       "ownerTeam"        -> Json.fromString(d.ownerTeam),
       "slaSeconds"       -> d.slaSeconds.fold(Json.Null)(Json.fromInt),

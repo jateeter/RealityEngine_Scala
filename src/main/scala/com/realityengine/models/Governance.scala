@@ -28,6 +28,14 @@ case class PagingDecision(
   machineName:          String,
   sequenceId:           String,
   ragStatusCode:        Option[String],
+  // The action the corpus prescribes for this determination, from the output
+  // event's metadata. SEMANTIC_AUDIT_CONTRACT.md links a dispatch to its
+  // re:Action through it, and the PE's escalation guardrail is keyed on it —
+  // without it invariant 3 is unevaluable rather than passing
+  // (RealityEngine_CI#365). Travels beside ragStatusCode: both come from the
+  // same output metadata. Attached by Arbiter.joinGovernance, since
+  // Governance.resolve matches a rule and never sees the output event.
+  actionCode:           Option[String] = None,
   processStatus:        Option[String],
   ownerTeam:            String,
   slaSeconds:           Option[Int],

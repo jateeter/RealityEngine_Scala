@@ -221,9 +221,24 @@ object Arbiter {
    * governance, as today.
    */
   def joinGovernance(machine: com.realityengine.models.Machine,
-                     contributors: Seq[(String, Vector[Double])]): Option[PagingDecision] = {
-    val resolved = contributors.flatMap { case (seqId, values) =>
+                     contributors: Seq[(String, Vector[Double])]): Option[PagingDecision] =
+    joinGovernanceWithActions(machine, contributors.map { case (s, v) => (s, v, None) })
+
+  /** As `joinGovernance`, carrying each contributor's prescribed action.
+    *
+    * The action cannot be recovered downstream: `Governance.resolve` matches a
+    * rule by sequenceId and values and never sees the output event that holds
+    * it. So it travels with the contributor and is attached to the decision
+    * that WINS the severity join — not to whichever was seen last. The winning
+    * decision travels whole; composing one from two contributors would
+    * describe no rule that exists (RealityEngine_CI#365).
+    */
+  def joinGovernanceWithActions(
+      machine: com.realityengine.models.Machine,
+      contributors: Seq[(String, Vector[Double], Option[String])]): Option[PagingDecision] = {
+    val resolved = contributors.flatMap { case (seqId, values, action) =>
       com.realityengine.models.Governance.resolve(machine, seqId, values)
+        .map(d => d.copy(actionCode = action.filter(_.nonEmpty)))
     }
     if (resolved.isEmpty) None
     // lifeSafety is never set by this runtime's machine contributions, so the
