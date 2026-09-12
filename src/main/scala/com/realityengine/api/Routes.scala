@@ -915,11 +915,32 @@ class Routes(
             // counter and latched event bits; the perception engine keeps a
             // separate perceptual space, which is the one C++'s PerceptionMapper
             // ::reset() clears and which nothing here was clearing.
+            // clearAudit — opt-in, default false (SURFACE_SPEC.md "Already-settled
+            // instances", 2026-09-12). Absent or false, the
+            // re:SequenceObservation ring buffer SURVIVES the reset, which is
+            // what every runtime already did, so the default changes nothing:
+            // the audit trail is evidence, and a rewind of run state is not a
+            // reason to discard it.
+            //
+            // Read from the query string or the JSON body, because the resets
+            // are called both ways across the harness and a caller should not
+            // have to know which. A malformed or absent body leaves the flag at
+            // its default rather than refusing the reset.
             path("reset") { post {
-              engine.resetAllSequences()
-              spaceRuntime.reset()
-              engine.perceptionEngine.getPerceptualSpace.reset()
-              complete(Json.obj("success" -> Json.fromBoolean(true)))
+              parameter("clearAudit".as[Boolean].?) { clearQuery =>
+                entity(as[String]) { raw =>
+                  val clearBody = io.circe.parser.parse(raw).toOption
+                    .flatMap(_.hcursor.get[Boolean]("clearAudit").toOption)
+                  val clearAudit = clearQuery.orElse(clearBody).getOrElse(false)
+                  engine.resetAllSequences()
+                  spaceRuntime.reset()
+                  engine.perceptionEngine.getPerceptualSpace.reset()
+                  if (clearAudit) com.realityengine.services.SemanticAuditLog.clear()
+                  complete(Json.obj(
+                    "success"      -> Json.fromBoolean(true),
+                    "auditCleared" -> Json.fromBoolean(clearAudit)))
+                }
+              }
             } },
             path("stats") { get { complete(Json.obj("stats" -> engine.getStats)) } },
             path("active") { get {
@@ -1433,31 +1454,7 @@ class Routes(
               case None    => complete(Json.obj("done" -> Json.fromBoolean(true), "success" -> Json.fromBoolean(true)))
               case Some(s) => complete(Json.obj("success" -> Json.fromBoolean(true), "step" -> s.asJson))
             } } },
-            // clearAudit — opt-in, default false (SURFACE_SPEC.md "Already-settled
-            // instances", 2026-09-12). Absent or false, the
-            // re:SequenceObservation ring buffer SURVIVES the reset, which is
-            // what every runtime already did, so the default changes nothing:
-            // the audit trail is evidence, and a rewind of run state is not a
-            // reason to discard it.
-            //
-            // Read from the query string or the JSON body, because the resets
-            // are called both ways across the harness and a caller should not
-            // have to know which. A malformed body leaves the flag at its
-            // default rather than refusing the reset.
-            path("reset")   { post {
-              parameter("clearAudit".as[Boolean].?) { clearQuery =>
-                entity(as[String]) { raw =>
-                  val clearBody = io.circe.parser.parse(raw).toOption
-                    .flatMap(_.hcursor.get[Boolean]("clearAudit").toOption)
-                  val clearAudit = clearQuery.orElse(clearBody).getOrElse(false)
-                  spaceRuntime.reset()
-                  if (clearAudit) com.realityengine.services.SemanticAuditLog.clear()
-                  complete(Json.obj(
-                    "success"      -> Json.fromBoolean(true),
-                    "auditCleared" -> Json.fromBoolean(clearAudit)))
-                }
-              }
-            } },
+            path("reset")   { post { spaceRuntime.reset(); complete(Json.obj("success" -> Json.fromBoolean(true))) } },
             path("state")   { get {
               val ps = spaceRuntime.getPerceptualSpace.getPerceptualVector
               val stateObj = Json.obj(
