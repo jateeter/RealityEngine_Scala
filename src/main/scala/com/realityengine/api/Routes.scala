@@ -1433,7 +1433,31 @@ class Routes(
               case None    => complete(Json.obj("done" -> Json.fromBoolean(true), "success" -> Json.fromBoolean(true)))
               case Some(s) => complete(Json.obj("success" -> Json.fromBoolean(true), "step" -> s.asJson))
             } } },
-            path("reset")   { post { spaceRuntime.reset(); complete(Json.obj("success" -> Json.fromBoolean(true))) } },
+            // clearAudit — opt-in, default false (SURFACE_SPEC.md "Already-settled
+            // instances", 2026-09-12). Absent or false, the
+            // re:SequenceObservation ring buffer SURVIVES the reset, which is
+            // what every runtime already did, so the default changes nothing:
+            // the audit trail is evidence, and a rewind of run state is not a
+            // reason to discard it.
+            //
+            // Read from the query string or the JSON body, because the resets
+            // are called both ways across the harness and a caller should not
+            // have to know which. A malformed body leaves the flag at its
+            // default rather than refusing the reset.
+            path("reset")   { post {
+              parameter("clearAudit".as[Boolean].?) { clearQuery =>
+                entity(as[String]) { raw =>
+                  val clearBody = io.circe.parser.parse(raw).toOption
+                    .flatMap(_.hcursor.get[Boolean]("clearAudit").toOption)
+                  val clearAudit = clearQuery.orElse(clearBody).getOrElse(false)
+                  spaceRuntime.reset()
+                  if (clearAudit) com.realityengine.services.SemanticAuditLog.clear()
+                  complete(Json.obj(
+                    "success"      -> Json.fromBoolean(true),
+                    "auditCleared" -> Json.fromBoolean(clearAudit)))
+                }
+              }
+            } },
             path("state")   { get {
               val ps = spaceRuntime.getPerceptualSpace.getPerceptualVector
               val stateObj = Json.obj(
