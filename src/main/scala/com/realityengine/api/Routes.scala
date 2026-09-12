@@ -928,7 +928,14 @@ class Routes(
             // its default rather than refusing the reset.
             path("reset") { post {
               parameter("clearAudit".as[Boolean].?) { clearQuery =>
-                entity(as[String]) { raw =>
+                // extractStrictEntity, not entity(as[String]): the latter REQUIRES
+                // an entity and rejects a bodyless POST with
+                // RequestEntityExpectedRejection. Every existing caller of this
+                // route posts without a body, so requiring one would turn an
+                // optional flag into a breaking change — which is exactly what
+                // it did before this was corrected.
+                extractStrictEntity(3.seconds) { strict =>
+                  val raw = strict.data.utf8String
                   val clearBody = io.circe.parser.parse(raw).toOption
                     .flatMap(_.hcursor.get[Boolean]("clearAudit").toOption)
                   val clearAudit = clearQuery.orElse(clearBody).getOrElse(false)
