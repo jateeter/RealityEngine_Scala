@@ -155,6 +155,13 @@ fi
 check_port_free "$REALITY_ENGINE_PORT" "$RE_PID_FILE"
 check_port_free "$PERCEPTION_ENGINE_PORT" "$PE_PID_FILE"
 
+# Explicit heap (RE_JAVA_OPTS / PE_JAVA_OPTS to override). These ran as bare
+# `java -jar`, so the JVM took its default max of ~1/4 of host RAM; the RE then
+# died with java.lang.OutOfMemoryError: Java heap space part-way through
+# recording the energy domain's CES contracts, and akka.jvm-exit-on-fatal-error
+# killed the JVM outright rather than degrading. The allocation is response
+# serialization: with a large resident corpus each perceive answers ~600 KB and
+# a contract sweep issues thousands.
 echo "Starting Scala Reality Engine on $HOST:$REALITY_ENGINE_PORT${INSTANCE_ID:+ [instance: $INSTANCE_ID]}"
 HOST="$HOST" \
 PORT="$REALITY_ENGINE_PORT" \
@@ -163,7 +170,7 @@ VECTOR_DIMENSION="$VECTOR_DIMENSION" \
 MACHINES_DIR="$_machines_load_dir" \
 QDRANT_URL="$QDRANT_URL" \
 LOCAL_AI_API_URL="$LOCAL_AI_API_URL" \
-  nohup java -jar "$RE_JAR" > "$RE_LOG_FILE" 2>&1 &
+nohup java ${RE_JAVA_OPTS:--Xmx6g} -jar "$RE_JAR" > "$RE_LOG_FILE" 2>&1 &
 echo "$!" > "$RE_PID_FILE"
 
 if ! wait_for_http "http://localhost:${REALITY_ENGINE_PORT}/api/health" "Scala RE"; then
@@ -194,7 +201,7 @@ ACP_SESSION_KEY="$ACP_SESSION_KEY" \
 OPENCLAW_ACP_SESSION="$OPENCLAW_ACP_SESSION" \
 ACP_TARGET_AGENT="$ACP_TARGET_AGENT" \
 ACP_COMPLETION_SOURCE_MAPPING_ID="$ACP_COMPLETION_SOURCE_MAPPING_ID" \
-  nohup java -jar "$PE_JAR" > "$PE_LOG_FILE" 2>&1 &
+  nohup java ${PE_JAVA_OPTS:--Xmx3g} -jar "$PE_JAR" > "$PE_LOG_FILE" 2>&1 &
 echo "$!" > "$PE_PID_FILE"
 
 if ! wait_for_http "http://localhost:${PERCEPTION_ENGINE_PORT}/api/health" "Scala PE"; then
