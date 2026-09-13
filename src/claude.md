@@ -7,3 +7,51 @@ This directory contains the root Scala Reality Engine implementation.
 - Treat generated machine bindings as derived code unless the user asks for generated updates.
 - Verify with `sbt test` after source changes.
 
+## MUST: every use of the word "registry" carries a qualifier
+
+**The word "registry" MUST NEVER appear unqualified. Every single use of the
+word takes a qualifier naming which registry is meant.**
+
+This is a hard requirement, not a style preference. It applies to every
+occurrence in every context, with no exceptions: prose, end-of-task summaries,
+commit messages, PR bodies, issue titles and bodies, code comments, docstrings,
+variable and function names, log lines, and documentation.
+
+Wrong, in every case — these are all violations:
+
+- "the registry"
+- "a versioned registry"
+- "the registry file" / "update the registry" / "registry-backed"
+- "check the registry first"
+- "registry drift"
+
+Right — a qualifier every time:
+
+- "the **instance** registry"
+- "a versioned **cesgen** registry"
+- "the **arbitration** registry"
+- "**machine** registry drift"
+
+If you type the word "registry" and the word immediately before it is not a
+qualifier, stop and add one. Re-read every summary and every message for the
+bare word before sending it — that is where this rule is actually broken, because
+the surrounding context makes the referent feel obvious in the moment. That
+feeling is exactly the assumption the rule exists to block.
+
+Qualifiers currently in use. **This list is open, not exhaustive** — a registry
+added later gets a qualifier too; nothing is ever promoted to being "the
+registry" by virtue of being the one under discussion:
+
+- **instance** registry — `/tmp/re-registry/re-registry.json`, served at
+  `:5999/re-registry.json`. Running RE/PE instances with `re_url`/`pe_url`/ports,
+  plus `services` and `allocation`. What `RE_REGISTRY_URL` points at.
+- **machine** registry — the machines a runtime holds in memory, reported by
+  `GET /api/machines`. Distinct from `GET /api/machines/json/list`, the on-disk
+  corpus catalog.
+- **cesgen** registry — `RealityEngine_Machines/domains/ces-contract-registry.json`.
+  Which CES output-stream contract shards exist, what corpus each was recorded
+  against, whether each is current.
+- **arbitration** registry — `machines/domains/arbitration-registry.json`.
+- **domain** registry — `machines/domains/domain-registry.json`.
+- **semantic-bus** registry — `machines/domains/semantic-bus-registry.json`.
+- **tag** registry — `RealityEngine_CI/docs/TAG_REGISTRY.md`.

@@ -146,6 +146,54 @@ class Routes(
   // This route previously ignored the flags entirely and always emitted both
   // fields, which SURFACE_SPEC calls out directly: "A runtime that ignores
   // `compact` does not satisfy the contract."
+  /** Restrict a step to the subset the caller asked for, before it is encoded.
+    *
+    * RealityEngine_CI#367. `POST /api/perceive` answered with the whole universe
+    * on every call: measured at full corpus a single response was 1.6 MB, and a
+    * contract sweep issuing thousands of them exhausted this runtime's heap
+    * (`java.lang.OutOfMemoryError: Java heap space`, after which
+    * `akka.jvm-exit-on-fatal-error` killed the JVM outright).
+    *
+    * Applied to the case class rather than to the encoded Json, unlike the
+    * include/exclude trimming below: removing fields after `asJson` still pays
+    * to build them, and the allocation is the defect. Selection is by sequence
+    * id because a region can have more than one writer and a sequence id cannot;
+    * machines are named rather than identified because ids are minted per
+    * runtime and are not comparable across the quorum.
+    *
+    * No selector => the step is returned untouched, so the default wire is
+    * unchanged byte-for-byte.
+    */
+  private def selectStepSubset(step: SimulationStep, body: Json): SimulationStep = {
+    val only = body.hcursor.downField("only")
+    if (only.failed) step
+    else {
+      val seqIds   = only.get[List[String]]("sequenceIds").getOrElse(Nil).toSet
+      val machines = only.get[List[String]]("machineNames").getOrElse(Nil).toSet
+      if (seqIds.isEmpty && machines.isEmpty) step
+      else {
+        // Which of this runtime's ids the requested names resolve to. The
+        // caller cannot supply these: they are minted here.
+        val selectedIds =
+          step.machineResults.collect { case (id, mr) if machines.contains(mr.machineName) => id }.toSet
+        step.copy(
+          mergeBatch     = step.mergeBatch.filter(op =>
+                             op.sequenceIds.exists(seqIds.contains) || selectedIds.contains(op.machineId)),
+          eventBus       = step.eventBus.filter(w =>
+                             seqIds.contains(w.producerSequenceId) ||
+                             selectedIds.contains(w.producerMachineId) ||
+                             selectedIds.contains(w.subscriberMachineId)),
+          activeRegions  = step.activeRegions.filter(r => selectedIds.contains(r.machineId)),
+          machineResults = step.machineResults.filter { case (id, mr) =>
+                             machines.contains(mr.machineName) || selectedIds.contains(id) ||
+                             step.mergeBatch.exists(op => op.machineId == id &&
+                                                          op.sequenceIds.exists(seqIds.contains))
+                           }
+        )
+      }
+    }
+  }
+
   private def trimStepJson(step: Json, body: Json): Json = {
     val c = body.hcursor
     val compact = c.get[Boolean]("compact").getOrElse(false)
@@ -378,6 +426,7 @@ class Routes(
       "includeMachineResults"  -> Json.fromString("boolean request field on /api/perceive"),
       "includePerceptualSpace" -> Json.fromString("boolean request field on /api/perceive"),
       "includeActiveRegions"   -> Json.fromString("boolean request field on /api/perceive"),
+      "only"                   -> Json.fromString("object request field on /api/perceive: {sequenceIds[], machineNames[]} restricts mergeBatch, eventBus, activeRegions and machineResults to the named subset"),
       "compact"                -> Json.fromString("sets includeMachineResults false when includeMachineResults is omitted")
     )
   )
@@ -1502,7 +1551,9 @@ class Routes(
           // The SSE hub gets the whole step: subscribers are observation
           // points and asked for everything by subscribing.
           sseQueue.offer(step)
-          complete(trimStepJson(step.asJson, body))
+          // The SSE hub above gets the whole step: subscribers asked for
+          // everything by subscribing. Only the caller's response is narrowed.
+          complete(trimStepJson(selectStepSubset(step, body).asJson, body))
         } } },
 
         // ── /api/engine/config — one pathway for every runtime control ────
