@@ -55,3 +55,34 @@ registry" by virtue of being the one under discussion:
 - **domain** registry — `machines/domains/domain-registry.json`.
 - **semantic-bus** registry — `machines/domains/semantic-bus-registry.json`.
 - **tag** registry — `RealityEngine_CI/docs/TAG_REGISTRY.md`.
+
+## MUST: verify a merge beyond the hosted checks
+
+**A green PR is not a verified PR. Never merge on the hosted checks alone.**
+
+The hosted path does not exercise this system's integration points. A PR can show
+every check green and still be unverified, because the checks that ran were a
+security scan and — at most — a corpus gate. `localAIStack`, `localOpenClawStack`,
+Ollama, Qdrant, MQTT, the OpenClaw ACP gateway and the multi-engine universe are
+**not** reachable from the hosted runners, so nothing on that path can tell you
+whether the change works where it has to work.
+
+Observed repeatedly: RealityEngine_Machines PRs report exactly one check
+(GitGuardian). That is not evidence about the corpus, the registries, the
+engines, or any bridge.
+
+Before merging, verify **locally**, and say in the PR which of these you ran and
+what they returned:
+
+- The repo's own gates — `validate-corpus.sh`, the contract suite,
+  `npm test`, `make test`, `sbt test` — whichever the change touches.
+- The integration points the change can reach: a live 3-of-3 universe, the
+  local AI stack, the OpenClaw gateway, MQTT — whichever the change can affect.
+- The specific behaviour the change claims, with the numbers it produced.
+
+If an integration point cannot be exercised, **say so in the PR** and name it.
+An unverified area that is named is a known gap; an unverified area that is
+silent reads as tested.
+
+A hosted green tells you the change did not break the hosted path. That is worth
+having and is not the question being asked at merge time.
