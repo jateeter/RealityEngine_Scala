@@ -97,6 +97,20 @@ class PerceptionRoutes(
   private val dispatchLedgerLimit = sys.env.get("TRIGGER_DISPATCH_LEDGER_LIMIT").flatMap(_.toIntOption).getOrElse(100)
   private val dispatchLedger      = new AtomicReference[Vector[Json]](Vector.empty)
 
+  // localAI/MCP invocation ledger (RealityEngine_Machines#152). Mirrors the
+  // dispatch ledger above — bounded, oldest first — so a long-running PE cannot
+  // grow without bound and both ledgers read alike across runtimes.
+  private val localAiLedgerLimit = sys.env.get("LOCALAI_INVOCATION_LEDGER_LIMIT").flatMap(_.toIntOption).getOrElse(256)
+  private val localAiLedger      = new AtomicReference[Vector[Json]](Vector.empty)
+
+  private def recordLocalAiInvocation(rec: Json): Unit =
+    localAiLedger.updateAndGet(v => (v :+ rec).takeRight(localAiLedgerHardLimit))
+
+  // takeRight on every append is O(n) but n is 256; the alternative is a mutable
+  // deque behind a lock, which buys nothing at this size and costs the atomic
+  // update's simplicity.
+  private def localAiLedgerHardLimit: Int = localAiLedgerLimit
+
   // In-memory push history (ring buffer, capped at pushHistoryLimit entries)
   private val pushHistoryLimit = sys.env.get("PUSH_HISTORY_LIMIT").flatMap(_.toIntOption).getOrElse(100)
   private val pushHistory      = new AtomicReference[Vector[Json]](Vector.empty)
@@ -1600,9 +1614,55 @@ class PerceptionRoutes(
           "/v1/images/generations", "/v1/audio/transcriptions", "/graphql", "/api/predict"
         )
         val targetPath = body.hcursor.get[String]("path").getOrElse("/v1/chat/completions")
+
+        // The correlation id is what lets a completion write-back be joined to
+        // the invocation that justified it. Taken from the caller when given,
+        // minted otherwise so no record is left unjoinable.
+        val correlationId = body.hcursor.get[String]("correlationId")
+          .getOrElse(s"localai-invocation-${System.currentTimeMillis()}-${scala.util.Random.nextInt(1000000)}")
+        val invocationId  = s"localai-inv-${System.currentTimeMillis()}-${scala.util.Random.nextInt(1000000)}"
+        val startedAt     = System.currentTimeMillis()
+
+        // Machine and sequence are recorded only when the caller names them. An
+        // invocation with no authored occasion is a detectable condition;
+        // inventing one would hide it.
+        def carry(key: String): Option[(String, Json)] =
+          body.hcursor.get[String](key).toOption.filter(_.nonEmpty).map(v => key -> v.asJson)
+
+        def record(success: Boolean, response: Option[Json], error: Option[String]): Unit = {
+          val base = List(
+            "id"            -> invocationId.asJson,
+            "correlationId" -> correlationId.asJson,
+            "provider"      -> "localai".asJson,
+            "endpoint"      -> targetPath.asJson,
+            "method"        -> "POST".asJson,
+            "startedAt"     -> startedAt.asJson,
+            "completedAt"   -> System.currentTimeMillis().asJson,
+            "success"       -> success.asJson
+          )
+          val carried = List("machineName", "sequenceId", "requestClass", "resultClass").flatMap(carry)
+          val err     = error.map(e => "error" -> e.asJson).toList
+          // The response is summarised, never stored whole: a ledger holding
+          // every RAG passage becomes the largest object in the process and is
+          // read by nobody. What a trace needs is that evidence existed and
+          // where it came from.
+          val evidence = response.map { r =>
+            "evidence" -> Json.obj(
+              "uri"   -> s"$localAiApiUrl$targetPath".asJson,
+              "shape" -> (if (r.isObject) "object" else if (r.isArray) "array" else "scalar").asJson
+            )
+          }.toList
+          recordLocalAiInvocation(Json.obj((base ++ carried ++ err ++ evidence): _*))
+        }
+
         if (!allowed.contains(targetPath)) {
+          // Recorded before the refusal is returned. An attempt on a forbidden
+          // endpoint is exactly the event a runtime trace must carry, and an
+          // unrecorded path loses it entirely.
+          record(success = false, response = None, error = Some("endpoint is not allowed"))
           complete(StatusCodes.Forbidden ->
-            Json.obj("error" -> "Path not in allowed list".asJson, "path" -> targetPath.asJson))
+            Json.obj("error" -> "Path not in allowed list".asJson, "path" -> targetPath.asJson,
+                     "correlationId" -> correlationId.asJson))
         } else {
           val payload = body.hcursor.downField("body").as[Json].getOrElse(body)
           try {
@@ -1613,12 +1673,29 @@ class PerceptionRoutes(
               .response(asString)
               .send(sttpBackend)
             val parsed = resp.body.toOption.flatMap(b => io.circe.parser.parse(b).toOption).getOrElse(Json.Null)
+            if (resp.isSuccess) record(success = true, response = Some(parsed), error = None)
+            else record(success = false, response = None, error = Some(s"provider returned ${resp.code}"))
             complete((if (resp.isSuccess) StatusCodes.OK else StatusCodes.BadGateway) -> parsed)
           } catch { case e: Exception =>
-            complete(StatusCodes.ServiceUnavailable -> Json.obj("error" -> e.getMessage.asJson))
+            // A call that failed is still a call that was made. A ledger of
+            // successes cannot answer "was this attempted".
+            record(success = false, response = None, error = Some(e.getMessage))
+            complete(StatusCodes.ServiceUnavailable -> Json.obj("error" -> e.getMessage.asJson,
+                                                                "correlationId" -> correlationId.asJson))
           }
         }
       } }
+    },
+
+    // GET /api/integrations/localai/ledger — wire-compatible with the C++ PE.
+    path("api" / "integrations" / "localai" / "ledger") {
+      get {
+        complete(Json.obj(
+          "provider" -> "localai".asJson,
+          "endpoint" -> localAiApiUrl.asJson,
+          "records"  -> Json.arr(localAiLedger.get(): _*)
+        ))
+      }
     },
 
     // ── Signals ───────────────────────────────────────────────────────────────
