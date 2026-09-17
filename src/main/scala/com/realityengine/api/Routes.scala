@@ -31,6 +31,8 @@ import akka.http.scaladsl.model.headers.RawHeader
 import com.realityengine.logging.{AuditConfig, AuditLogger}
 
 // Routes — Akka HTTP route definitions mirroring all TypeScript /api/... endpoints.
+import EngineConfig._
+
 class Routes(
   engine:      RealityEngine,
   spaceRuntime:   PerceptualSpaceRuntime,
@@ -128,7 +130,11 @@ class Routes(
   private val jsonFileCache = TrieMap.empty[String, (Long, String)]
 
   // Runtime options — mutable defaults exposed via /api/runtime/options
-  private val historyLimitRef           = new AtomicReference[Int](1000)
+  // 250, declared in SURFACE_SPEC.md ("Phase 2 — the observational filters")
+  // rather than chosen here. It was 256 on C++, 250 on LSP and 1000 on this
+  // runtime: three reasonable values for one control, which is what happens
+  // when each runtime picks its own.
+  private val historyLimitRef           = new AtomicReference[Int](250)
   private val includeMachineResultsRef  = new AtomicReference[Boolean](true)
   private val includePerceptualSpaceRef = new AtomicReference[Boolean](true)
   // Defaults stay full so no existing caller changes shape and the parity gates
@@ -407,29 +413,98 @@ class Routes(
     * `default` is the specification's value, restated in the reply so a reader
     * sees what the runtime is supposed to hold as well as what it does.
     */
-  private def transitionsInhibitedControl(): Json =
+  /** A control in the five-field shape SURFACE_SPEC declares.
+    *
+    * `default` is the specification's value, restated in the response so a
+    * reader can see what this runtime is supposed to hold as well as what it
+    * does hold. Those are different questions, and `/api/runtime/options`
+    * answers only the second — which is how a runtime someone had written to
+    * became indistinguishable from one shipped that way.
+    */
+  private def controlJson(name: String, scope: String, value: Json, declaredDefault: Json): Json =
     Json.obj(
-      "name"    -> Json.fromString("transitionsInhibited"),
-      "scope"   -> Json.fromString("machine"),
-      "value"   -> Json.fromFields(
-        engine.getAllMachines.map(m => m.id -> Json.fromBoolean(m.transitionsInhibited))),
-      "default" -> Json.False,
+      "name"    -> Json.fromString(name),
+      "scope"   -> Json.fromString(scope),
+      "value"   -> value,
+      "default" -> declaredDefault,
       "mutable" -> Json.True
     )
 
-  private def runtimeOptionsJson(): Json = Json.obj(
-    "historyLimit"           -> Json.fromInt(historyLimitRef.get()),
-    "includeMachineResults"  -> Json.fromBoolean(includeMachineResultsRef.get()),
-    "includeActiveRegions"   -> Json.fromBoolean(includeActiveRegionsRef.get()),
-    "includePerceptualSpace" -> Json.fromBoolean(includePerceptualSpaceRef.get()),
-    "projectionControls"     -> Json.obj(
-      "includeMachineResults"  -> Json.fromString("boolean request field on /api/perceive"),
-      "includePerceptualSpace" -> Json.fromString("boolean request field on /api/perceive"),
-      "includeActiveRegions"   -> Json.fromString("boolean request field on /api/perceive"),
-      "only"                   -> Json.fromString("object request field on /api/perceive: {sequenceIds[], machineNames[]} restricts mergeBatch, eventBus, activeRegions and machineResults to the named subset"),
-      "compact"                -> Json.fromString("sets includeMachineResults false when includeMachineResults is omitted")
+  private def transitionsInhibitedControl(): Json =
+    controlJson("transitionsInhibited", "machine",
+      Json.fromFields(engine.getAllMachines.map(m => m.id -> Json.fromBoolean(m.transitionsInhibited))),
+      Json.False)
+
+
+  private def engineControls: List[EngineControl] = {
+    // An engine-scoped boolean, written once rather than four times so the four
+    // cannot drift apart the way the runtimes they mirror did.
+    def booleanControl(name: String, ref: AtomicReference[Boolean], declaredDefault: Boolean): EngineControl = {
+      def current(): Json = controlJson(name, "engine", Json.fromBoolean(ref.get()), Json.fromBoolean(declaredDefault))
+      EngineControl(name, "engine", () => current(),
+        body => body.hcursor.get[Boolean]("value").toOption match {
+          case None        => Left(ControlRefusal(s"$name requires a boolean `value`", StatusCodes.BadRequest))
+          case Some(value) => ref.set(value); Right(current())
+        },
+        () => { ref.set(declaredDefault); current() })
+    }
+
+    def historyLimitJson(): Json =
+      controlJson("historyLimit", "engine", Json.fromInt(historyLimitRef.get()), Json.fromInt(250))
+
+    List(
+      EngineControl("historyLimit", "engine", () => historyLimitJson(),
+        body => {
+          // A negative limit is refused rather than stored, where it would make
+          // the bound stop bounding anything. `get[Int]` already refuses a
+          // fractional value.
+          body.hcursor.get[Int]("value").toOption match {
+            case Some(v) if v >= 0 => historyLimitRef.set(v); Right(historyLimitJson())
+            case _ => Left(ControlRefusal("historyLimit requires a non-negative whole-number `value`",
+                                          StatusCodes.BadRequest))
+          }
+        },
+        () => { historyLimitRef.set(250); historyLimitJson() }),
+      booleanControl("includeActiveRegions", includeActiveRegionsRef, true),
+      booleanControl("includeMachineResults", includeMachineResultsRef, true),
+      booleanControl("includePerceptualSpace", includePerceptualSpaceRef, true),
+      EngineControl("transitionsInhibited", "machine", () => transitionsInhibitedControl(),
+        body => {
+          val c = body.hcursor
+          c.get[Boolean]("value").toOption match {
+            case None => Left(ControlRefusal("transitionsInhibited requires a boolean `value`",
+                                             StatusCodes.BadRequest))
+            case Some(value) => c.get[String]("machine").toOption match {
+              // A write naming a machine that does not exist is 404, never a
+              // silent no-op answering 200.
+              case Some(id) => engine.getMachine(id) match {
+                case None    => Left(ControlRefusal(s"Machine not found: $id", StatusCodes.NotFound))
+                case Some(m) => m.transitionsInhibited = value; Right(transitionsInhibitedControl())
+              }
+              case None => engine.getAllMachines.foreach(_.transitionsInhibited = value)
+                           Right(transitionsInhibitedControl())
+            }
+          }
+        },
+        () => { engine.getAllMachines.foreach(_.transitionsInhibited = false)
+                transitionsInhibitedControl() })
     )
-  )
+  }
+
+  /** The flat view of the same state `/api/engine/config` enumerates. Two views,
+    * one store — a runtime holding two copies that can disagree does not conform.
+    *
+    * `projectionControls` is gone. It was an object of prose describing
+    * request-body fields, emitted here and by C++ with a different key set,
+    * absent on LSP, and read by nothing in any repository. Documentation of a
+    * request field belongs in SURFACE_SPEC, where there is one copy; carried in
+    * a response it was three copies that had already drifted, and it made this
+    * surface impossible to compare byte-for-byte.
+    */
+  private def runtimeOptionsJson(): Json =
+    Json.fromFields(engineControls.filter(_.scope == "engine").map { c =>
+      c.name -> c.read().hcursor.get[Json]("value").getOrElse(Json.Null)
+    })
 
   private def storageFootprintJson(): Json = {
     val mappedMachines = engine.getAllMachines.filter(_.perceptualMapping.isDefined)
@@ -1591,49 +1666,32 @@ class Routes(
         // default come from that document, not from here: three runtimes each
         // choosing a reasonable value is how historyLimit became 256/250/1000.
         pathPrefix("engine" / "config") { concat(
-          pathEnd { get { complete(Json.obj("controls" -> Json.arr(transitionsInhibitedControl()))) } },
-          path(Segment) { control => concat(
-            get {
-              if (control != "transitionsInhibited")
-                complete(StatusCodes.NotFound, Json.obj("error" -> Json.fromString(s"Unknown control: $control")))
-              else complete(transitionsInhibitedControl())
-            },
-            put { entity(as[Json]) { body =>
-              val c = body.hcursor
-              if (control != "transitionsInhibited")
-                complete(StatusCodes.NotFound, Json.obj("error" -> Json.fromString(s"Unknown control: $control")))
-              else c.get[Boolean]("value").toOption match {
-                case None =>
-                  complete(StatusCodes.BadRequest,
-                           Json.obj("error" -> Json.fromString("transitionsInhibited requires a boolean `value`")))
-                case Some(value) =>
-                  c.get[String]("machine").toOption match {
-                    // A write naming a machine that does not exist is 404, never
-                    // a silent no-op answering 200.
-                    case Some(id) =>
-                      engine.getMachine(id) match {
-                        case None => complete(StatusCodes.NotFound,
-                                              Json.obj("error" -> Json.fromString(s"Machine not found: $id")))
-                        case Some(m) => m.transitionsInhibited = value
-                                        complete(transitionsInhibitedControl())
-                      }
-                    case None =>
-                      engine.getAllMachines.foreach(_.transitionsInhibited = value)
-                      complete(transitionsInhibitedControl())
+          pathEnd { get {
+            // Emitted sorted by name. A set walked in each runtime's own
+            // iteration order reports the same content three ways and no
+            // comparison finds a majority (#197).
+            complete(Json.obj("controls" -> Json.arr(engineControls.map(_.read()): _*)))
+          } },
+          path(Segment) { control =>
+            val found = engineControls.find(_.name == control)
+            val unknown = complete(StatusCodes.NotFound,
+                                   Json.obj("error" -> Json.fromString(s"Unknown control: $control")))
+            found match {
+              case None => concat(get { unknown }, put { entity(as[Json]) { _ => unknown } }, delete { unknown })
+              case Some(c) => concat(
+                get { complete(c.read()) },
+                put { entity(as[Json]) { body =>
+                  c.write(body) match {
+                    case Left(r)     => complete(r.status, Json.obj("error" -> Json.fromString(r.message)))
+                    case Right(json) => complete(json)
                   }
-              }
-            } },
-            delete {
-              if (control != "transitionsInhibited")
-                complete(StatusCodes.NotFound, Json.obj("error" -> Json.fromString(s"Unknown control: $control")))
-              else {
+                } },
                 // "Restore the declared default", not "remove the control" —
                 // controls are fixed by the specification.
-                engine.getAllMachines.foreach(_.transitionsInhibited = false)
-                complete(transitionsInhibitedControl())
-              }
+                delete { complete(c.reset()) }
+              )
             }
-          ) }
+          }
         ) },
 
         // Runtime introspection — parity with /api/runtime/* on LSP and CPP runtimes
@@ -1656,12 +1714,14 @@ class Routes(
           path("storage-footprint") { get { complete(storageFootprintJson()) } },
           path("options") { concat(
             get  { complete(runtimeOptionsJson()) },
+            // Writes through the control table, so this verb and
+            // /api/engine/config cannot disagree about which controls exist or
+            // what they accept.
             patch { entity(as[Json]) { body =>
-              val c = body.hcursor
-              c.get[Int]("historyLimit").toOption.foreach(historyLimitRef.set)
-              c.get[Boolean]("includeMachineResults").toOption.foreach(includeMachineResultsRef.set)
-              c.get[Boolean]("includePerceptualSpace").toOption.foreach(includePerceptualSpaceRef.set)
-              c.get[Boolean]("includeActiveRegions").toOption.foreach(includeActiveRegionsRef.set)
+              engineControls.filter(_.scope == "engine").foreach { c =>
+                if (body.hcursor.downField(c.name).succeeded)
+                  c.write(Json.obj("value" -> body.hcursor.downField(c.name).focus.getOrElse(Json.Null)))
+              }
               complete(runtimeOptionsJson())
             } }
           ) }
@@ -1720,4 +1780,32 @@ class Routes(
   val routes: Route = respondWithHeaders(corsHeaders) {
     options { complete(StatusCodes.NoContent) } ~ innerRoutes
   }
+}
+
+/** Types for the `/api/engine/config` control table.
+  *
+  * Outside `Routes` rather than inside it: declared as members they would be
+  * path-dependent types, and every pattern match on one would carry an outer
+  * reference the compiler cannot check at run time. Neither closes over a
+  * `Routes` instance, so the nesting bought nothing and cost two warnings.
+  */
+private[api] object EngineConfig {
+  /** A refusal a write returns instead of pretending to succeed. */
+private[api] final case class ControlRefusal(message: String, status: StatusCode)
+
+/** One control on the `/api/engine/config` pathway.
+  *
+  * Phase 1 carried its single control as `if (control != "transitionsInhibited")`
+  * in each of four directives. A branch per control is how a runtime implements
+  * four of five and answers 404 for the rest while reporting success on
+  * everything it does support — and this surface exists to be compared, so a
+  * control missing from one runtime is the defect rather than a difference.
+  */
+private[api] final case class EngineControl(
+  name:  String,
+  scope: String,
+  read:  () => Json,
+  write: Json => Either[ControlRefusal, Json],
+  reset: () => Json
+)
 }
