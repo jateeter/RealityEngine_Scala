@@ -449,7 +449,7 @@ class RealityEngine(
       optSeq
     }
 
-  def searchVectors(queryVector: Vector[Double], limit: Int = 10, threshold: Option[Double] = None): Future[List[(RealityEvent, Double)]] =
+  def searchVectors(queryVector: Vector[Double], limit: Int = 10, threshold: Option[Double] = None): Future[List[(Json, Double)]] =
     vectorStore.searchSimilar(queryVector, limit, threshold)
 
   // ── Stats ─────────────────────────────────────────────────────────────────

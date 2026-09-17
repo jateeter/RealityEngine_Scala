@@ -793,24 +793,39 @@ class Routes(
               val limit = body.hcursor.get[Int]("limit").getOrElse(10)
               val thr   = body.hcursor.get[Double]("threshold").toOption
               onComplete(engine.searchVectors(qv, limit, thr)) {
+                // `v` is the stored document, handed back unchanged — C++ and
+                // LSP both return what was posted, not a re-serialised model.
                 case Success(results) => complete(Json.obj("results" ->
-                  Json.arr(results.map { case (v, s) => Json.obj("vector" -> v.toJson, "score" -> Json.fromDoubleOrNull(s)) }: _*)))
+                  Json.arr(results.map { case (v, s) => Json.obj("vector" -> v, "score" -> Json.fromDoubleOrNull(s)) }: _*)))
                 case Failure(e) => complete(StatusCodes.BadRequest -> Json.obj("error" -> Json.fromString(e.getMessage)))
               }
             } } },
+            // Store the posted document verbatim under an id and echo it back.
+            //
+            // This used to read `elements` and `isInitial`, construct a
+            // RealityEvent, return RealityEvent.toJson — carrying isActive,
+            // matchCount and the rest — and store nothing at all. Two things
+            // followed: the response could not match C++ or LSP for identical
+            // input, and a POST followed by a search found the document on those
+            // two runtimes and never on this one (#288).
+            //
+            // SURFACE_SPEC settles the route as a JSON document store. Keeping
+            // the body whole is the part that matters: a caller's field the
+            // engine has never heard of survives the round trip, which is what
+            // a typed model cannot do.
             pathEnd { post { entity(as[Json]) { body =>
-              val elementsJ = body.hcursor.downField("elements").as[Vector[Json]].getOrElse(Vector.empty)
-              val isInitial = body.hcursor.get[Boolean]("isInitial").getOrElse(false)
-              val elems = elementsJ.map { ej =>
-                val ec = ej.hcursor
-                VectorElement(
-                  value          = ec.get[Double]("value").getOrElse(0.0),
-                  comparatorType = ec.get[String]("comparatorType").toOption.map(ComparatorType.fromString),
-                  threshold      = ec.get[Double]("threshold").toOption
-                )
+              val id = body.hcursor.get[String]("id").toOption
+                .filter(_.nonEmpty)
+                .getOrElse(s"vector-${java.util.UUID.randomUUID().toString}")
+              val doc = body.deepMerge(Json.obj("id" -> Json.fromString(id)))
+              onComplete(engine.vectorStore.storeDocument(id, doc)) {
+                case Success(_) => complete(Json.obj(
+                  "success" -> Json.fromBoolean(true),
+                  "vector"  -> doc
+                ))
+                case Failure(e) =>
+                  complete(StatusCodes.InternalServerError -> Json.obj("error" -> Json.fromString(e.getMessage)))
               }
-              val vector = new RealityEvent(elems, isInitial)
-              complete(Json.obj("success" -> Json.fromBoolean(true), "vector" -> vector.toJson))
             } } },
             path(Segment) { id =>
               concat(
