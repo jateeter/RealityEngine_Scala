@@ -829,7 +829,21 @@ class Routes(
             } } },
             path(Segment) { id =>
               concat(
-                get  { complete(Json.obj("message" -> Json.fromString("Vector retrieval endpoint"), "id" -> Json.fromString(id))) },
+                // Reads this runtime's own store. Vector ids are engine-scoped — a
+                // document posted here exists here and on no other engine — so 404
+                // means "this engine does not hold it", the only thing this engine
+                // can honestly say about an id. This used to answer 200 with a fixed
+                // message for every id, including ids that existed nowhere, so a
+                // caller read "not found" as "found" (RealityEngine_CI#397).
+                //
+                // Internal surface. External callers reach it through the Manager's
+                // engine-qualified route, /api/engines/:id/vectors/:vid, so an id is
+                // always used in the context of the engine that minted it.
+                get { onComplete(engine.vectorStore.getDocument(id)) {
+                  case Success(Some(doc)) => complete(Json.obj("vector" -> doc))
+                  case Success(None)      => complete(StatusCodes.NotFound -> Json.obj("error" -> Json.fromString("Vector not found")))
+                  case Failure(e)         => complete(StatusCodes.InternalServerError -> Json.obj("error" -> Json.fromString(e.getMessage)))
+                } },
                 delete { onComplete(engine.vectorStore.deleteVector(id)) {
                   case Success(_) => complete(Json.obj("success" -> Json.fromBoolean(true), "id" -> Json.fromString(id)))
                   case Failure(e) => complete(StatusCodes.InternalServerError -> Json.obj("error" -> Json.fromString(e.getMessage)))
