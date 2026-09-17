@@ -62,7 +62,12 @@ class VectorStore(
   // TrieMap rather than a synchronized Map: reads are lock-free and the engine
   // reads these far more often than it writes, including from actor threads
   // running concurrently under the machine fan-out.
-  private val events    = TrieMap.empty[String, RealityEvent]
+  // JSON documents, not RealityEvents. `/api/vectors` is a document store in
+  // C++ and LSP -- they keep the posted body verbatim and hand it back -- and
+  // this runtime storing a typed model instead is what made the route
+  // unequivalent (#288). A document keeps fields the engine has never heard of,
+  // which a RealityEvent cannot.
+  private val events    = TrieMap.empty[String, Json]
   private val sequences = TrieMap.empty[String, CriticalEventSequence]
 
   /** No-op. Kept so `Main` and `RealityEngine` need no change, and so the
@@ -71,14 +76,20 @@ class VectorStore(
 
   // ── Reality Event storage ─────────────────────────────────────────────────
 
+  /** Store a document under `id`, replacing any document already there. */
+  def storeDocument(id: String, doc: Json): Future[Unit] =
+    Future.successful(events.put(id, doc)).map(_ => ())
+
+  def getDocument(id: String): Future[Option[Json]] =
+    Future.successful(events.get(id))
+
+  /** Kept so a caller holding a RealityEvent can still store one; it lands as
+    * its JSON form, which is what a later search will hand back. */
   def storeVector(vector: RealityEvent): Future[Unit] =
-    Future.successful(events.put(vector.id, vector)).map(_ => ())
+    storeDocument(vector.id, vector.toJson)
 
   def storeVectors(vectors: List[RealityEvent]): Future[Unit] =
-    Future.successful(vectors.foreach(v => events.put(v.id, v)))
-
-  def getVector(id: String): Future[Option[RealityEvent]] =
-    Future.successful(events.get(id))
+    Future.successful(vectors.foreach(v => events.put(v.id, v.toJson)))
 
   def deleteVector(id: String): Future[Unit] =
     Future.successful(events.remove(id)).map(_ => ())
@@ -88,17 +99,34 @@ class VectorStore(
     queryVector: Vector[Double],
     limit:       Int = 10,
     threshold:   Option[Double] = None
-  ): Future[List[(RealityEvent, Double)]] = Future.successful {
-    val out = List.newBuilder[(RealityEvent, Double)]
+  ): Future[List[(Json, Double)]] = Future.successful {
+    val out = List.newBuilder[(Json, Double)]
     var taken = 0
-    for ((_, event) <- events.toList.sortBy(_._1) if taken < limit) {
-      val score = cosine(queryVector, event.getVector)
+    for ((_, doc) <- events.toList.sortBy(_._1) if taken < limit) {
+      val score = cosine(queryVector, searchableValues(doc))
       if (threshold.forall(score >= _)) {
-        out += ((event, score))
+        out += ((doc, score))
         taken += 1
       }
     }
     out.result()
+  }
+
+  /** The numbers to score a stored document by, matching C++'s
+    * `searchable_vector_values`: the `vector` array when present, otherwise
+    * `elements[].value`, accepting a bare number as an element. A document with
+    * neither scores against an empty vector, which cosine reports as 0. */
+  private[services] def searchableValues(doc: Json): Vector[Double] = {
+    val c = doc.hcursor
+    c.get[Vector[Double]]("vector") match {
+      case Right(v) if v.nonEmpty => v
+      case _ =>
+        c.downField("elements").as[Vector[Json]].getOrElse(Vector.empty).map { ej =>
+          ej.asNumber.map(_.toDouble)
+            .orElse(ej.hcursor.get[Double]("value").toOption)
+            .getOrElse(0.0)
+        }
+    }
   }
 
   // ── Sequence storage ──────────────────────────────────────────────────────
