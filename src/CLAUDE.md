@@ -10,7 +10,7 @@ This directory contains the root Scala Reality Engine implementation.
 ## Standing rules — authoritative in `../../RealityEngine_CI/docs/ENGINEERING_CONTRACT.md`
 
 These apply here and are **not** restated in this file. They were previously
-copied into eighteen `claude.md` files across six repositories, which is the
+copied into eighteen `CLAUDE.md` files across six repositories, which is the
 duplication problem the rules themselves warn about: copies drift, a rule added
 to one applies only where someone looked, and with no authority a reader cannot
 tell which copy is current.

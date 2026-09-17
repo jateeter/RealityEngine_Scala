@@ -1,6 +1,6 @@
 # Codex Guidance: RealityEngine_Scala
 
-Read `claude.md` for the current codebase map and parity context.
+Read `CLAUDE.md` for the current codebase map and parity context.
 
 ## Role
 

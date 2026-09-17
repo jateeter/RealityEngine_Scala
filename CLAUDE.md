@@ -2,7 +2,7 @@
 
 Last reviewed: 2026-06-22
 
-See `/Users/johnt/workspace/GitHub/claude.md` for the integrated application map. Update both this file and the root map when Scala RE, Scala PE, actor behavior, or parity responsibilities change.
+See `/Users/johnt/workspace/GitHub/CLAUDE.md` for the integrated application map. Update both this file and the root map when Scala RE, Scala PE, actor behavior, or parity responsibilities change.
 
 ## Role
 
