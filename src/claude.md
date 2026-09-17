@@ -20,5 +20,6 @@ tell which copy is current.
 | Qualify every "registry" | Never the bare word — instance / machine / cesgen / arbitration / domain / semantic-bus / tag. |
 | Verify a merge beyond the hosted checks | A green PR is not a verified PR; the hosted path cannot reach the integration points. Name what you could not exercise, and record what you noticed but did not chase. |
 | Never commit to main | Branch from `origin/main`, PR, verify, squash-merge, clean up. |
+| _CI is the authority | Peripheral repos keep minimal CI that forces local validation; RealityEngine_CI verifies fixes against a live universe. Check its `docs/` before adding CI anywhere else. |
 
 Read the contract for the full text, the qualifier table, and the cleanup steps.
