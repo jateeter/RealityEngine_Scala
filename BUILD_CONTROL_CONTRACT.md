@@ -31,7 +31,7 @@ are running the code you think they are.
 
 ```bash
 cd ../RealityEngine_CI
-./scripts/regression-test.sh --build-only
+./scripts/regression-test.sh --execute --build-only
 ```
 
 Per-repository `make`/`sbt` invocations are for working on this repository

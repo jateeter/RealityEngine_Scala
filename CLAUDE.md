@@ -32,7 +32,7 @@ Read the contract before building or deploying:
     RealityEngine_CI/docs/BUILD_CONTROL_CONTRACT.md
 
 ```bash
-cd ../RealityEngine_CI && ./scripts/regression-test.sh --build-only
+cd ../RealityEngine_CI && ./scripts/regression-test.sh --execute --build-only
 ```
 
 **This repository contains two independent sbt builds, not one build with two
