@@ -217,6 +217,11 @@ case class EventBusWrite(
 case class MergeOperation(
   region:      RegionMapping,
   machineId:   String,
+  /** Corpus-declared and globally unique, and the reason it is here: the batch
+    * is ordered by it. `machineId` is minted per runtime for any machine the
+    * corpus does not declare an id for, so sorting on that gave three runtimes
+    * three orders over identical content (RealityEngine_CI#374). */
+  machineName: String,
   sequenceIds: List[String],
   values:      Vector[Double],
   provenance:  List[String]            = Nil,

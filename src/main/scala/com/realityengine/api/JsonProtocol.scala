@@ -145,6 +145,9 @@ object JsonProtocol {
     val base = Json.obj(
       "region"      -> op.region.asJson,
       "machineId"   -> Json.fromString(op.machineId),
+      // The key the batch is ordered by, on the wire so a consumer can verify
+      // the order it is told to rely on (SURFACE_SPEC, "Merge batch").
+      "machineName" -> Json.fromString(op.machineName),
       "sequenceIds" -> op.sequenceIds.asJson,
       "values"      -> op.values.asJson,
       "provenance"  -> op.provenance.asJson
