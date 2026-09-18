@@ -850,8 +850,23 @@ class Routes(
         // Config
         pathPrefix("config") {
           concat(
+            // `eventDimension` is the width of the perceptual space **as it
+            // stands**, read from the space itself — the same expression
+            // `/api/runtime/vector-space` publishes as `dimension` and the
+            // metrics endpoint emits as `re_runtime_dimension`, so the three
+            // cannot disagree about how wide this runtime is.
+            //
+            // It read `sys.env("VECTOR_DIMENSION")`, which is the launch SEED
+            // and not a runtime fact at all: the space grows during machine
+            // loading to fit every declared mapping, and this route would have
+            // reported 7680 for a space of any size, including one it never
+            // had. C++ had the same defect against its own seed member; LSP was
+            // correct, so a default launch read cpp=7680, scala=7680,
+            // lsp=16944 and that 2-1 split was investigated as an engine
+            // disagreement about a machine mapped at [14364:14384] which was
+            // resident and live the whole time (RealityEngine_CI#422).
             pathEnd { get { complete(Json.obj(
-              "eventDimension"   -> Json.fromInt(sys.env.getOrElse("VECTOR_DIMENSION", "7680").toIntOption.getOrElse(7680)),
+              "eventDimension"   -> Json.fromInt(spaceRuntime.getPerceptualSpace.getPerceptualVector.length),
               "matchThreshold"    -> Json.fromDouble(0.5).get,
               "qdrantUrl"         -> Json.fromString(sys.env.getOrElse("QDRANT_URL", "http://localhost:4333")),
               "collectionName"    -> Json.fromString(sys.env.getOrElse("COLLECTION_NAME", "reality-events"))
