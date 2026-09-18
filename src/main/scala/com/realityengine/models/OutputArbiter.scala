@@ -65,7 +65,7 @@ class OutputArbiter(private var rule: ArbiterRule = ArbiterRule.AND) {
     // each asserting one output): CPP and LSP presented `out-sess-rag-abort`
     // [0,0,1,0] and this runtime presented `out-sess-rag-generate` [1,0,0,0] —
     // the same three outputs, a different pick, on 1 of 173 outputs
-    // (RealityEngine_CI#417). All three report the machine's sequences in the
+    // (RealityEngine_CI#418). All three report the machine's sequences in the
     // same order on the wire, so the divergence was invisible everywhere except
     // in the value finally presented.
     //
