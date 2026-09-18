@@ -155,6 +155,21 @@ class Machine(
 
     val decision = arbiter.arbitrate(seqOutputsBuffer.toMap, seqResultsBuffer.size)
 
+    // The fold, alongside the arbiter's pick. Same inputs the step folds —
+    // every asserted output, in the arbiter's canonical ascending-id order —
+    // and the same transformation, so the two surfaces cannot report different
+    // values for one transition. chainTop is the declared outputAlphabetTop and
+    // cannot be derived from bitsPerElement, which is the representable range
+    // rather than the chain (RealityEngine_CI#158).
+    val merged: Option[Vector[Double]] =
+      if (!decision.shouldOutput) None
+      else {
+        val values = seqOutputsBuffer.toSeq.sortBy(_._1).flatMap(_._2).map(_.vector)
+        if (values.isEmpty) None
+        else OutputMergeTransformation.fold(
+          values, outputMergeTransformation, perceptualMapping.flatMap(_.outputAlphabetTop))
+      }
+
     MachineTransitionResult(
       inputVector     = inputVector,
       timestamp       = System.currentTimeMillis(),
@@ -165,7 +180,8 @@ class Machine(
         totalInputs         = decision.totalInputs,
         sequencesWithOutput = decision.sequencesWithOutput,
         shouldOutput        = decision.shouldOutput
-      )
+      ),
+      mergedOutput    = merged
     )
   }
 

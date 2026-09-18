@@ -127,7 +127,24 @@ case class MachineTransitionResult(
   timestamp:        Long,
   sequenceResults:  Map[String, SequenceResult],
   machineOutput:    Option[OutputVector],
-  arbiterMetadata:  ArbiterMetadata
+  arbiterMetadata:  ArbiterMetadata,
+  /** The asserted outputs folded by the machine's declared transformation —
+    * what the machine PRESENTS, as distinct from `machineOutput`, which is the
+    * arbiter's representative member.
+    *
+    * A step already reports both, as `mergedOutputVector` and `outputVector` on
+    * machineResults. The single-machine transition routes reported only the
+    * pick, so a caller of POST /api/machines/:id/process could not obtain the
+    * presented value at all — on a surface with no step result to consult
+    * instead — while the pick carried `combinedFrom` and `sources` metadata
+    * describing a combination it was not (RealityEngine_CI#418).
+    *
+    * None when the fold refuses: the Łukasiewicz pair without a declared chain
+    * top presents nothing rather than guessing a chain. `machineOutput` survives
+    * that, because the sequences did complete and the pick is the evidence they
+    * did — which is why this is an added field and not a redefinition.
+    */
+  mergedOutput:     Option[Vector[Double]] = None
 )
 
 // ── Simulation types ──────────────────────────────────────────────────────────
