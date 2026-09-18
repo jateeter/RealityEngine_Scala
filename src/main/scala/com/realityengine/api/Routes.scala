@@ -871,8 +871,43 @@ class Routes(
               "qdrantUrl"         -> Json.fromString(sys.env.getOrElse("QDRANT_URL", "http://localhost:4333")),
               "collectionName"    -> Json.fromString(sys.env.getOrElse("COLLECTION_NAME", "reality-events"))
             )) } },
-            path("dimension") { put { parameter("dimension".as[Int].?(sys.env.getOrElse("VECTOR_DIMENSION", "7680").toIntOption.getOrElse(7680))) { dim =>
-              complete(Json.obj("success" -> Json.fromBoolean(true), "dimension" -> Json.fromInt(dim)))
+            // Read-only downward (SURFACE_SPEC, "PUT /api/config/dimension is
+            // read-only downward"; RealityEngine_CI#425).
+            //
+            // This bound the parameter, echoed it back, and assigned nothing at
+            // all — not to the space, not to any field. It reported
+            // `success: true` for a write that did not exist, and defaulted the
+            // parameter from the environment so a caller omitting it was told
+            // the dimension had been set to the launch seed.
+            path("dimension") { put { parameter("dimension".as[Int].?) { requested =>
+              requested match {
+                case None =>
+                  complete(StatusCodes.BadRequest -> Json.obj(
+                    "error" -> Json.fromString("dimension query parameter is required")))
+                case Some(d) =>
+                  val required = spaceRuntime.requiredDimension
+                  val current  = spaceRuntime.getPerceptualSpace.getPerceptualVector.length
+                  if (spaceRuntime.widenTo(d))
+                    complete(Json.obj(
+                      "success"           -> Json.fromBoolean(true),
+                      // The width the engine actually has, never the value asked
+                      // for — those differ whenever the space was already wider.
+                      "dimension"         -> Json.fromInt(
+                        spaceRuntime.getPerceptualSpace.getPerceptualVector.length),
+                      "requiredDimension" -> Json.fromInt(required)))
+                  else {
+                    // Name the bound that was violated. "The corpus needs more
+                    // than that" and "this engine already holds more than that"
+                    // are different facts, and a caller can only act on the one
+                    // that is true for them.
+                    val why =
+                      if (d < required) s"the $required the resident corpus requires"
+                      else s"the $current this engine already holds"
+                    complete(StatusCodes.BadRequest -> Json.obj(
+                      "error" -> Json.fromString(
+                        s"dimension $d is below $why; the perceptual space is read-only downward")))
+                  }
+              }
             } } },
             path("threshold") { put { parameter("threshold".as[Double].?(0.5)) { t =>
               complete(Json.obj("success" -> Json.fromBoolean(true), "threshold" -> Json.fromDoubleOrNull(t)))
@@ -1722,7 +1757,11 @@ class Routes(
           )) } },
           path("vector-space") { get {
             val dim    = spaceRuntime.getPerceptualSpace.getPerceptualVector.length
-            val reqDim = engine.getAllMachines.flatMap(_.perceptualMapping).map(m => m.input.offset + m.input.length).foldLeft(dim)(math.max)
+            // Input AND output. This folded over input mappings alone, so it
+            // under-reported for every machine whose output region sits beyond
+            // its input — much of the corpus. Now shared with the write path,
+            // which refuses below it (RealityEngine_CI#425).
+            val reqDim = math.max(dim, spaceRuntime.requiredDimension)
             complete(Json.obj(
               "dimension"                 -> Json.fromInt(dim),
               "requiredDimension"         -> Json.fromInt(reqDim),
