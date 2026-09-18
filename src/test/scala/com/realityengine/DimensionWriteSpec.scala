@@ -52,6 +52,41 @@ class DimensionWriteSpec extends AnyFlatSpec with Matchers with ScalatestRouteTe
     spaceRuntime.requiredDimension shouldBe 104
   }
 
+  it should "be reported as the corpus requirement, not the width held" in {
+    // /api/runtime/vector-space folded in the current width, so it reported
+    // max(width, requirement) — a different quantity under the same name, and
+    // one that made this runtime disagree with cpp and lsp on the same corpus:
+    // measured live, cpp and lsp reported 7504 while this reported 7680, the
+    // width it happened to hold.
+    //
+    // Its own runtime and routes. The cases in this suite share one mutable
+    // space and run in declaration order, so a test that widens the space
+    // changes what every later test sees — which is exactly what happened when
+    // this was first written against the shared fixture.
+    val ownRuntime = new PerceptualSpaceRuntime(64)
+    val ownRoutes  = new Routes(new RealityEngine(new VectorStore()), ownRuntime,
+                                AuditConfig(enabled = false, level = 0, service = "vector-space-test")).routes
+    ownRuntime.addMachine(new Machine(
+      "Report Probe", "", Map.empty, ArbiterRule.PASSTHROUGH,
+      Some(PerceptualMapping(RegionMapping(0, 4), RegionMapping(100, 4))),
+      "machine-report-probe"))
+
+    Put("/api/config/dimension?dimension=4096") ~> ownRoutes ~> check {
+      status shouldBe StatusCodes.OK
+    }
+    ownRuntime.requiredDimension shouldBe 104
+    ownRuntime.getPerceptualSpace.getPerceptualVector.length shouldBe 4096
+
+    Get("/api/runtime/vector-space") ~> ownRoutes ~> check {
+      status shouldBe StatusCodes.OK
+      val c = parse(responseAs[String]).toOption.get.hcursor
+      c.get[Int]("dimension").toOption shouldBe Some(4096)
+      withClue("requiredDimension reported the width held, not the corpus requirement: ") {
+        c.get[Int]("requiredDimension").toOption shouldBe Some(104)
+      }
+    }
+  }
+
   "PUT /api/config/dimension" should "refuse a request below the corpus requirement" in {
     val before = width
     val (status, body) = put("64")
