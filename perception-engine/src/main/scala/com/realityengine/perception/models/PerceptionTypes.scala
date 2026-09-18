@@ -126,7 +126,15 @@ case class EngineState(
   assembledVector: Vector[Double],
   globalStep: Long,
   auto: AutoConfig,
-  lastPush: Option[Long],
+  /** The last step object, or `Json.Null` before any push — SURFACE_SPEC.md,
+    * "`lastPush` is the last step, not when it happened".
+    *
+    * Was `Option[Long]`, a bare timestamp. LSP reported the step; this runtime
+    * and CPP reported a number, and the divergence was invisible because all
+    * three report null until a push happens (RealityEngine_CI#407). The
+    * timestamp a caller used to read is `lastPush.timestamp`, inside the object.
+    */
+  lastPush: Json,
   matchAlgorithm: MatchAlgorithm,
   /** Elements this engine will actually read and write.  Grows as sources are
     * added and as the RE reports a larger space, so it is not necessarily the

@@ -1,5 +1,7 @@
 package com.realityengine.perception.engine
 
+import io.circe.Json
+
 import com.fasterxml.uuid.Generators
 import com.realityengine.perception.models._
 
@@ -607,7 +609,7 @@ class PerceptionEngine(initialDimension: Int = sys.env.getOrElse("VECTOR_DIMENSI
     * Sources come from `reportedSources`, not `getSources`: `/api/state` embeds
     * the same source objects `/api/sources` lists, and the two must not report a
     * source's activity differently. */
-  def getState(lastPush: Option[Long], auto: AutoConfig): EngineState = synchronized {
+  def getState(lastPush: Json, auto: AutoConfig): EngineState = synchronized {
     EngineState(
       sources         = reportedSources,
       assembledVector = assembleVector(),
