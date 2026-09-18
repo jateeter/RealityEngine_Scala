@@ -11,7 +11,12 @@ import io.circe.Json
  *   Phase 3: Resolve output Reality Event via arbiter
  */
 class Machine(
-  val name:             String,
+  // Mutable so a name conflict can be versioned at ingestion without
+  // reconstructing the machine and every piece of sequence state it carries.
+  // `POST /api/machines` renames the REQUESTED machine — never a resident one —
+  // before it is added (SURFACE_SPEC, "POST /api/machines always ingests";
+  // RealityEngine_CI#357).
+  var name:             String,
   val description:      String                    = "",
   val metadata:         Map[String, Json]         = Map.empty,
   arbiterRule:          ArbiterRule               = ArbiterRule.PASSTHROUGH,

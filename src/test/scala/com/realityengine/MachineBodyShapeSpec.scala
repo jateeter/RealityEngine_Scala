@@ -59,10 +59,17 @@ class MachineBodyShapeSpec extends AnyFlatSpec with Matchers with ScalatestRoute
   }
 
   it should "accept the corpus file envelope" in {
-    Post("/api/machines", body(s"""{"version": "1.0.0", "machine": $bareMachine}""")) ~> testRoutes ~> check {
+    // A DISTINCT name, because the previous case already ingested "Shape
+    // Fixture" into this same engine and `POST /api/machines` versions a
+    // resident name (RealityEngine_CI#357). Reusing it here would assert
+    // `Shape Fixture` and receive `Shape Fixture v2` — a failure about naming
+    // in a spec whose subject is body SHAPE. The two rules are independent and
+    // the fixtures should not couple them.
+    val enveloped = bareMachine.replaceFirst("\"Shape Fixture\"", "\"Shape Fixture Envelope\"")
+    Post("/api/machines", body(s"""{"version": "1.0.0", "machine": $enveloped}""")) ~> testRoutes ~> check {
       status shouldBe StatusCodes.OK
       parse(responseAs[String]).toOption.get.hcursor.downField("machine")
-        .get[String]("name").toOption shouldBe Some("Shape Fixture")
+        .get[String]("name").toOption shouldBe Some("Shape Fixture Envelope")
     }
   }
 
