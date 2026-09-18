@@ -148,6 +148,41 @@ class PerceptualSpaceRuntime(dimension: Int = sys.env.getOrElse("VECTOR_DIMENSIO
   def getMachines: List[Machine]             = Machine.inCanonicalOrder(machines.values)
   def getPerceptualSpace: PerceptualSpace    = perceptualSpace
 
+  /** The furthest cell any resident machine declares, over input AND output.
+    *
+    * `/api/runtime/vector-space` computed this inline from input mappings only —
+    * `m.input.offset + m.input.length` — so it under-reported for every machine
+    * whose output region sits beyond its input, which is much of the corpus.
+    * That was cosmetic while nothing consumed it. It is load-bearing now: it is
+    * the floor `widenTo` refuses below, and an under-reported requirement would
+    * let a caller shrink the space below a machine's output region — the one
+    * outcome the floor exists to prevent (RealityEngine_CI#364, #425).
+    */
+  def requiredDimension: Int =
+    machines.values.flatMap(_.perceptualMapping).foldLeft(0) { (acc, m) =>
+      math.max(acc, math.max(m.input.offset + m.input.length,
+                             m.output.offset + m.output.length))
+    }
+
+  /** Widen the perceptual space, refusing anything that would not widen it.
+    *
+    * The space is read-only downward (SURFACE_SPEC, "PUT /api/config/dimension
+    * is read-only downward"). The floor is `max(requiredDimension, current
+    * width)`: a request below what the resident corpus needs, and equally one
+    * below the width already held, are both refused without mutating.
+    *
+    * Returns false rather than clamping. Applying the floor instead of the
+    * requested value would make the response disagree with the request while
+    * reporting success, and answering 200 for a write that did not take effect
+    * is exactly what this route did before — it echoed the caller's own
+    * parameter and assigned nothing at all (RealityEngine_CI#425).
+    */
+  def widenTo(requested: Int): Boolean = {
+    val current = perceptualSpace.getPerceptualVector.length
+    if (requested < requiredDimension || requested < current) false
+    else { perceptualSpace.growTo(requested); true }
+  }
+
   def configure(cfg: SimulationConfig): Unit = {
     config = Some(cfg)
     reset()
