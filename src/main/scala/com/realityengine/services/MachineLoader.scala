@@ -18,15 +18,49 @@ object MachineLoader {
     val root = parse(jsonString).getOrElse(throw new RuntimeException("JSON parse error"))
     val c    = root.hcursor
 
-    val version = c.get[String]("version").getOrElse(throw new RuntimeException("Missing version field"))
-    val major   = version.split('.').headOption.flatMap(_.toIntOption).getOrElse(0)
-    val curMajor = MACHINE_JSON_VERSION.split('.').headOption.flatMap(_.toIntOption).getOrElse(0)
-    if (major != curMajor)
-      throw new RuntimeException(s"Incompatible machine JSON version: $version (current: $MACHINE_JSON_VERSION)")
+    // Two accepted shapes, disambiguated by an object-valued `machine` key:
+    //
+    //   {"version": "1.0.0", "machine": {…}}   the corpus file envelope
+    //   {"name": …, "perceptualMapping": …}    the bare Machine object
+    //
+    // The second is what docs/openapi/scala-re.yaml declares for
+    // POST /api/machines — $ref: '#/components/schemas/Machine' — and this
+    // rejected it, so the runtime refused the schema its own published document
+    // describes. A client generated from that document could not add a machine.
+    //
+    // The rejection also misled: a bare machine HAS a name, and it was reported
+    // as "Missing machine.name" because this looked for body.machine.name in a
+    // body that is itself the machine. A caller reading that message would add a
+    // name it had already supplied (RealityEngine_CI#419).
+    //
+    // The rule is LSP's — src/loader.lisp:248 — which had it right. Adopting the
+    // existing correct implementation rather than inventing a third reading.
+    // Safe across the corpus: all 1328 files carry the envelope and none has an
+    // inner machine with its own object-valued `machine` key, so no machine
+    // reads differently under the two.
+    val enveloped = c.downField("machine").focus.exists(_.isObject)
+    val m         = if (enveloped) c.downField("machine") else c
 
-    val m = c.downField("machine")
+    // Version belongs to the envelope, not to the machine. Required and
+    // validated there — every corpus file carries it, and loosening that would
+    // let a file of the wrong major version load silently. The bare Machine
+    // schema does not declare `version`, so it is optional for that shape and
+    // validated only when a caller supplies one.
+    val versionOpt = c.get[String]("version").toOption.orElse(m.get[String]("version").toOption)
+    if (enveloped && versionOpt.isEmpty)
+      throw new RuntimeException("Missing version field")
+    versionOpt.foreach { version =>
+      val major    = version.split('.').headOption.flatMap(_.toIntOption).getOrElse(0)
+      val curMajor = MACHINE_JSON_VERSION.split('.').headOption.flatMap(_.toIntOption).getOrElse(0)
+      if (major != curMajor)
+        throw new RuntimeException(s"Incompatible machine JSON version: $version (current: $MACHINE_JSON_VERSION)")
+    }
 
-    val name         = m.get[String]("name").getOrElse(throw new RuntimeException("Missing machine.name"))
+    // Name the field the caller actually has to add. Saying "machine.name" for a
+    // body that IS the machine sends them to a path that does not exist in what
+    // they sent.
+    val name = m.get[String]("name").getOrElse(
+      throw new RuntimeException(if (enveloped) "Missing machine.name" else "Missing name"))
     val description  = m.get[String]("description").getOrElse("")
     val arbiterStr   = m.get[String]("arbiterRule").getOrElse("PASSTHROUGH")
     val arbiterRule  = parseArbiterRule(arbiterStr)
