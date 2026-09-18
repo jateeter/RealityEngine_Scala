@@ -53,7 +53,26 @@ class OutputArbiter(private var rule: ArbiterRule = ArbiterRule.AND) {
     // avoiding the double iteration of the previous .flatten.toList then .count.
     var sequencesWithOutput = 0
     val allOutputs = List.newBuilder[OutputVector]
-    for (outs <- sequenceOutputs.values) {
+    // Ascending sequence id, not `Map.values`.
+    //
+    // `combineOutputs` presents `outputs.head` as the machine's output, so the
+    // order this list is built in decides which member a consumer sees. Walking
+    // a Map walks it in hash order, which is this runtime's own and nobody
+    // else's: C++ keys its sequenceResults in a `std::map` and therefore walks
+    // sorted, LSP sorts, and this runtime did not.
+    //
+    // Measured on `localai/session_rag_context` (PASSTHROUGH, three sequences
+    // each asserting one output): CPP and LSP presented `out-sess-rag-abort`
+    // [0,0,1,0] and this runtime presented `out-sess-rag-generate` [1,0,0,0] —
+    // the same three outputs, a different pick, on 1 of 173 outputs
+    // (RealityEngine_CI#418). All three report the machine's sequences in the
+    // same order on the wire, so the divergence was invisible everywhere except
+    // in the value finally presented.
+    //
+    // Sorting by id rather than by the reported order because the id is
+    // corpus-declared and identical across runtimes, which is the property the
+    // canonical-ordering rule in SURFACE_SPEC is built on (#197).
+    for ((_, outs) <- sequenceOutputs.toSeq.sortBy(_._1)) {
       if (outs.nonEmpty) {
         sequencesWithOutput += 1
         allOutputs ++= outs
