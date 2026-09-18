@@ -140,7 +140,13 @@ class RealityEvent(
       val isFinal        = _outputVectors.nonEmpty
       val isTransitional = !isInitial && !isFinal
       if (isTransitional && _nextVectorIds.nonEmpty) clearActive()
-      (true, _nextVectorIds, _outputVectors, mr)
+      // Stamp the evidence chain onto the outputs as they leave, which is where
+      // C++ stamps it too (`for (auto& o : stamped) o.provenance = chain`).
+      // Doing it here rather than at construction means an output carries the
+      // chain of the event that actually completed, not of the event it was
+      // declared under.
+      val chain = provenanceChain
+      (true, _nextVectorIds, _outputVectors.map(o => o.copy(provenance = chain)), mr)
     }
   }
 

@@ -13,10 +13,15 @@ object JsonProtocol {
 
   implicit val encodeOutputVector: Encoder[OutputVector] = Encoder.instance { ov =>
     Json.obj(
-      "id"        -> Json.fromString(ov.id),
-      "vector"    -> ov.vector.asJson,
-      "metadata"  -> ov.metadata.asJson,
-      "timestamp" -> Json.fromLong(ov.timestamp)
+      "id"         -> Json.fromString(ov.id),
+      "vector"     -> ov.vector.asJson,
+      "metadata"   -> ov.metadata.asJson,
+      "timestamp"  -> Json.fromLong(ov.timestamp),
+      // Omitting the key entirely made it read as `null` beside CPP's and LSP's
+      // arrays. This is the encoder `machineResults` uses — `Routes.scala`'s
+      // `engineOutputJson` is a second one on a different route, and fixing only
+      // that left this surface unchanged (RealityEngine_CI#410).
+      "provenance" -> ov.provenance.asJson
     )
   }
 

@@ -63,7 +63,15 @@ case class OutputVector(
   id:        String,
   vector:    Vector[Double],
   metadata:  Map[String, Json] = Map.empty,
-  timestamp: Long
+  timestamp: Long,
+  /** The INPUT event ids that caused this output — `predecessorChain :+ id` of
+    * the Reality Event that completed, stamped at `transition`.
+    *
+    * Was absent from this type entirely, so the step surface emitted
+    * `provenance` "for shape, empty for now". It is not empty now: the chain
+    * this mirrors, `RealityEvent.provenanceChain`, already existed
+    * (RealityEngine_CI#410). */
+  provenance: List[String] = Nil
 )
 
 // ── Perceptual mapping ────────────────────────────────────────────────────────

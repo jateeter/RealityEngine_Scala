@@ -96,11 +96,21 @@ class OutputArbiter(private var rule: ArbiterRule = ArbiterRule.AND) {
       "sources"       -> Json.arr(sources: _*)
     ) ++ (if (descriptions.nonEmpty) Map("descriptions" -> Json.arr(descriptions.map(Json.fromString): _*)) else Map.empty)
 
+    // `provenance` names the INPUT events that caused this output; `sources`
+    // above names the OUTPUT events folded into it. Different facts, and both
+    // contractual (SURFACE_SPEC.md, "A combined machine output reports both
+    // where it came from and what it is").
+    //
+    // This runtime carried only `sources` and CPP and LSP only `provenance`, so
+    // a consumer asking either question got an answer from some runtimes and
+    // null from the rest (RealityEngine_CI#410). Taken from `outputs.head`,
+    // matching the representative whose vector is used.
     OutputVector(
-      id        = s"machine-output-${System.currentTimeMillis()}-${UUID.randomUUID().toString.take(8)}",
-      vector    = outputs.head.vector,
-      metadata  = meta,
-      timestamp = System.currentTimeMillis()
+      id         = s"machine-output-${System.currentTimeMillis()}-${UUID.randomUUID().toString.take(8)}",
+      vector     = outputs.head.vector,
+      metadata   = meta,
+      timestamp  = System.currentTimeMillis(),
+      provenance = outputs.head.provenance
     )
   }
 }
