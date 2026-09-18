@@ -1761,7 +1761,17 @@ class Routes(
             // under-reported for every machine whose output region sits beyond
             // its input — much of the corpus. Now shared with the write path,
             // which refuses below it (RealityEngine_CI#425).
-            val reqDim = math.max(dim, spaceRuntime.requiredDimension)
+            // The corpus requirement alone. Folding in `dim` reported
+            // max(current width, corpus requirement), which is a different
+            // quantity under the same name — and made this runtime disagree
+            // with the other two: measured on one corpus, cpp and lsp reported
+            // 7504 while this reported 7680, the width it happened to hold.
+            //
+            // The write path already reads `spaceRuntime.requiredDimension`
+            // directly, so keeping the max() here meant the field a caller
+            // reads and the bound the engine enforces were two different
+            // numbers (RealityEngine_CI#425, #364).
+            val reqDim = spaceRuntime.requiredDimension
             complete(Json.obj(
               "dimension"                 -> Json.fromInt(dim),
               "requiredDimension"         -> Json.fromInt(reqDim),
