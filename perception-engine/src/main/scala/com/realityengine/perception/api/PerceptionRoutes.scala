@@ -89,7 +89,7 @@ class PerceptionRoutes(
 
   private val autoTimer    = new AtomicReference[Option[akka.actor.Cancellable]](None)
   @volatile private var autoIntervalMs: Long = 1000L
-  private val lastPush     = new AtomicReference[Option[Long]](None)
+  private val lastPush     = new AtomicReference[Json](Json.Null)
   // A-1: prevents push cycles from stacking when doPush takes longer than the interval
   private val pushInFlight = new AtomicBoolean(false)
 
@@ -651,7 +651,8 @@ class PerceptionRoutes(
       case resp if resp.isSuccess =>
         engine.advance()
         val ts = System.currentTimeMillis()
-        lastPush.set(Some(ts))
+        // `lastPush` is set below, once `parsed` holds the step — it is the
+        // step object now, not this timestamp (SURFACE_SPEC.md, #407).
 
         // Semantic audit (SEMANTIC_AUDIT_CONTRACT.md): one re:PerceptionEvent
         // per active source whose region this push wrote into the universal
@@ -684,6 +685,9 @@ class PerceptionRoutes(
         val parsed = resp.body.toOption
           .flatMap(b => io.circe.parser.parse(b).toOption)
           .getOrElse(Json.Null)
+        // The step itself, which carries its own `timestamp`, so the "when"
+        // this field used to hold is still readable as `lastPush.timestamp`.
+        lastPush.set(parsed)
 
         // RE returns SimulationStep directly (perceptualSpace at top level).
         // Aggregate gated machine CES output vectors from machineResults into
@@ -778,7 +782,7 @@ class PerceptionRoutes(
 
   private def resetAndBroadcast(): Unit = {
     engine.reset()
-    lastPush.set(None)
+    lastPush.set(Json.Null)
     broadcastState()
   }
 
@@ -806,7 +810,8 @@ class PerceptionRoutes(
             sources            = engine.getSources.length,
             globalStep         = engine.globalStep,
             vectorSize         = engine.vectorDimension,
-            lastPushMs         = lastPush.get().getOrElse(0L),
+            // The metric stays a timestamp; it now reads the one inside the step.
+            lastPushMs         = lastPush.get().hcursor.get[Long]("timestamp").getOrElse(0L),
             auditBufferRecords = semanticAudit.size(),
           )))
       }

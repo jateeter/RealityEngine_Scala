@@ -173,7 +173,7 @@ class ReportedActivitySpec extends AnyFlatSpec with Matchers {
     engine.addSource(sensor("expired", active = true, ageMs = 60000L, ttlMs = 1000L))
     engine.addSource(sensor("fresh", active = true, ageMs = 0L, ttlMs = 600000L))
 
-    val state = engine.getState(None, AutoConfig(running = false, intervalMs = 1000L))
+    val state = engine.getState(Json.Null, AutoConfig(running = false, intervalMs = 1000L))
     state.sources.map(s => s.id -> s.active).toMap shouldBe
       engine.reportedSources.map(s => s.id -> s.active).toMap
     state.sources.find(_.id == "expired").map(_.active) shouldBe Some(false)
