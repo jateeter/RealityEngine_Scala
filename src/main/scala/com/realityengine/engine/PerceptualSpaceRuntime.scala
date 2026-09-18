@@ -356,6 +356,7 @@ class PerceptualSpaceRuntime(dimension: Int = sys.env.getOrElse("VECTOR_DIMENSIO
         val op = MergeOperation(
           region      = RegionMapping(mapping.output.offset, mapping.output.length),
           machineId   = machine.id,
+          machineName = machine.name,
           sequenceIds = sequenceIds,
           values      = values,
           provenance  = provenance,
@@ -521,7 +522,14 @@ class PerceptualSpaceRuntime(dimension: Int = sys.env.getOrElse("VECTOR_DIMENSIO
       // operation per machine the secondary keys are constant, so machineId is
       // already total. The batch stays a function of the corpus and the input
       // rather than of map iteration order.
-      mergeBatch      = mergeOps.toList.sortBy(_.machineId),
+      // `machineName` then `region.offset`, both corpus-declared — SURFACE_SPEC,
+      // "Merge batch". This sorted on `machineId`, which is minted per runtime
+      // for any machine the corpus does not declare an id for, so the same
+      // operations came back permuted on each runtime (RealityEngine_CI#374).
+      // RealityEngine_CI#270 had already rejected id-based ordering for the
+      // engine-process join and moved it to machineName; this field kept the key
+      // that change had just discarded.
+      mergeBatch      = mergeOps.toList.sortBy(op => (op.machineName, op.region.offset)),
       eventBus        = eventBusWrites
     )
   }
