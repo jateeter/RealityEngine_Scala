@@ -242,15 +242,20 @@ class Routes(
     * `OutputVector`; Scala's `OutputVector` (`models/Types.scala:62`) has no such
     * field, so there is nothing to populate it from. Emitting the key keeps the
     * shape uniform — a consumer reading `provenance` gets an array on all three
-    * rather than `undefined` on one — and the missing field is a model gap
-    * tracked separately, not something to paper over by dropping the key.
+    * rather than `undefined` on one. The field was empty here because this
+    * runtime's `OutputVector` carried no chain; it carries one now, so the key
+    * reports the evidence rather than its own absence.
     */
   private def engineOutputJson(ov: OutputVector): Json = Json.obj(
     "id"         -> Json.fromString(ov.id),
     "vector"     -> Json.arr(ov.vector.map(Json.fromDoubleOrNull): _*),
     "metadata"   -> Json.fromFields(ov.metadata.toSeq),
     "timestamp"  -> Json.fromLong(ov.timestamp),
-    "provenance" -> Json.arr()
+    // The evidence chain, no longer a hardcoded empty array. The model gap the
+    // comment above called "tracked separately" is filled: `OutputVector` now
+    // carries `provenance`, stamped at `transition` from the same
+    // `provenanceChain` C++ uses (RealityEngine_CI#410).
+    "provenance" -> Json.arr(ov.provenance.map(Json.fromString): _*)
   )
 
   private def recordEngineHistory(item: Json): Unit = {
