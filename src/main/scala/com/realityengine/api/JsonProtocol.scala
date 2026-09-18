@@ -48,6 +48,14 @@ object JsonProtocol {
       "timestamp"       -> Json.fromLong(r.timestamp),
       "sequenceResults" -> Json.fromFields(r.sequenceResults.view.mapValues(_.asJson).toSeq),
       "machineOutput"   -> r.machineOutput.asJson,
+      // `mergedOutput` is what the machine PRESENTS; `machineOutput` is the
+      // arbiter's representative member. A step reports both as
+      // `mergedOutputVector` and `outputVector`; this surface reported only the
+      // pick, so a caller here could not obtain the presented value at all
+      // (RealityEngine_CI#418). Null on a refusing fold — null is the absence,
+      // never an empty array, which would read as a machine that presented
+      // zeros.
+      "mergedOutput"    -> r.mergedOutput.asJson,
       "arbiterMetadata" -> r.arbiterMetadata.asJson
     )
   }
