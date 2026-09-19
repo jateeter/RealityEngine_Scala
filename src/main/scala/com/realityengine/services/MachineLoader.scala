@@ -178,6 +178,12 @@ object MachineLoader {
       Json.fromFields(Seq(
         "id"       -> Json.fromString(seq.id),
         "name"     -> Json.fromString(seq.name),
+        // Derived index fields C++ and LSP both emit: which events start the
+        // sequence and which assert an output. Both accessors already return
+        // them sorted, for the same cross-runtime reason as everything else
+        // here (RealityEngine_CI#436).
+        "initialEventIds" -> Json.arr(seq.getInitialVectorIds.map(Json.fromString): _*),
+        "outputEventIds"  -> Json.arr(seq.getOutputVectorIds.map(Json.fromString): _*),
         "metadata" -> seq.metadata.asJson
       ) ++ lifecycleFields ++ Seq(
         "events"   -> Json.arr(seq.getAllVectors.map { vec =>
@@ -234,6 +240,17 @@ object MachineLoader {
       ))
     }
 
+    // `sequenceIds` — a derived convenience C++ and LSP both emit and this
+    // runtime did not. The corpus schema declares no such field, and
+    // `additionalProperties: true` permits it, so neither shape was invalid;
+    // converging on the two that carry it is the cheaper direction and the
+    // field is genuinely useful to a consumer reading the export
+    // (RealityEngine_CI#436).
+    //
+    // From getSequenceIds, which mirrors getAllSequences' canonical order, so
+    // the ids line up positionally with the `sequences` array below.
+    val sequenceIds = Json.arr(machine.getSequenceIds.map(Json.fromString): _*)
+
     val metaWithoutInputSeqs = machine.metadata - "inputSequences"
     val inputSeqs = machine.metadata.getOrElse("inputSequences", Json.arr())
 
@@ -246,11 +263,26 @@ object MachineLoader {
     }
 
     val machineFields = Seq(
+      // The engine-minted id. Carried because C++ and LSP carry it and an
+      // export is a snapshot from a particular engine; it is IGNORED on
+      // re-ingestion — every loader mints its own — so it informs a reader
+      // without becoming an identity anyone can act on (#146, #397).
+      "id"            -> Json.fromString(machine.id),
       "name"          -> Json.fromString(machine.name),
       "description"   -> Json.fromString(machine.description),
       "metadata"      -> metaWithoutInputSeqs.asJson,
       "arbiterRule"   -> Json.fromString(ArbiterRule.serialize(machine.getArbiter.getRule).toUpperCase),
       "matchAlgorithm" -> Json.fromString(ComparatorType.serialize(machine.matchAlgorithm)),
+      // The fold and its interlock. `outputMergeTransformation` is the one
+      // omission here that lost DATA rather than convenience: the schema
+      // declares it, and a machine exported with a non-default fold came back
+      // as the default `or` on re-ingestion, silently retuning a training
+      // variable (#436, #158).
+      "outputMergeTransformation" -> Json.fromString(machine.outputMergeTransformation),
+      "outputMergeLocked" -> Json.fromBoolean(machine.outputMergeLocked),
+      "sequenceCount" -> Json.fromInt(machine.getSequenceCount),
+      "totalEvents"   -> Json.fromInt(machine.getTotalVectorCount),
+      "sequenceIds"   -> sequenceIds,
       "sequences"     -> Json.arr(seqs: _*),
       "inputSequences" -> inputSeqs
     ) ++ mappingJson.map("perceptualMapping" -> _).toSeq
