@@ -403,6 +403,51 @@ class Routes(
     println(s"\nMachine loading complete: $loaded loaded, $failed failed")
   }
 
+  /** Resolve a name conflict by versioning the REQUESTED machine and
+    * reallocating its regions. Returns true when it versioned.
+    *
+    * SURFACE_SPEC, "POST /api/machines always ingests". The route must never
+    * reject a resident name and never replace the machine holding it — it used
+    * to mint a fresh id and keep the requested name, so two resident machines
+    * answered to one name and a caller's bad retry became corrupted engine state
+    * (RealityEngine_CI#357).
+    *
+    * "Resident" is runtime state: a machine previously ingested and still held in
+    * THIS engine's machine corpus. DELETE frees the name, and the next POST of it
+    * is not a conflict — no suffix, declared mapping honoured.
+    *
+    * The allocation is fixed rather than free because regions are NOT
+    * engine-scoped the way ids are: mergeBatch carries region.offset,
+    * activeRegions is ordered on it, and the merge batch is ordered by
+    * (machineName, region.offset). An allocator choosing differently per runtime
+    * would place every conflicted machine's output somewhere different on each
+    * engine, and every comparison over those fields would report an allocation
+    * difference as an engine divergence.
+    */
+  private def versionOnConflict(machine: Machine): Boolean = {
+    val resident = engine.getAllMachines.map(_.name).toSet
+    if (!resident.contains(machine.name)) return false
+
+    // The requested name's BASE — its trailing " v<n>" removed, if it has one.
+    // Appending to the requested name verbatim would give "Foo v2 v2" and then
+    // "Foo v2 v2 v2", so a caller re-posting what it received would drift
+    // further from the base on every attempt. Recovering the base keeps one
+    // version sequence per machine name however the caller addresses it.
+    val base = machine.name.replaceFirst(" v\\d+$", "")
+    machine.name = Iterator.from(2).map(n => s"$base v$n").find(!resident.contains(_)).get
+
+    // The declared mapping is DISCARDED. A machine with no mapping cannot be
+    // given one — it never enters the perceptual space — so it is ingested under
+    // the versioned name with nothing allocated.
+    machine.perceptualMapping.foreach { pm =>
+      val base = spaceRuntime.getPerceptualSpace.getPerceptualVector.length
+      machine.perceptualMapping = Some(pm.copy(
+        input  = RegionMapping(base, pm.input.length),
+        output = RegionMapping(base + pm.input.length, pm.output.length)))
+    }
+    true
+  }
+
   private def addMachineToSystem(machine: Machine): Unit = {
     engine.addMachine(machine)
     if (machine.perceptualMapping.isDefined) {
@@ -1394,8 +1439,16 @@ class Routes(
                   Try(MachineLoader.loadFromJson(body.noSpaces)) match {
                     case Failure(e) => complete(StatusCodes.BadRequest -> Json.obj("error" -> Json.fromString(e.getMessage)))
                     case Success(machine) =>
+                      // Always ingests; a resident name is versioned and
+                      // reallocated rather than rejected or replaced (#357).
+                      val versioned = versionOnConflict(machine)
                       addMachineToSystem(machine)
-                      complete(Json.obj("success" -> Json.fromBoolean(true), "machine" -> machine.toJson))
+                      // The machine AS INGESTED, not as requested: versioned
+                      // name, minted id, allocated regions. A caller has no
+                      // other way to learn what it received.
+                      complete(Json.obj("success"   -> Json.fromBoolean(true),
+                                        "versioned" -> Json.fromBoolean(versioned),
+                                        "machine"   -> machine.toJson))
                   }
                 } }
               )
