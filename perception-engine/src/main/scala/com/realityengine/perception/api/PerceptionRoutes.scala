@@ -628,8 +628,15 @@ class PerceptionRoutes(
     *   what VectorAggregator gates the perceptual space and the mergeBatch on
     *   below, so requesting less would quietly change what a push *does*
     *   rather than what it reports.
+    * @param only the caller's subset selector (RealityEngine_CI#367). Applied
+    *   to the reply, for the same reason `compact` is: the Reality Engine
+    *   filters `machineResults` by the selector like every other field, so
+    *   forwarding it would hand `VectorAggregator.aggregate` a subset of the
+    *   corpus's outputs and move the next InputSpaceVector. Measured on C++,
+    *   which did forward it: 408 machines fed the aggregator unfiltered and 0
+    *   fed it with a selector present.
     */
-  def doPush(compact: Boolean = false): Future[PushResult] = Future {
+  def doPush(compact: Boolean = false, only: Option[Json] = None): Future[PushResult] = Future {
     val vector  = engine.assembleVector()
     val algoStr = MatchAlgorithm.asString(engine.matchAlgorithm)
 
@@ -730,9 +737,16 @@ class PerceptionRoutes(
           else parsed.deepMerge(Json.obj(
             "mergeBatch" -> Json.arr(VectorAggregator.mergeBatch(machineResults, machineCorpus.get()): _*)
           ))
+        // Narrowed after the aggregation and the dispatch/audit passes above,
+        // so asking for less never means the engine did less — only that it
+        // reported less. Before the redaction, because the selector is defined
+        // in terms of machineResults: `selectedIds` resolves the caller's
+        // machine *names* to this runtime's minted ids, and there is nowhere
+        // else in the step those two are carried together.
+        val selected = PushRequest.applySelector(withMergeBatch, only)
         val stepJson = Some(
-          if (compact) PushRequest.redactMachineResults(withMergeBatch)
-          else withMergeBatch
+          if (compact) PushRequest.redactMachineResults(selected)
+          else selected
         )
 
         val result = PushResult(
@@ -845,7 +859,8 @@ class PerceptionRoutes(
         // with 400 "Got value '{"compact":true}' with wrong type, expecting
         // string" — rejecting exactly the request it was added to read.
         extractStrictEntity(3.seconds) { strict =>
-          onComplete(doPush(PushRequest.compactFrom(strict.data.utf8String))) {
+          val raw = strict.data.utf8String
+          onComplete(doPush(PushRequest.compactFrom(raw), PushRequest.onlyFrom(raw))) {
             case Success(r) =>
               val id     = s"push-${System.currentTimeMillis()}-${java.util.UUID.randomUUID().toString.take(8)}"
               val record = r.asJson.deepMerge(Json.obj("id" -> id.asJson))
