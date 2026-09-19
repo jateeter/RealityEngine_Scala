@@ -169,34 +169,39 @@ class Routes(
     *
     * No selector => the step is returned untouched, so the default wire is
     * unchanged byte-for-byte.
+    *
+    * A selector that names nothing is still a selector, and selects nothing.
+    * `only: {}` used to fall through to the unfiltered step here, which made
+    * the filter unfalsifiable in exactly the way the unknown-sequence-id rule
+    * forbids: a caller building `sequenceIds` from a list that happened to be
+    * empty was handed the whole universe and had no way to tell. Presence
+    * activates the selector; content decides what it keeps (SURFACE_SPEC.md,
+    * RealityEngine_CI#367).
     */
   private def selectStepSubset(step: SimulationStep, body: Json): SimulationStep = {
     val only = body.hcursor.downField("only")
-    if (only.failed) step
+    if (only.failed || !only.focus.exists(_.isObject)) step
     else {
       val seqIds   = only.get[List[String]]("sequenceIds").getOrElse(Nil).toSet
       val machines = only.get[List[String]]("machineNames").getOrElse(Nil).toSet
-      if (seqIds.isEmpty && machines.isEmpty) step
-      else {
-        // Which of this runtime's ids the requested names resolve to. The
-        // caller cannot supply these: they are minted here.
-        val selectedIds =
-          step.machineResults.collect { case (id, mr) if machines.contains(mr.machineName) => id }.toSet
-        step.copy(
-          mergeBatch     = step.mergeBatch.filter(op =>
-                             op.sequenceIds.exists(seqIds.contains) || selectedIds.contains(op.machineId)),
-          eventBus       = step.eventBus.filter(w =>
-                             seqIds.contains(w.producerSequenceId) ||
-                             selectedIds.contains(w.producerMachineId) ||
-                             selectedIds.contains(w.subscriberMachineId)),
-          activeRegions  = step.activeRegions.filter(r => selectedIds.contains(r.machineId)),
-          machineResults = step.machineResults.filter { case (id, mr) =>
-                             machines.contains(mr.machineName) || selectedIds.contains(id) ||
-                             step.mergeBatch.exists(op => op.machineId == id &&
-                                                          op.sequenceIds.exists(seqIds.contains))
-                           }
-        )
-      }
+      // Which of this runtime's ids the requested names resolve to. The
+      // caller cannot supply these: they are minted here.
+      val selectedIds =
+        step.machineResults.collect { case (id, mr) if machines.contains(mr.machineName) => id }.toSet
+      step.copy(
+        mergeBatch     = step.mergeBatch.filter(op =>
+                           op.sequenceIds.exists(seqIds.contains) || selectedIds.contains(op.machineId)),
+        eventBus       = step.eventBus.filter(w =>
+                           seqIds.contains(w.producerSequenceId) ||
+                           selectedIds.contains(w.producerMachineId) ||
+                           selectedIds.contains(w.subscriberMachineId)),
+        activeRegions  = step.activeRegions.filter(r => selectedIds.contains(r.machineId)),
+        machineResults = step.machineResults.filter { case (id, mr) =>
+                           machines.contains(mr.machineName) || selectedIds.contains(id) ||
+                           step.mergeBatch.exists(op => op.machineId == id &&
+                                                        op.sequenceIds.exists(seqIds.contains))
+                         }
+      )
     }
   }
 
