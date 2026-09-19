@@ -107,11 +107,43 @@ class MachineIngestionSpec extends AnyFlatSpec with Matchers with ScalatestRoute
       ("Ingest Probe", "Ingest Probe v2", "Ingest Probe v3")
   }
 
+  it should "continue the version sequence rather than nesting suffixes" in {
+    // A caller re-posting what it received must not drift: appending to the
+    // requested name verbatim gives "Ingest Probe v2 v2", then
+    // "Ingest Probe v2 v2 v2". The base is recovered so one sequence serves the
+    // machine however the caller addresses it.
+    val versioned = Post("/api/machines",
+      HttpEntity(ContentTypes.`application/json`,
+                 body.replaceFirst("\"Ingest Probe\"", "\"Ingest Probe v2\""))) ~>
+      testRoutes ~> check {
+        status shouldBe StatusCodes.OK
+        parse(responseAs[String]).toOption.get.hcursor
+          .downField("machine").get[String]("name").toOption.get
+      }
+    versioned shouldBe "Ingest Probe v4"
+    versioned should not include "v2 v"
+  }
+
+  it should "take a versioned name as requested when it is not resident" in {
+    // The base is consulted only to number a conflict, never to rewrite a name
+    // that has none.
+    Post("/api/machines",
+         HttpEntity(ContentTypes.`application/json`,
+                    body.replaceFirst("\"Ingest Probe\"", "\"Ingest Probe v9\""))) ~>
+      testRoutes ~> check {
+        status shouldBe StatusCodes.OK
+        val c = parse(responseAs[String]).toOption.get.hcursor
+        c.downField("machine").get[String]("name").toOption shouldBe Some("Ingest Probe v9")
+        c.get[Boolean]("versioned").toOption shouldBe Some(false)
+      }
+  }
+
   "DELETE" should "free the name, so the next POST is not a conflict" in {
     // Residency is runtime state. Versioning answers a collision at the moment
     // of ingestion; it is not a permanent mark on a name. This is the half a
     // conflict check written against an append-only set would fail.
-    for (victim <- List("Ingest Probe", "Ingest Probe v2", "Ingest Probe v3")) {
+    for (victim <- List("Ingest Probe", "Ingest Probe v2", "Ingest Probe v3",
+                        "Ingest Probe v4", "Ingest Probe v9")) {
       engine.getAllMachines.find(_.name == victim).foreach { m =>
         Delete(s"/api/machines/${m.id}") ~> testRoutes ~> check { status shouldBe StatusCodes.OK }
       }

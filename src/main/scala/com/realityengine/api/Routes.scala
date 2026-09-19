@@ -428,8 +428,13 @@ class Routes(
     val resident = engine.getAllMachines.map(_.name).toSet
     if (!resident.contains(machine.name)) return false
 
-    val requested = machine.name
-    machine.name = Iterator.from(2).map(n => s"$requested v$n").find(!resident.contains(_)).get
+    // The requested name's BASE — its trailing " v<n>" removed, if it has one.
+    // Appending to the requested name verbatim would give "Foo v2 v2" and then
+    // "Foo v2 v2 v2", so a caller re-posting what it received would drift
+    // further from the base on every attempt. Recovering the base keeps one
+    // version sequence per machine name however the caller addresses it.
+    val base = machine.name.replaceFirst(" v\\d+$", "")
+    machine.name = Iterator.from(2).map(n => s"$base v$n").find(!resident.contains(_)).get
 
     // The declared mapping is DISCARDED. A machine with no mapping cannot be
     // given one — it never enters the perceptual space — so it is ingested under
