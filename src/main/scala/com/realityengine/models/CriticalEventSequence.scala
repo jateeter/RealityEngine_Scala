@@ -43,7 +43,24 @@ class CriticalEventSequence(
   // ── Accessors ────────────────────────────────────────────────────────────
 
   def getVector(vectorId: String): Option[RealityEvent] = vectors.get(vectorId)
-  def getAllVectors: List[RealityEvent]                  = vectors.values.toList
+  /** This sequence's Reality Events, in ascending id order.
+    *
+    * `vectors` is a Map, so `.values` walks it in hash order — this runtime's
+    * own and nobody else's. C++ and LSP both key their events by id and
+    * therefore emit them sorted, so an export from here came back with the same
+    * events in a different order: `kleene-seq1-001, -000, -010` against their
+    * `-000, -001, -010` (RealityEngine_CI#436).
+    *
+    * That is the same reasoning `getInitialVectorIds` below already records, and
+    * the same canonical-ordering rule as #197 and #418 — order on a
+    * corpus-declared key, because event ids are corpus-declared and engine ids
+    * are not.
+    *
+    * Sorting here rather than in one serializer because every caller either
+    * counts or serializes, none depends on the order for behaviour, and two
+    * serializers sorting separately is how they drift apart.
+    */
+  def getAllVectors: List[RealityEvent]                  = vectors.values.toList.sortBy(_.id)
   def getInitialVectors: List[RealityEvent]             = initialVectorIds.flatMap(vectors.get).toList
 
   /** Ids of this sequence's Initial Reality Event vectors — at least one, by
