@@ -191,17 +191,42 @@ object MachineLoader {
             val withThresh = elem.threshold.map(t => withComp + ("threshold" -> Json.fromDoubleOrNull(t))).getOrElse(withComp)
             Json.fromFields(withThresh.toSeq)
           }
+          // The event AS IT IS RUNNING, not only as it was declared.
+          //
+          // isActive, matchAlgorithm, state and wasJustMatched were omitted, so
+          // this runtime exported 6 event fields where C++ and LSP export 10.
+          // The Manager's CES tooltip renders its live activation layer from
+          // exactly those, and that layer was inert whenever the active engine
+          // was Scala (RealityEngine_Scala#104).
+          //
+          // `state` is the field `isActive` is derived from, and both are
+          // exported because both runtimes do: dropping one would trade a
+          // missing-field divergence for a value-level one.
           Json.obj(
             "id"           -> Json.fromString(vec.id),
             "elements"     -> Json.arr(elements: _*),
             "isInitial"    -> Json.fromBoolean(vec.isInitial),
+            "isActive"     -> Json.fromBoolean(vec.isActive),
+            // Derived from isActive because `state` is private — and they are
+            // the same fact: RealityEvent defines isActive as
+            // `state == VectorState.Active`, and its own toJson renders the
+            // string the same way.
+            "state"        -> Json.fromString(if (vec.isActive) "active" else "inactive"),
+            "matchAlgorithm" -> Json.fromString(ComparatorType.serialize(vec.matchAlgorithm)),
+            "wasJustMatched" -> Json.fromBoolean(vec.wasJustMatched),
             "metadata"     -> vec.metadata.asJson,
             "nextEventIds"  -> Json.arr(vec.getNextVectorIds.map(Json.fromString): _*),
             "outputEvents"  -> Json.arr(vec.getOutputVectors.map { ov =>
+              // timestamp and provenance were omitted too — not named in #104,
+              // which compared event keys and not outputEvent keys. `timestamp`
+              // is when the output was asserted and `provenance` the INPUT event
+              // ids that caused it, and both are on the C++ and LSP payloads.
               Json.obj(
-                "id"       -> Json.fromString(ov.id),
-                "vector"   -> ov.vector.asJson,
-                "metadata" -> ov.metadata.asJson
+                "id"         -> Json.fromString(ov.id),
+                "vector"     -> ov.vector.asJson,
+                "metadata"   -> ov.metadata.asJson,
+                "timestamp"  -> Json.fromLong(ov.timestamp),
+                "provenance" -> Json.arr(ov.provenance.map(Json.fromString): _*)
               )
             }: _*)
           )
