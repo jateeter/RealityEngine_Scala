@@ -279,6 +279,9 @@ class PerceptionRoutes(
   private val ckEnabled          = sys.env.get("CAREKIT_ENABLED").exists(v => v == "true" || v == "1")
   private val ckDefaultMappingId = sys.env.getOrElse("CAREKIT_DEFAULT_SOURCE_MAPPING_ID", "carekit-task")
   private val localAiApiUrl      = sys.env.getOrElse("LOCAL_AI_API_URL",  "http://localhost:4000")
+  private val triggerDispatchMode = sys.env.get("TRIGGER_DISPATCH_MODE").filter(_.nonEmpty).getOrElse("dry-run")
+  private val triggerGraphqlEndpoint =
+    sys.env.get("TRIGGER_GRAPHQL_URL").filter(_.nonEmpty).getOrElse(localAiApiUrl.stripSuffix("/") + "/graphql")
   private val localAiMachinesDir = sys.env.get("LOCAL_AI_MACHINES_DIR")
 
   // Bundled yuma-agriculture demo mapping registry — mirrors
@@ -1070,31 +1073,44 @@ class PerceptionRoutes(
     },
 
     // ── Dispatch ledger ───────────────────────────────────────────────────────
+    // Shapes settled 3-of-3 in RealityEngine_CI SURFACE_SPEC.md, "Dispatch
+    // surface shapes". The record contents still differ until this runtime has
+    // a dispatcher (#149); the wrappers and PATCH semantics agree now.
     path("api" / "dispatch" / "ledger") {
       get { complete(Json.obj(
-        "records" -> Json.arr(dispatchLedger.get(): _*),
-        "total"   -> Json.fromInt(dispatchLedger.get().length)
+        "enabled" -> false.asJson,
+        "mode"    -> triggerDispatchMode.asJson,
+        "records" -> Json.arr(dispatchLedger.get(): _*)
       )) }
     },
     path("api" / "dispatch" / "records" / Segment) { id =>
       concat(
         get {
           dispatchLedger.get().find(_.hcursor.get[String]("id").toOption.contains(id)) match {
-            case Some(r) => complete(r)
+            case Some(r) => complete(Json.obj("record" -> r))
             case None    => complete(StatusCodes.NotFound -> Json.obj("error" -> "Dispatch record not found".asJson))
           }
         },
         patch { entity(as[Json]) { body =>
-          val ledger  = dispatchLedger.get()
-          val updated = ledger.map { r =>
-            if (r.hcursor.get[String]("id").toOption.contains(id)) r.deepMerge(body) else r
-          }
-          dispatchLedger.set(updated)
-          updated.find(_.hcursor.get[String]("id").toOption.contains(id)) match {
-            case Some(r) =>
-              broadcast(Json.obj("type" -> "dispatch-updated".asJson, "record" -> r))
-              complete(r)
-            case None => complete(StatusCodes.NotFound -> Json.obj("error" -> "Dispatch record not found".asJson))
+          if (!body.isObject) complete(StatusCodes.BadRequest -> Json.obj("error" -> "dispatch update body must be a JSON object".asJson))
+          else {
+            val now = System.currentTimeMillis()
+            val updated = dispatchLedger.updateAndGet(_.map { r =>
+              if (r.hcursor.get[String]("id").toOption.contains(id)) PerceptionRoutes.patchDispatchRecord(r, body, now) else r
+            })
+            updated.find(_.hcursor.get[String]("id").toOption.contains(id)) match {
+              case Some(r) =>
+                broadcast(Json.obj(
+                  "type"       -> "dispatch.record.updated".asJson,
+                  "dispatchId" -> id.asJson,
+                  "status"     -> r.hcursor.downField("status").focus.getOrElse(Json.Null),
+                  "target"     -> r.hcursor.downField("target").focus.getOrElse(Json.Null),
+                  "attempts"   -> r.hcursor.downField("attempts").focus.getOrElse(Json.fromInt(0)),
+                  "timestamp"  -> now.asJson
+                ))
+                complete(Json.obj("success" -> true.asJson, "record" -> r))
+              case None => complete(StatusCodes.NotFound -> Json.obj("error" -> "Dispatch record not found".asJson))
+            }
           }
         } }
       )
@@ -1740,10 +1756,25 @@ class PerceptionRoutes(
     },
 
     // ── Triggers status ───────────────────────────────────────────────────────
+    // Every agreed key, with participation "unsupported": this runtime has no
+    // trigger dispatcher yet (#149). A declared state, not silence -- see
+    // SURFACE_SPEC.md, Participation States. The counters are true zeros and
+    // the catalog is honestly never-loaded: there is none.
     path("api" / "triggers" / "status") {
       get { complete(Json.obj(
-        "enabled"      -> false.asJson,
-        "dispatchMode" -> "dry-run".asJson
+        "participation"             -> "unsupported".asJson,
+        "enabled"                   -> false.asJson,
+        "mode"                      -> triggerDispatchMode.asJson,
+        "graphqlEndpoint"           -> triggerGraphqlEndpoint.asJson,
+        "records"                   -> dispatchLedger.get().length.asJson,
+        "envelopesCreated"          -> 0.asJson,
+        "droppedNoGovernance"       -> 0.asJson,
+        "droppedNoDispatch"         -> 0.asJson,
+        "droppedCatalogCold"        -> 0.asJson,
+        "dispatchErrors"            -> 0.asJson,
+        "machineCatalogCold"        -> true.asJson,
+        "machineCatalogRefreshedAt" -> 0.asJson,
+        "machineCatalogSize"        -> 0.asJson
       )) }
     },
 
@@ -1991,4 +2022,34 @@ object PerceptionRoutes {
     */
   def localAiInvokeUri(base: String, path: String): sttp.model.Uri =
     sttp.model.Uri.unsafeParse(base.stripSuffix("/") + path)
+
+  /** PATCH /api/dispatch/records/:id, as settled 3-of-3 (SURFACE_SPEC.md,
+    * "Dispatch surface shapes"): status, error, clearError, attempts or
+    * incrementAttempts, providerReceipt (merged), and provider / adapter /
+    * externalRunId folded into providerReceipt. Every other field is ignored,
+    * so the envelope cannot be rewritten -- this used to deepMerge the whole
+    * body onto the record.
+    */
+  def patchDispatchRecord(record: Json, body: Json, now: Long): Json = {
+    val c = body.hcursor
+    var r = record
+    def set(k: String, v: Json): Unit = r = r.mapObject(_.add(k, v))
+    c.get[String]("status").toOption.foreach(v => set("status", v.asJson))
+    c.get[String]("error").toOption.foreach(v => set("error", v.asJson))
+    if (c.get[Boolean]("clearError").getOrElse(false)) set("error", Json.Null)
+    c.get[Int]("attempts").toOption match {
+      case Some(n) => set("attempts", n.asJson)
+      case None =>
+        if (c.get[Boolean]("incrementAttempts").getOrElse(false))
+          set("attempts", (r.hcursor.get[Int]("attempts").getOrElse(0) + 1).asJson)
+    }
+    val existing = r.hcursor.downField("providerReceipt").focus.filter(_.isObject).getOrElse(Json.obj())
+    val merged0  = c.downField("providerReceipt").focus.filter(_.isObject).fold(existing)(existing.deepMerge)
+    val folded   = List("provider", "adapter", "externalRunId").foldLeft(merged0) { (acc, k) =>
+      c.get[String](k).toOption.fold(acc)(v => acc.mapObject(_.add(k, v.asJson)))
+    }
+    if (folded.asObject.exists(_.nonEmpty)) set("providerReceipt", folded)
+    set("updatedAt", now.asJson)
+    r
+  }
 }
