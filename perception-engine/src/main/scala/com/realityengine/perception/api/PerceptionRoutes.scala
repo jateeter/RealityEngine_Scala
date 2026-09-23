@@ -1209,6 +1209,32 @@ class PerceptionRoutes(
         "records" -> Json.arr(dispatchLedger.get(): _*)
       )) }
     },
+    path("api" / "dispatch" / "records" / Segment / "replay") { id =>
+      post {
+        entity(as[Option[Json]]) { bodyOpt =>
+          val freshIds = bodyOpt.flatMap(_.hcursor.get[Boolean]("freshIds").toOption).getOrElse(false)
+          dispatchLedger.get().find(_.hcursor.get[String]("id").toOption.contains(id)) match {
+            case None => complete(StatusCodes.NotFound -> Json.obj("error" -> "Dispatch record not found".asJson))
+            case Some(original) =>
+              val replay = TriggerDispatcher.replayRecord(original, freshIds, System.currentTimeMillis(), TriggerDispatcher.defaultId)
+              dispatchLedger.updateAndGet(l => (l :+ replay).takeRight(dispatchLedgerLimit))
+              triggerDispatcher.noteReplay()
+              val r = replay.hcursor
+              broadcast(Json.obj(
+                "type"          -> "trigger.envelope.created".asJson,
+                "envelopeId"    -> r.downField("envelopeId").focus.getOrElse(Json.Null),
+                "correlationId" -> r.downField("correlationId").focus.getOrElse(Json.Null),
+                "dispatchId"    -> r.downField("id").focus.getOrElse(Json.Null),
+                "target"        -> r.downField("target").focus.getOrElse(Json.Null),
+                "mode"          -> "replay".asJson,
+                "replayOf"      -> id.asJson
+              ))
+              complete(Json.obj("success" -> true.asJson, "record" -> replay,
+                                "replayOf" -> id.asJson, "freshIds" -> freshIds.asJson))
+          }
+        }
+      }
+    },
     path("api" / "dispatch" / "records" / Segment) { id =>
       concat(
         get {
@@ -1967,6 +1993,7 @@ class PerceptionRoutes(
           "droppedNoGovernance"       -> triggerDispatcher.droppedNoGovernance.asJson,
           "droppedNoDispatch"         -> triggerDispatcher.droppedNoDispatch.asJson,
           "droppedCatalogCold"        -> triggerDispatcher.droppedCatalogCold.asJson,
+          "replaysCreated"            -> triggerDispatcher.replaysCreated.asJson,
           "dispatchErrors"            -> triggerDispatcher.dispatchErrors.asJson,
           "machineCatalogCold"        -> (refreshedAt == 0L).asJson,
           "machineCatalogRefreshedAt" -> refreshedAt.asJson,
