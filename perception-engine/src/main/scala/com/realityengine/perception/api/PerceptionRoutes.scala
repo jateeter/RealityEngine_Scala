@@ -29,6 +29,7 @@ import scala.concurrent.duration._
 import scala.util.{Failure, Success, Try}
 import java.util.concurrent.atomic.{AtomicBoolean, AtomicReference}
 import com.realityengine.perception.logging.{AuditConfig, AuditLogger}
+import com.realityengine.perception.triggers.TriggerDispatcher
 
 class PerceptionRoutes(
   engine: PerceptionEngine,
@@ -282,6 +283,74 @@ class PerceptionRoutes(
   private val triggerDispatchMode = sys.env.get("TRIGGER_DISPATCH_MODE").filter(_.nonEmpty).getOrElse("dry-run")
   private val triggerGraphqlEndpoint =
     sys.env.get("TRIGGER_GRAPHQL_URL").filter(_.nonEmpty).getOrElse(localAiApiUrl.stripSuffix("/") + "/graphql")
+  private def truthyEnv(v: String): Boolean = Set("1", "true", "TRUE", "yes", "YES").contains(v)
+  private val triggersEnabled = sys.env.get("TRIGGERS_ENABLED").exists(truthyEnv)
+
+  // ── Machine catalog (trigger dispatch) ────────────────────────────────────
+  // A read-through cache of the RE's machine list, which dispatch reads to
+  // resolve a merge entry's machine. machineCatalogRefreshedAt is 0 until the
+  // first successful fetch, so 0 is an unambiguous never-loaded marker
+  // (droppedCatalogCold, RealityEngine_LSP#63). Warm-up retries on a backoff
+  // until that first fetch lands -- the PE usually starts before its RE is
+  // listening -- then refreshes every 60 s, as LSP does.
+  private val machineCatalog            = new AtomicReference[Map[String, Json]](Map.empty)
+  private val machineCatalogRefreshedAt = new java.util.concurrent.atomic.AtomicLong(0L)
+  private def refreshMachineCatalog(): Boolean =
+    try {
+      val resp = basicRequest.get(uri"$realityEngineUrl/api/machines").response(asString).send(sttpBackend)
+      val machines = if (resp.isSuccess)
+        resp.body.toOption.flatMap(b => io.circe.parser.parse(b).toOption)
+          .flatMap(j => j.hcursor.downField("machines").as[Vector[Json]].toOption.orElse(j.as[Vector[Json]].toOption))
+      else None
+      machines.exists { ms =>
+        machineCatalog.set(ms.flatMap(m => m.hcursor.get[String]("id").toOption.filter(_.nonEmpty).map(_ -> m)).toMap)
+        machineCatalogRefreshedAt.set(System.currentTimeMillis())
+        true
+      }
+    } catch { case _: Exception => false }
+  if (triggersEnabled) {
+    val t = new Thread(() => {
+      var delay = 100L
+      while (!refreshMachineCatalog()) { Thread.sleep(delay); delay = math.min(delay * 2, 5000L) }
+      while (true) { Thread.sleep(60000L); refreshMachineCatalog() }
+    }, "machine-catalog-refresher")
+    t.setDaemon(true)
+    t.start()
+  }
+
+  private val triggerDispatcher = new TriggerDispatcher(
+    enabled          = triggersEnabled,
+    mode             = triggerDispatchMode,
+    graphqlEndpoint  = triggerGraphqlEndpoint,
+    realityEngineUrl = realityEngineUrl,
+    catalog          = () => (machineCatalog.get(), machineCatalogRefreshedAt.get()),
+    semanticsBase    = name => SemanticMetrics.baseIriFor(Some(name)),
+    onSemantics      = (joined, escalation) => SemanticMetrics.recordDispatch(joined, escalation),
+  )
+
+  // ── ACP / OpenClaw settings, with C++'s precedence: built-in default, then
+  // the acp integration entry of INTEGRATIONS_CONFIG, then the environment. ──
+  private val acpEntry: Json = try {
+    val src = scala.io.Source.fromFile(sys.env.getOrElse("INTEGRATIONS_CONFIG", "config/integrations.json"))
+    val text = try src.mkString finally src.close()
+    io.circe.parser.parse(text).toOption
+      .flatMap(_.hcursor.downField("integrations").as[Vector[Json]].toOption)
+      .flatMap(_.find(i => i.hcursor.get[String]("kind").toOption.exists(k => k == "acp" || k == "openclaw-acp")))
+      .getOrElse(Json.obj())
+  } catch { case _: Exception => Json.obj() }
+  private def acpSetting(key: String, env: Seq[String], default: String): String =
+    env.reverse.flatMap(sys.env.get).headOption
+      .orElse(acpEntry.hcursor.get[String](key).toOption)
+      .getOrElse(default)
+  private val acpCfgEnabled  = sys.env.get("ACP_ENABLED").map(truthyEnv)
+    .orElse(acpEntry.hcursor.get[Boolean]("enabled").toOption).getOrElse(true)
+  private val acpCfgPlatform = acpSetting("platform", Seq("ACP_PLATFORM"), "OpenClaw")
+  private val acpCfgSurface  = acpSetting("surface", Seq("ACP_SURFACE"), "xACP")
+  private val acpCfgCommand  = acpSetting("command", Seq("ACP_COMMAND", "OPENCLAW_ACP_COMMAND"), "openclaw acp")
+  private val acpCfgGateway  = acpSetting("gatewayUrl", Seq("ACP_GATEWAY_URL", "OPENCLAW_GATEWAY_URL"), "ws://127.0.0.1:18789")
+  private val acpCfgSession  = acpSetting("sessionKey", Seq("ACP_SESSION_KEY", "OPENCLAW_ACP_SESSION"), "agent:main:main")
+  private val acpCfgTarget   = acpSetting("targetAgent", Seq("ACP_TARGET_AGENT"), "openclaw")
+  private val acpCfgMapping  = acpSetting("completionSourceMappingId", Seq("ACP_COMPLETION_SOURCE_MAPPING_ID"), "acp-openclaw-completion")
   private val localAiMachinesDir = sys.env.get("LOCAL_AI_MACHINES_DIR")
 
   // Bundled yuma-agriculture demo mapping registry — mirrors
@@ -470,10 +539,31 @@ class PerceptionRoutes(
       "sourceMappingId" -> smId.asJson,
       "body"            -> body
     )
-    dispatchLedger.updateAndGet(l => (l :+ record).takeRight(dispatchLedgerLimit))
+    // Completions are not dispatch records and do not go in the dispatch
+    // ledger: C++ and LSP keep it to records built from envelopes, and the
+    // record key set is 3-of-3 (SURFACE_SPEC.md, Dispatch surface shapes).
     broadcast(Json.obj("type" -> "agent.completion.received".asJson, "record" -> record))
     record
   }
+
+  private def acpStatusJson: Json = Json.obj(
+    "enabled"                   -> acpCfgEnabled.asJson,
+    "platform"                  -> acpCfgPlatform.asJson,
+    "surface"                   -> acpCfgSurface.asJson,
+    "adapter"                   -> "openclaw-xacp".asJson,
+    "command"                   -> acpCfgCommand.asJson,
+    "gatewayUrl"                -> acpCfgGateway.asJson,
+    "sessionKey"                -> acpCfgSession.asJson,
+    "targetAgent"               -> acpCfgTarget.asJson,
+    "completionSourceMappingId" -> acpCfgMapping.asJson,
+    "dispatchEndpoint"          -> "/api/integrations/acp/dispatch".asJson,
+    "completionEndpoint"        -> "/api/integrations/completions".asJson,
+    "noWaitDispatch"            -> true.asJson,
+    "contract"                  -> Json.obj(
+      "dispatch"   -> "Record an ACP/OpenClaw handoff receipt only; do not run or wait for the harness in the PE cycle.".asJson,
+      "completion" -> "External ACP/OpenClaw adapters commit finished results through /api/integrations/completions.".asJson
+    )
+  )
 
   private def probeHttp(url: String): (Boolean, String) =
     try {
@@ -768,6 +858,23 @@ class PerceptionRoutes(
         // in terms of machineResults: `selectedIds` resolves the caller's
         // machine *names* to this runtime's minted ids, and there is nowhere
         // else in the step those two are carried together.
+        // Trigger dispatch reads the RE's batch -- after the aggregation, before
+        // the reply is narrowed, so asking for less never means dispatching less.
+        val created = triggerDispatcher.dispatchStep(withMergeBatch)
+        if (created.nonEmpty) {
+          dispatchLedger.updateAndGet(l => (l ++ created).takeRight(dispatchLedgerLimit))
+          created.foreach { r =>
+            val c = r.hcursor
+            broadcast(Json.obj(
+              "type"          -> "trigger.envelope.created".asJson,
+              "envelopeId"    -> c.downField("envelopeId").focus.getOrElse(Json.Null),
+              "correlationId" -> c.downField("correlationId").focus.getOrElse(Json.Null),
+              "dispatchId"    -> c.downField("id").focus.getOrElse(Json.Null),
+              "target"        -> c.downField("target").focus.getOrElse(Json.Null),
+              "mode"          -> triggerDispatchMode.asJson
+            ))
+          }
+        }
         val selected = PushRequest.applySelector(withMergeBatch, only)
         val stepJson = Some(
           if (compact) PushRequest.redactMachineResults(selected)
@@ -1097,7 +1204,7 @@ class PerceptionRoutes(
     // a dispatcher (#149); the wrappers and PATCH semantics agree now.
     path("api" / "dispatch" / "ledger") {
       get { complete(Json.obj(
-        "enabled" -> false.asJson,
+        "enabled" -> triggersEnabled.asJson,
         "mode"    -> triggerDispatchMode.asJson,
         "records" -> Json.arr(dispatchLedger.get(): _*)
       )) }
@@ -1317,35 +1424,74 @@ class PerceptionRoutes(
     },
 
     // ── ACP ──────────────────────────────────────────────────────────────────
+    // ACP status and dispatch, as C++ and LSP already agree
+    // (RealityEngine_CI scripts/test-openclaw-integration.sh holds both).
     path("api" / "integrations" / "acp" / "status") {
-      get { complete(Json.obj(
-        "enabled"                   -> acpEnabled.asJson,
-        "configured"                -> acpEndpointUrl.isDefined.asJson,
-        "endpointUrl"               -> acpEndpointUrl.map(_.asJson).getOrElse(Json.Null),
-        "sessionKey"                -> acpSessionKey.map(_.asJson).getOrElse(Json.Null),
-        "agentId"                   -> acpAgentId.asJson,
-        "completionSourceMappingId" -> acpCompletionSourceMappingId.asJson
-      )) }
+      get { complete(acpStatusJson) }
     },
     path("api" / "integrations" / "acp" / "dispatch") {
       post { entity(as[Json]) { body =>
-        val ts      = System.currentTimeMillis()
-        val agentId = body.hcursor.get[String]("agentId").getOrElse(acpAgentId)
-        val id      = s"acp-$ts-${java.util.UUID.randomUUID().toString.take(8)}"
-        val record  = Json.obj(
-          "id"        -> id.asJson,
-          "type"      -> "acp-handoff".asJson,
-          "agentId"   -> agentId.asJson,
-          "timestamp" -> ts.asJson,
-          "endpoint"  -> acpEndpointUrl.map(_.asJson).getOrElse(Json.Null),
-          "sessionKey" -> acpSessionKey.map(_.asJson).getOrElse(Json.Null),
-          "completionSourceMappingId" -> body.hcursor.get[String]("sourceMappingId").getOrElse(acpCompletionSourceMappingId).asJson,
-          "status"    -> "accepted".asJson,
-          "body"      -> body
-        )
-        dispatchLedger.updateAndGet(l => (l :+ record).takeRight(dispatchLedgerLimit))
-        broadcast(Json.obj("type" -> "acp.handoff.accepted".asJson, "record" -> record))
-        complete(StatusCodes.Accepted -> record)
+        val c  = body.hcursor
+        val id = c.get[String]("dispatchId").toOption.orElse(c.get[String]("id").toOption).filter(_.nonEmpty)
+        id match {
+          case None => complete(StatusCodes.BadRequest -> Json.obj("error" -> "ACP dispatch requires dispatchId".asJson))
+          case Some(dispatchId) =>
+            dispatchLedger.get().find(_.hcursor.get[String]("id").toOption.contains(dispatchId)) match {
+              case None => complete(StatusCodes.NotFound -> Json.obj("error" -> "Dispatch record not found".asJson))
+              case Some(record) =>
+                val r = record.hcursor
+                val targetAgent = c.get[String]("targetAgent").toOption
+                  .orElse(c.get[String]("agent").toOption)
+                  .getOrElse(r.get[String]("target").toOption.filter(_.nonEmpty).getOrElse(acpCfgTarget))
+                val externalRunId = c.get[String]("externalRunId")
+                  .getOrElse(s"acp-handoff-${System.currentTimeMillis()}-${scala.util.Random.nextInt(1000000)}")
+                val handoff0 = Json.obj(
+                  "protocol"                  -> "ACP".asJson,
+                  "surface"                   -> acpCfgSurface.asJson,
+                  "platform"                  -> acpCfgPlatform.asJson,
+                  "adapter"                   -> "openclaw-xacp".asJson,
+                  "command"                   -> c.get[String]("command").getOrElse(acpCfgCommand).asJson,
+                  "gatewayUrl"                -> c.get[String]("gatewayUrl").getOrElse(acpCfgGateway).asJson,
+                  "sessionKey"                -> c.get[String]("sessionKey").getOrElse(acpCfgSession).asJson,
+                  "targetAgent"               -> targetAgent.asJson,
+                  "completionEndpoint"        -> "/api/integrations/completions".asJson,
+                  "completionSourceMappingId" -> c.get[String]("sourceMappingId").getOrElse(acpCfgMapping).asJson,
+                  "noWaitDispatch"            -> true.asJson,
+                  "prompt"                    -> c.get[String]("prompt").getOrElse(
+                    "Handle this RealityEngine trigger envelope through the configured OpenClaw ACP session and return a PE completion values array.").asJson,
+                  "dispatchId"                -> dispatchId.asJson,
+                  "envelopeId"                -> r.downField("envelopeId").focus.getOrElse(Json.Null),
+                  "correlationId"             -> r.downField("correlationId").focus.getOrElse(Json.Null)
+                )
+                val handoff = c.downField("metadata").focus.filter(_.isObject)
+                  .fold(handoff0)(m => handoff0.mapObject(_.add("metadata", m)))
+                val now = System.currentTimeMillis()
+                dispatchLedger.updateAndGet(_.map { rec =>
+                  if (rec.hcursor.get[String]("id").toOption.contains(dispatchId))
+                    PerceptionRoutes.patchDispatchRecord(rec, Json.obj(
+                      "status"            -> c.get[String]("status").getOrElse("accepted").asJson,
+                      "adapter"           -> "openclaw-xacp".asJson,
+                      "provider"          -> "acp".asJson,
+                      "externalRunId"     -> externalRunId.asJson,
+                      "incrementAttempts" -> c.get[Boolean]("incrementAttempts").getOrElse(true).asJson,
+                      "clearError"        -> true.asJson,
+                      "providerReceipt"   -> handoff
+                    ), now)
+                  else rec
+                })
+                complete(StatusCodes.Accepted -> Json.obj(
+                  "success"        -> true.asJson,
+                  "accepted"       -> true.asJson,
+                  "dispatchId"     -> dispatchId.asJson,
+                  "provider"       -> "acp".asJson,
+                  "platform"       -> acpCfgPlatform.asJson,
+                  "surface"        -> acpCfgSurface.asJson,
+                  "externalRunId"  -> externalRunId.asJson,
+                  "noWaitDispatch" -> true.asJson,
+                  "handoff"        -> handoff
+                ))
+            }
+        }
       } }
     },
 
@@ -1807,26 +1953,26 @@ class PerceptionRoutes(
     },
 
     // ── Triggers status ───────────────────────────────────────────────────────
-    // Every agreed key, with participation "unsupported": this runtime has no
-    // trigger dispatcher yet (#149). A declared state, not silence -- see
-    // SURFACE_SPEC.md, Participation States. The counters are true zeros and
-    // the catalog is honestly never-loaded: there is none.
+    // Shape settled 3-of-3 (SURFACE_SPEC.md, Dispatch surface shapes).
     path("api" / "triggers" / "status") {
-      get { complete(Json.obj(
-        "participation"             -> "unsupported".asJson,
-        "enabled"                   -> false.asJson,
-        "mode"                      -> triggerDispatchMode.asJson,
-        "graphqlEndpoint"           -> triggerGraphqlEndpoint.asJson,
-        "records"                   -> dispatchLedger.get().length.asJson,
-        "envelopesCreated"          -> 0.asJson,
-        "droppedNoGovernance"       -> 0.asJson,
-        "droppedNoDispatch"         -> 0.asJson,
-        "droppedCatalogCold"        -> 0.asJson,
-        "dispatchErrors"            -> 0.asJson,
-        "machineCatalogCold"        -> true.asJson,
-        "machineCatalogRefreshedAt" -> 0.asJson,
-        "machineCatalogSize"        -> 0.asJson
-      )) }
+      get {
+        val refreshedAt = machineCatalogRefreshedAt.get()
+        complete(Json.obj(
+          "participation"             -> (if (triggersEnabled) "active" else "not-active").asJson,
+          "enabled"                   -> triggersEnabled.asJson,
+          "mode"                      -> triggerDispatchMode.asJson,
+          "graphqlEndpoint"           -> triggerGraphqlEndpoint.asJson,
+          "records"                   -> dispatchLedger.get().length.asJson,
+          "envelopesCreated"          -> triggerDispatcher.envelopesCreated.asJson,
+          "droppedNoGovernance"       -> triggerDispatcher.droppedNoGovernance.asJson,
+          "droppedNoDispatch"         -> triggerDispatcher.droppedNoDispatch.asJson,
+          "droppedCatalogCold"        -> triggerDispatcher.droppedCatalogCold.asJson,
+          "dispatchErrors"            -> triggerDispatcher.dispatchErrors.asJson,
+          "machineCatalogCold"        -> (refreshedAt == 0L).asJson,
+          "machineCatalogRefreshedAt" -> refreshedAt.asJson,
+          "machineCatalogSize"        -> machineCatalog.get().size.asJson
+        ))
+      }
     },
 
     // ── MQTT bridge ───────────────────────────────────────────────────────────
