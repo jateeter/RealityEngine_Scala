@@ -58,9 +58,13 @@ object PerceptionJsonCodecs {
       name         <- c.get[String]("name")
       region       <- c.get[Region]("region")
       active       <- c.get[Boolean]("active")
-      machineId    <- c.get[String]("machineId")
-      machineName  <- c.get[String]("machineName")
-      sequenceName <- c.get[String]("sequenceName")
+      // Optional, defaulting to "" as in C++ and LSP. An ad-hoc test source --
+      // the OpenClaw dispatch seed in RealityEngine_CI's integration test is
+      // one -- names no machine, and requiring these made POST /api/sources
+      // answer 400 here and 200 on the other two runtimes.
+      machineId    <- c.getOrElse[String]("machineId")("")
+      machineName  <- c.getOrElse[String]("machineName")("")
+      sequenceName <- c.getOrElse[String]("sequenceName")("")
       inputs       <- c.get[Vector[Vector[Double]]]("inputs")
       loop         <- c.get[Boolean]("loop")
       metadata     <- c.getOrElse[Json]("metadata")(Json.obj())
