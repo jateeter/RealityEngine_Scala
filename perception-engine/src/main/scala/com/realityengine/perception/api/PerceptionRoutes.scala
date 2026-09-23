@@ -1,7 +1,7 @@
 package com.realityengine.perception.api
 
 import akka.actor.{ActorRef, ActorSystem}
-import akka.http.scaladsl.model.{ContentTypes, HttpEntity, StatusCodes}
+import akka.http.scaladsl.model.{ContentTypes, HttpEntity, StatusCode, StatusCodes}
 import akka.http.scaladsl.server.Directives._
 import akka.http.scaladsl.server.Route
 import akka.stream.Materializer
@@ -307,6 +307,25 @@ class PerceptionRoutes(
       {"id":"agx032-co2-danger",   "topicFilter":"LATERAL/AmbientSuite/DEV0000009/SensorReadings/v1",   "sensorIdTemplate":"agx032.co2.danger",         "region":{"offset":230,"length":1},"extract":{"type":"json","pointer":"/data/aCO2"},        "normalize":{"mode":"band","min":3000, "max":5000}},
       {"id":"agx032-temp-ok",      "topicFilter":"LATERAL/AmbientSuite/DEV0000009/SensorReadings/v1",   "sensorIdTemplate":"agx032.temp.ok",            "region":{"offset":231,"length":1},"extract":{"type":"json","pointer":"/data/aTemp"},       "normalize":{"mode":"band","min":65,   "max":85  }}
     ]}""").getOrElse(Json.obj())
+
+  // ── localAI invoke allow-list ─────────────────────────────────────────────
+  // allowedOperations on the localai integration of INTEGRATIONS_CONFIG: the
+  // curated policy every runtime reads (SURFACE_SPEC.md, localAI invoke
+  // contract). None configured allows nothing. This runtime used a hand-written
+  // OpenAI-shaped list, most of which localAIStack does not serve.
+  private val (localAiAllowedOps: Vector[Json], localAiAllowedSource: Option[String]) = {
+    val cfgPath = sys.env.getOrElse("INTEGRATIONS_CONFIG", "config/integrations.json")
+    try {
+      val src  = scala.io.Source.fromFile(cfgPath)
+      val text = try src.mkString finally src.close()
+      io.circe.parser.parse(text).toOption.flatMap { json =>
+        json.hcursor.downField("integrations").as[Vector[Json]].getOrElse(Vector.empty)
+          .find(_.hcursor.get[String]("kind").toOption.contains("localai"))
+          .flatMap(_.hcursor.downField("allowedOperations").as[Vector[Json]].toOption)
+          .map(ops => (ops, Some(cfgPath)))
+      }.getOrElse((Vector.empty[Json], None))
+    } catch { case _: Exception => (Vector.empty[Json], None) }
+  }
 
   // ── Source mapping registry ───────────────────────────────────────────────
 
@@ -1571,19 +1590,36 @@ class PerceptionRoutes(
         ))
       }
     },
+    // Shape settled 3-of-3 (SURFACE_SPEC.md, localAI invoke contract). It was
+    // {schema, events}, so no operationId could be resolved for the ledger.
     path("api" / "integrations" / "localai" / "catalog") {
       get {
-        val schema = try {
-          val resp = basicRequest.get(uri"$localAiApiUrl/graph/schema").response(asString).send(sttpBackend)
+        def fetch(p: String): Json = try {
+          val resp = basicRequest.get(PerceptionRoutes.localAiInvokeUri(localAiApiUrl, p)).response(asString).send(sttpBackend)
           if (resp.isSuccess) io.circe.parser.parse(resp.body.fold(identity, identity)).toOption.getOrElse(Json.Null)
           else Json.Null
         } catch { case _: Exception => Json.Null }
-        val events = try {
-          val resp = basicRequest.get(uri"$localAiApiUrl/graphql/events").response(asString).send(sttpBackend)
-          if (resp.isSuccess) io.circe.parser.parse(resp.body.fold(identity, identity)).toOption.getOrElse(Json.Null)
-          else Json.Null
-        } catch { case _: Exception => Json.Null }
-        complete(Json.obj("schema" -> schema, "events" -> events))
+        val (reachable, _) = probeHttp(localAiApiUrl)
+        complete(Json.obj(
+          "success" -> true.asJson,
+          "status"  -> Json.obj(
+            "enabled"     -> true.asJson,
+            "configured"  -> true.asJson,
+            "baseUrl"     -> localAiApiUrl.asJson,
+            "reachable"   -> reachable.asJson,
+            "machinesDir" -> localAiMachinesDir.map(_.asJson).getOrElse(Json.Null)
+          ),
+          "graphSchema"            -> fetch("/graph/schema"),
+          "recentGraphQLEvents"    -> fetch("/graphql/events"),
+          "invokeEndpoint"         -> "/api/integrations/localai/invoke".asJson,
+          "allowedEndpoints"       -> Json.arr(localAiAllowedOps: _*),
+          "allowedEndpointsSource" -> localAiAllowedSource.map(_.asJson).getOrElse(Json.Null),
+          "realityBridge"          -> Json.obj(
+            "sensors"           -> Json.arr("localai_rag_retrieval".asJson, "localai_rag_grading".asJson, "localai_agent_activity".asJson),
+            "bootstrapEndpoint" -> "/api/integrations/localai/bootstrap".asJson,
+            "signalEndpoint"    -> "/api/signals".asJson
+          )
+        ))
       }
     },
     path("api" / "integrations" / "localai" / "bootstrap") {
@@ -1646,82 +1682,97 @@ class PerceptionRoutes(
         }
       }
     },
+    // Contract settled 3-of-3 (SURFACE_SPEC.md, localAI invoke contract).
     path("api" / "integrations" / "localai" / "invoke") {
       post { entity(as[Json]) { body =>
-        val allowed = Set(
-          "/v1/chat/completions", "/v1/completions", "/v1/embeddings", "/v1/models",
-          "/v1/images/generations", "/v1/audio/transcriptions", "/graphql", "/api/predict"
-        )
-        val targetPath = body.hcursor.get[String]("path").getOrElse("/v1/chat/completions")
-
+        val c = body.hcursor
         // The correlation id is what lets a completion write-back be joined to
         // the invocation that justified it. Taken from the caller when given,
         // minted otherwise so no record is left unjoinable.
-        val correlationId = body.hcursor.get[String]("correlationId")
+        val correlationId = c.get[String]("correlationId")
           .getOrElse(s"localai-invocation-${System.currentTimeMillis()}-${scala.util.Random.nextInt(1000000)}")
         val invocationId  = s"localai-inv-${System.currentTimeMillis()}-${scala.util.Random.nextInt(1000000)}"
         val startedAt     = System.currentTimeMillis()
 
-        // Machine and sequence are recorded only when the caller names them. An
-        // invocation with no authored occasion is a detectable condition;
-        // inventing one would hide it.
-        def carry(key: String): Option[(String, Json)] =
-          body.hcursor.get[String](key).toOption.filter(_.nonEmpty).map(v => key -> v.asJson)
+        // Target is `endpoint`, falling back to `path` -- this read only `path`,
+        // so one request body reached different endpoints on different runtimes.
+        c.get[String]("endpoint").toOption.orElse(c.get[String]("path").toOption).filter(_.nonEmpty) match {
+          case None =>
+            complete(StatusCodes.BadRequest -> Json.obj(
+              "success" -> false.asJson, "error" -> "localAI invocation requires endpoint or path".asJson))
+          case Some(raw) =>
+            val endpoint  = if (raw.startsWith("/")) raw else "/" + raw
+            val routePath = endpoint.takeWhile(_ != '?')
+            val method = c.get[String]("method").toOption.filter(_.nonEmpty)
+              .orElse(localAiAllowedOps.find(_.hcursor.get[String]("path").toOption.contains(routePath))
+                        .flatMap(_.hcursor.get[String]("method").toOption))
+              .getOrElse("POST").toUpperCase
+            val operationId = PerceptionRoutes.localAiOperationId(localAiAllowedOps, method, routePath)
+              .filter(_ => !endpoint.contains("..") && !endpoint.contains("//"))
 
-        def record(success: Boolean, response: Option[Json], error: Option[String]): Unit = {
-          val base = List(
-            "id"            -> invocationId.asJson,
-            "correlationId" -> correlationId.asJson,
-            "provider"      -> "localai".asJson,
-            "endpoint"      -> targetPath.asJson,
-            "method"        -> "POST".asJson,
-            "startedAt"     -> startedAt.asJson,
-            "completedAt"   -> System.currentTimeMillis().asJson,
-            "success"       -> success.asJson
-          )
-          val carried = List("machineName", "sequenceId", "requestClass", "resultClass").flatMap(carry)
-          val err     = error.map(e => "error" -> e.asJson).toList
-          // The response is summarised, never stored whole: a ledger holding
-          // every RAG passage becomes the largest object in the process and is
-          // read by nobody. What a trace needs is that evidence existed and
-          // where it came from.
-          val evidence = response.map { r =>
-            "evidence" -> Json.obj(
-              "uri"   -> PerceptionRoutes.localAiInvokeUri(localAiApiUrl, targetPath).toString.asJson,
-              "shape" -> (if (r.isObject) "object" else if (r.isArray) "array" else "scalar").asJson
-            )
-          }.toList
-          recordLocalAiInvocation(Json.obj((base ++ carried ++ err ++ evidence): _*))
-        }
+            def carry(key: String): Option[(String, Json)] =
+              c.get[String](key).toOption.filter(_.nonEmpty).map(v => key -> v.asJson)
 
-        if (!allowed.contains(targetPath)) {
-          // Recorded before the refusal is returned. An attempt on a forbidden
-          // endpoint is exactly the event a runtime trace must carry, and an
-          // unrecorded path loses it entirely.
-          record(success = false, response = None, error = Some("endpoint is not allowed"))
-          complete(StatusCodes.Forbidden ->
-            Json.obj("error" -> "Path not in allowed list".asJson, "path" -> targetPath.asJson,
-                     "correlationId" -> correlationId.asJson))
-        } else {
-          val payload = body.hcursor.downField("body").as[Json].getOrElse(body)
-          try {
-            val resp = basicRequest
-              .post(PerceptionRoutes.localAiInvokeUri(localAiApiUrl, targetPath))
-              .contentType("application/json")
-              .body(payload.noSpaces)
-              .response(asString)
-              .send(sttpBackend)
-            val parsed = resp.body.toOption.flatMap(b => io.circe.parser.parse(b).toOption).getOrElse(Json.Null)
-            if (resp.isSuccess) record(success = true, response = Some(parsed), error = None)
-            else record(success = false, response = None, error = Some(s"provider returned ${resp.code}"))
-            complete((if (resp.isSuccess) StatusCodes.OK else StatusCodes.BadGateway) -> parsed)
-          } catch { case e: Exception =>
-            // A call that failed is still a call that was made. A ledger of
-            // successes cannot answer "was this attempted".
-            record(success = false, response = None, error = Some(e.getMessage))
-            complete(StatusCodes.ServiceUnavailable -> Json.obj("error" -> e.getMessage.asJson,
-                                                                "correlationId" -> correlationId.asJson))
-          }
+            def record(success: Boolean, response: Option[Json], error: Option[String]): Unit = {
+              val base = List(
+                "id"            -> invocationId.asJson,
+                "correlationId" -> correlationId.asJson,
+                "provider"      -> "localai".asJson,
+                "endpoint"      -> endpoint.asJson,
+                "method"        -> method.asJson,
+                "startedAt"     -> startedAt.asJson,
+                "completedAt"   -> System.currentTimeMillis().asJson,
+                "success"       -> success.asJson
+              )
+              val op      = operationId.map(id => "operationId" -> id.asJson).toList
+              val carried = List("machineName", "sequenceId", "requestClass", "resultClass").flatMap(carry)
+              val err     = error.map(e => "error" -> e.asJson).toList
+              // The response is summarised, never stored whole: a ledger holding
+              // every RAG passage becomes the largest object in the process and is
+              // read by nobody. What a trace needs is that evidence existed and
+              // where it came from.
+              val evidence = response.map { r =>
+                "evidence" -> Json.obj(
+                  "uri"   -> PerceptionRoutes.localAiInvokeUri(localAiApiUrl, endpoint).toString.asJson,
+                  "shape" -> (if (r.isObject) "object" else if (r.isArray) "array" else "scalar").asJson
+                )
+              }.toList
+              recordLocalAiInvocation(Json.obj((base ++ op ++ carried ++ err ++ evidence): _*))
+            }
+            def reply(status: StatusCode, success: Boolean, extra: (String, Json)*) =
+              complete(status -> Json.obj((List(
+                "success" -> success.asJson, "endpoint" -> endpoint.asJson, "method" -> method.asJson,
+                "correlationId" -> correlationId.asJson, "invocationId" -> invocationId.asJson) ++ extra): _*))
+
+            if (operationId.isEmpty) {
+              // Recorded before the refusal is returned. An attempt on a forbidden
+              // endpoint is exactly the event a runtime trace must carry, and an
+              // unrecorded path loses it entirely.
+              record(success = false, response = None, error = Some("endpoint is not allowed"))
+              reply(StatusCodes.Forbidden, success = false, "error" -> "localAI endpoint is not allowed".asJson)
+            } else {
+              val payload = c.downField("payload").focus.orElse(c.downField("body").focus).getOrElse(Json.obj())
+              val uri     = PerceptionRoutes.localAiInvokeUri(localAiApiUrl, endpoint)
+              try {
+                val req  = if (method == "GET") basicRequest.get(uri)
+                           else basicRequest.post(uri).contentType("application/json").body(payload.noSpaces)
+                val resp = req.response(asString).send(sttpBackend)
+                val parsed = resp.body.toOption.flatMap(b => io.circe.parser.parse(b).toOption).getOrElse(Json.Null)
+                if (resp.isSuccess) {
+                  record(success = true, response = Some(parsed), error = None)
+                  reply(StatusCodes.OK, success = true, "response" -> parsed)
+                } else {
+                  val e = s"provider returned ${resp.code}"
+                  record(success = false, response = None, error = Some(e))
+                  reply(StatusCodes.BadGateway, success = false, "error" -> e.asJson)
+                }
+              } catch { case e: Exception =>
+                // A call that failed is still a call that was made. A ledger of
+                // successes cannot answer "was this attempted".
+                record(success = false, response = None, error = Some(e.getMessage))
+                reply(StatusCodes.BadGateway, success = false, "error" -> Option(e.getMessage).getOrElse("request failed").asJson)
+              }
+            }
         }
       } }
     },
@@ -2022,6 +2073,16 @@ object PerceptionRoutes {
     */
   def localAiInvokeUri(base: String, path: String): sttp.model.Uri =
     sttp.model.Uri.unsafeParse(base.stripSuffix("/") + path)
+
+  /** The configured operation's id for exactly (method, path): no prefixes and
+    * no "/" wildcard (SURFACE_SPEC.md, localAI invoke contract). None when the
+    * route is not allowed -- including when nothing is configured.
+    */
+  def localAiOperationId(ops: Vector[Json], method: String, path: String): Option[String] =
+    ops.find { op =>
+      op.hcursor.get[String]("method").toOption.exists(_.equalsIgnoreCase(method)) &&
+      op.hcursor.get[String]("path").toOption.contains(path)
+    }.flatMap(_.hcursor.get[String]("id").toOption)
 
   /** PATCH /api/dispatch/records/:id, as settled 3-of-3 (SURFACE_SPEC.md,
     * "Dispatch surface shapes"): status, error, clearError, attempts or
