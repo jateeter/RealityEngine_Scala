@@ -93,8 +93,11 @@ class PerceptionRoutes(
   // A-1: prevents push cycles from stacking when doPush takes longer than the interval
   private val pushInFlight = new AtomicBoolean(false)
 
-  // In-memory dispatch ledger (ring buffer, capped at dispatchLedgerLimit entries)
-  private val dispatchLedgerLimit = sys.env.get("TRIGGER_DISPATCH_LEDGER_LIMIT").flatMap(_.toIntOption).getOrElse(100)
+  // In-memory dispatch ledger (ring buffer, capped at dispatchLedgerLimit entries).
+  // A diagnostic window, not an audit trail (INTEGRATION_ROADMAP.md §6 Q2):
+  // default 256 in every runtime. It was 100 here and in LSP, 256 in C++, so one
+  // run left different ledger histories on different engines.
+  private val dispatchLedgerLimit = sys.env.get("TRIGGER_DISPATCH_LEDGER_LIMIT").flatMap(_.toIntOption).filter(_ > 0).getOrElse(256)
   private val dispatchLedger      = new AtomicReference[Vector[Json]](Vector.empty)
 
   // localAI/MCP invocation ledger (RealityEngine_Machines#152). Mirrors the
