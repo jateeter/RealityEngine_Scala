@@ -110,3 +110,35 @@ class TriggerDispatcherSpec extends AnyWordSpec with Matchers {
     }
   }
 }
+
+class TriggerDispatcherReplaySpec extends AnyWordSpec with Matchers {
+  private val original = parse(
+    """{"id":"d1","envelopeId":"e1","correlationId":"c1","status":"accepted","mode":"dry-run",
+      |"target":"a","machineId":"m","sequenceIds":["s"],"ragStatusCode":"RED","processStatus":"error",
+      |"attempts":3,"createdAt":1,"updatedAt":2,"providerReceipt":{"adapter":"acp"},"error":"x",
+      |"envelope":{"envelopeId":"e1","correlationId":"c1","emittedAtMs":1},
+      |"semantics":{"machineIri":null,"sequenceIri":null,"actionCode":null},"replayOf":null}""".stripMargin).toOption.get
+
+  "replayRecord" should {
+    "reset delivery state, mark the replay, and keep the causal chain by default" in {
+      val r = TriggerDispatcher.replayRecord(original, freshIds = false, now = 9L, newId = k => s"$k-new").hcursor
+      r.get[String]("id").toOption shouldBe Some("dispatch-new")
+      r.get[String]("mode").toOption shouldBe Some("replay")
+      r.get[String]("replayOf").toOption shouldBe Some("d1")
+      r.get[String]("status").toOption shouldBe Some("recorded")
+      r.get[Int]("attempts").toOption shouldBe Some(0)
+      r.downField("providerReceipt").focus shouldBe Some(Json.Null)
+      r.downField("error").focus shouldBe Some(Json.Null)
+      r.get[String]("envelopeId").toOption shouldBe Some("e1")
+      r.get[String]("correlationId").toOption shouldBe Some("c1")
+      r.get[String]("target").toOption shouldBe Some("a")
+      r.focus.get.asObject.get.keys.toSet shouldBe original.asObject.get.keys.toSet
+    }
+    "re-mint the ids, in the envelope too, with freshIds" in {
+      val r = TriggerDispatcher.replayRecord(original, freshIds = true, now = 9L, newId = k => s"$k-new").hcursor
+      r.get[String]("envelopeId").toOption shouldBe Some("trigger-envelope-new")
+      r.downField("envelope").get[String]("envelopeId").toOption shouldBe Some("trigger-envelope-new")
+      r.downField("envelope").get[String]("correlationId").toOption shouldBe Some("trigger-correlation-new")
+    }
+  }
+}

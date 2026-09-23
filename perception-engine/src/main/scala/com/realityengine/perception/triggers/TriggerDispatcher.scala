@@ -39,6 +39,10 @@ final class TriggerDispatcher(
   private val droppedNoDispatchN   = new AtomicLong(0)
   private val droppedCatalogColdN  = new AtomicLong(0)
   private val dispatchErrorsN      = new AtomicLong(0)
+  private val replaysCreatedN      = new AtomicLong(0)
+
+  /** Count a replay: it re-emits an envelope, so it is also an envelope created. */
+  def noteReplay(): Unit = { envelopesCreatedN.incrementAndGet(); replaysCreatedN.incrementAndGet() }
 
   /** Records created by this step, in merge order. Never throws: a failure on
     * one entry is counted as a dispatchError and the rest still run. */
@@ -164,6 +168,7 @@ final class TriggerDispatcher(
   def droppedNoDispatch: Long   = droppedNoDispatchN.get()
   def droppedCatalogCold: Long  = droppedCatalogColdN.get()
   def dispatchErrors: Long      = dispatchErrorsN.get()
+  def replaysCreated: Long      = replaysCreatedN.get()
 }
 
 object TriggerDispatcher {
@@ -171,6 +176,35 @@ object TriggerDispatcher {
                            actions: Vector[String], action: String, writeBack: Json)
 
   val EscalationActions: Set[String] = Set("emergency-dispatch", "urgent-intervention")
+
+  /** POST /api/dispatch/records/:id/replay, settled 3-of-3 (RealityEngine_CI
+    * SURFACE_SPEC.md, "Dispatch replay"; INTEGRATION_ROADMAP §6 Q6). A new record
+    * re-emitting the original's envelope: mode replay, replayOf set, delivery
+    * state reset, no provider called. With freshIds the envelope and correlation
+    * ids are re-minted, in the envelope too.
+    */
+  def replayRecord(original: Json, freshIds: Boolean, now: Long, newId: String => String): Json = {
+    val o = original.hcursor
+    val envelopeId    = if (freshIds) newId("trigger-envelope") else o.get[String]("envelopeId").getOrElse("")
+    val correlationId = if (freshIds) newId("trigger-correlation") else o.get[String]("correlationId").getOrElse("")
+    val envelope0     = o.downField("envelope").focus.getOrElse(Json.Null)
+    val envelope      = if (freshIds && envelope0.isObject)
+      envelope0.mapObject(_.add("envelopeId", envelopeId.asJson).add("correlationId", correlationId.asJson).add("emittedAtMs", now.asJson))
+    else envelope0
+    original.mapObject(_
+      .add("id", newId("dispatch").asJson)
+      .add("envelopeId", envelopeId.asJson)
+      .add("correlationId", correlationId.asJson)
+      .add("status", "recorded".asJson)
+      .add("mode", "replay".asJson)
+      .add("attempts", 0.asJson)
+      .add("createdAt", now.asJson)
+      .add("updatedAt", now.asJson)
+      .add("providerReceipt", Json.Null)
+      .add("error", Json.Null)
+      .add("replayOf", o.downField("id").focus.getOrElse(Json.Null))
+      .add("envelope", envelope))
+  }
 
   def defaultId(kind: String): String =
     s"$kind-${System.currentTimeMillis()}-${scala.util.Random.nextInt(1000000000)}"
