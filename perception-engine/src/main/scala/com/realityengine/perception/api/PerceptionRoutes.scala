@@ -30,6 +30,7 @@ import scala.util.{Failure, Success, Try}
 import java.util.concurrent.atomic.{AtomicBoolean, AtomicReference}
 import com.realityengine.perception.logging.{AuditConfig, AuditLogger}
 import com.realityengine.perception.triggers.TriggerDispatcher
+import com.realityengine.perception.healthkit.HealthKitScope
 
 class PerceptionRoutes(
   engine: PerceptionEngine,
@@ -316,6 +317,20 @@ class PerceptionRoutes(
     }, "machine-catalog-refresher")
     t.setDaemon(true)
     t.start()
+  }
+
+  private val hkScope = new HealthKitScope
+
+  private def hkIngestBridge(body: Json): String = body.hcursor.get[String]("bridgeId").getOrElse(hkBridgeId)
+
+  private def hkTokenOk(body: Json, authHeader: Option[String]): Boolean = {
+    val bearerToken = authHeader.collect {
+      case h if h.regionMatches(true, 0, "Bearer ", 0, 7) => h.drop(7).trim
+    }
+    hkBridgeToken.forall { expected =>
+      val bodyToken = body.hcursor.get[String]("bridgeToken").toOption.orElse(body.hcursor.get[String]("token").toOption)
+      bodyToken.contains(expected) || bearerToken.contains(expected)
+    }
   }
 
   private val triggerDispatcher = new TriggerDispatcher(
@@ -1538,8 +1553,46 @@ class PerceptionRoutes(
           "singleSample" -> Json.arr("type".asJson, "value".asJson, "sourceName".asJson),
           "batchSamples" -> Json.arr("bridgeId".asJson, "samples[]".asJson),
           "auth"         -> (if (hkBridgeToken.isDefined) "bridgeToken|bearer" else "none").asJson
-        )
+        ),
+        "scope"                 -> hkScope.json(hkBridgeId)
       )) }
+    },
+    // Scope and resync (localHealthkitBridge INGEST_CONTRACT.md), 3-of-3.
+    path("api" / "integrations" / "healthkit" / "scope") {
+      post { optionalHeaderValueByName("Authorization") { authHeader => entity(as[Json]) { body =>
+        if (!hkTokenOk(body, authHeader))
+          complete(StatusCodes.Unauthorized -> Json.obj("success" -> false.asJson, "error" -> "invalid HealthKit bridge token".asJson))
+        else {
+          val c        = body.hcursor
+          val bridgeId = c.get[String]("bridgeId").getOrElse(hkBridgeId)
+          val types    = c.get[Vector[String]]("types").getOrElse(Vector.empty)
+          hkScope.change(bridgeId, c.get[String]("action").getOrElse(""), types,
+                         c.get[String]("source").toOption, System.currentTimeMillis()) match {
+            case Left(err) => complete(StatusCodes.BadRequest -> Json.obj("error" -> err.asJson))
+            case Right((resp, removedSensors)) =>
+              // Removed means absent, not zero: the type's sources leave the PE.
+              removedSensors.foreach(sid => engine.findSensorBySensorId(sid).foreach(src => engine.removeSource(src.id)))
+              broadcast(Json.obj("type" -> "healthkit.scope.changed".asJson, "bridgeId" -> bridgeId.asJson,
+                "action" -> resp.hcursor.downField("action").focus.getOrElse(Json.Null), "types" -> types.asJson,
+                "generation" -> resp.hcursor.downField("generation").focus.getOrElse(Json.Null)))
+              broadcastState()
+              complete(resp)
+          }
+        }
+      } } }
+    },
+    path("api" / "integrations" / "healthkit" / "resync") {
+      post { optionalHeaderValueByName("Authorization") { authHeader => entity(as[Json]) { body =>
+        if (!hkTokenOk(body, authHeader))
+          complete(StatusCodes.Unauthorized -> Json.obj("success" -> false.asJson, "error" -> "invalid HealthKit bridge token".asJson))
+        else {
+          val c = body.hcursor
+          val (code, resp) = hkScope.resync(c.get[String]("bridgeId").getOrElse(hkBridgeId),
+            c.get[Vector[String]]("types").getOrElse(Vector.empty), c.get[String]("requestedBy").toOption,
+            System.currentTimeMillis(), TriggerDispatcher.defaultId)
+          complete(StatusCode.int2StatusCode(code) -> resp)
+        }
+      } } }
     },
     path("api" / "integrations" / "healthkit" / "ingest") {
       post {
@@ -1575,7 +1628,12 @@ class PerceptionRoutes(
               val valueOpt   = sample.hcursor.get[Double]("value").toOption
               val values     = valuesOpt.getOrElse(valueOpt.map(Vector(_)).getOrElse(Vector.empty))
 
-              if (tpe.isEmpty) {
+              val hkRefusal = hkScope.refusal(hkIngestBridge(body), tpe)
+              if (hkRefusal.isDefined) {
+                val u = Json.obj("unmapped" -> true.asJson, "type" -> tpe.asJson,
+                  "sourceName" -> sourceName.asJson, "reason" -> hkRefusal.get.asJson)
+                (res, unm :+ u)
+              } else if (tpe.isEmpty) {
                 val u = Json.obj("unmapped" -> true.asJson, "type" -> tpe.asJson,
                   "sourceName" -> sourceName.asJson, "reason" -> "sample.type is required".asJson)
                 (res, unm :+ u)
@@ -1628,6 +1686,7 @@ class PerceptionRoutes(
                       origin      = Some("healthkit"),
                     ))
                     engine.updateSensorValue(sensorId, values)
+                    hkScope.noteSensor(hkIngestBridge(body), tpe, sensorId)
                     val source = engine.findSensorBySensorId(sensorId)
                     val r = Json.obj(
                       "resolved"        -> true.asJson,
@@ -1645,17 +1704,20 @@ class PerceptionRoutes(
               }
             }
 
+            val resyncId = body.hcursor.get[String]("resyncId").toOption.filter(_.nonEmpty)
+            resyncId.foreach(id => hkScope.fulfil(hkIngestBridge(body), id, System.currentTimeMillis()))
             val allResolved = unmapped.isEmpty
             val status = if (allResolved) StatusCodes.OK
                          else if (resolved.isEmpty) StatusCodes.BadRequest
                          else StatusCodes.MultiStatus
             broadcastState()
-            complete(status -> Json.obj(
+            val out = Json.obj(
               "success"  -> allResolved.asJson,
               "bridgeId" -> hkBridgeId.asJson,
               "resolved" -> Json.arr(resolved: _*),
               "unmapped" -> Json.arr(unmapped: _*)
-            ))
+            )
+            complete(status -> resyncId.fold(out)(id => out.mapObject(_.add("resyncId", id.asJson))))
           }
         }
         }
