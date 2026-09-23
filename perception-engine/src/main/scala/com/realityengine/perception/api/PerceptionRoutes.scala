@@ -1668,7 +1668,7 @@ class PerceptionRoutes(
           // where it came from.
           val evidence = response.map { r =>
             "evidence" -> Json.obj(
-              "uri"   -> s"$localAiApiUrl$targetPath".asJson,
+              "uri"   -> PerceptionRoutes.localAiInvokeUri(localAiApiUrl, targetPath).toString.asJson,
               "shape" -> (if (r.isObject) "object" else if (r.isArray) "array" else "scalar").asJson
             )
           }.toList
@@ -1687,7 +1687,7 @@ class PerceptionRoutes(
           val payload = body.hcursor.downField("body").as[Json].getOrElse(body)
           try {
             val resp = basicRequest
-              .post(uri"$localAiApiUrl$targetPath")
+              .post(PerceptionRoutes.localAiInvokeUri(localAiApiUrl, targetPath))
               .contentType("application/json")
               .body(payload.noSpaces)
               .response(asString)
@@ -1975,4 +1975,17 @@ object PerceptionRoutes {
       case Some("acp")       => acp
       case _                 => true
     }
+
+  /** The URI a localAI invocation is sent to: the configured base URL with the
+    * allow-listed path appended.
+    *
+    * Built by parsing the joined string, never by `uri"$base$path"`. Two
+    * adjacent interpolations in sttp's `uri` interpolator do not concatenate:
+    * with a full base URL followed by a path, the result kept only the scheme
+    * and host, so every invocation went to `POST http://localhost` and failed
+    * for every endpoint in the allow-list (#126). Pure so the constructed URI
+    * can be asserted directly rather than inferred from a provider's response.
+    */
+  def localAiInvokeUri(base: String, path: String): sttp.model.Uri =
+    sttp.model.Uri.unsafeParse(base.stripSuffix("/") + path)
 }
