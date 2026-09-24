@@ -501,47 +501,32 @@ class PerceptionRoutes(
   private def resolveTemplate(template: String, tokens: Map[String, String]): String =
     tokens.foldLeft(template) { case (t, (k, v)) => t.replace(s"{$k}", v) }
 
-  private def ingestCompletion(body: Json): Json = {
-    val agentId = body.hcursor.get[String]("agent").toOption
-      .orElse(body.hcursor.get[String]("agentId").toOption)
-      .getOrElse(acpAgentId)
+  private def resolveCompletion(body: Json): Either[String, CompletionResolution.Target] =
+    CompletionResolution.resolve(body, sourceMappings.get)
 
-    // Resolve sensorId: explicit field wins, then sourceMappingId template, then fallback.
-    val smId = body.hcursor.get[String]("sourceMappingId").toOption.filter(_.nonEmpty)
-      .orElse(Some(acpCompletionSourceMappingId))
-    val mapping = smId.flatMap(sourceMappings.get)
+  private def ingestCompletion(body: Json): Json =
+    resolveCompletion(body).fold(err => Json.obj("error" -> err.asJson), ingestResolved(body, _))
 
-    val sensorId = body.hcursor.get[String]("sensorId").toOption.filter(_.nonEmpty).getOrElse {
-      mapping.flatMap(_.hcursor.get[String]("sensorIdTemplate").toOption)
-        .map(tpl => resolveTemplate(tpl, Map("agent" -> agentId)))
-        .getOrElse("completion_agent")
-    }
+  private def ingestResolved(body: Json, t: CompletionResolution.Target): Json = {
+    val CompletionResolution.Target(smId, provider, _, sensorId, name, region, values, ttl) = t
 
-    val values = body.hcursor.downField("values").as[Vector[Double]].getOrElse(Vector(1.0))
-
-    // Declare the sensor source against the mapping's perceptual-space region.
-    // Idempotent, and inactive: the completion arriving immediately below is
-    // what earns it activity. Templates that interpolate the agent name cannot
-    // be declared from configuration alone, so this is where those first
-    // appear — declared, then activated by their value, never conjured live.
-    mapping.foreach { m =>
-      for {
-        offset <- m.hcursor.downField("region").get[Int]("offset").toOption
-        length <- m.hcursor.downField("region").get[Int]("length").toOption
-      } {
-        val ttl = m.hcursor.get[Long]("ttlMs").getOrElse(300000L)
-        engine.declareSource(com.realityengine.perception.models.SensorSourceConfig(
-          id          = sensorId,
-          name        = m.hcursor.get[String]("name").getOrElse(s"acp:$sensorId"),
-          region      = com.realityengine.perception.models.Region(offset, length),
-          active      = false,
-          sensorId    = sensorId,
-          lastValue   = Vector.empty,
-          lastUpdated = None,
-          ttlMs       = ttl,
-          origin      = Some(body.hcursor.get[String]("provider").getOrElse("openclaw")),
-        ))
-      }
+    // Declare the sensor source at the resolved region. Idempotent, and
+    // inactive: the completion arriving immediately below is what earns it
+    // activity. Templates that interpolate the agent name cannot be declared
+    // from configuration alone, so this is where those first appear —
+    // declared, then activated by their value, never conjured live.
+    region.foreach { case (offset, length) =>
+      engine.declareSource(com.realityengine.perception.models.SensorSourceConfig(
+        id          = sensorId,
+        name        = name,
+        region      = com.realityengine.perception.models.Region(offset, length),
+        active      = false,
+        sensorId    = sensorId,
+        lastValue   = Vector.empty,
+        lastUpdated = None,
+        ttlMs       = ttl,
+        origin      = Some(provider),
+      ))
     }
 
     engine.updateSensorValue(sensorId, values)
@@ -1297,9 +1282,14 @@ class PerceptionRoutes(
     },
     path("api" / "integrations" / "completions") {
       post { entity(as[Json]) { body =>
-        val result = ingestCompletion(body)
-        onComplete(saveAndBroadcast()) { _ =>
-          complete(result)
+        resolveCompletion(body) match {
+          case Left(err) =>
+            complete(StatusCodes.NotFound -> Json.obj("error" -> err.asJson))
+          case Right(target) =>
+            val result = ingestResolved(body, target)
+            onComplete(saveAndBroadcast()) { _ =>
+              complete(result)
+            }
         }
       } }
     },
