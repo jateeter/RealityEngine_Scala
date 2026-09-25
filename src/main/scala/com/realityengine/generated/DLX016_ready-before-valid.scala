@@ -8,7 +8,7 @@ object MachineSpec {
   val machineSlug  = "DLX016_ready-before-valid"
   val inputOffset  = 4041
   val inputLength  = 4
-  val outputOffset = 4045
+  val outputOffset = 7424
   val outputLength = 2
 }
 

@@ -15,17 +15,19 @@ object MachineSpec {
 sealed trait StateId { def id: String }
 object StateId {
   case object MhComorbid extends StateId { val id = "mh-comorbid" }
+  case object MhComorbidityRiskState extends StateId { val id = "mh-comorbidity-risk-state" }
   case object MhDeteriorating extends StateId { val id = "mh-deteriorating" }
   case object MhDistressed extends StateId { val id = "mh-distressed" }
   case object MhStable extends StateId { val id = "mh-stable" }
   case object MhSupported extends StateId { val id = "mh-supported" }
-  val all: List[StateId] = List(StateId.MhComorbid, StateId.MhDeteriorating, StateId.MhDistressed, StateId.MhStable, StateId.MhSupported)
+  val all: List[StateId] = List(StateId.MhComorbid, StateId.MhComorbidityRiskState, StateId.MhDeteriorating, StateId.MhDistressed, StateId.MhStable, StateId.MhSupported)
 }
 
 sealed trait SequenceId { def id: String }
 object SequenceId {
   case object MhAccessCrisis extends SequenceId { val id = "mh-access-crisis" }
   case object MhReferralNeeded extends SequenceId { val id = "mh-referral-needed" }
+  case object MhComorbidityRisk extends SequenceId { val id = "mh-comorbidity-risk" }
   case object MhAccessAdequate extends SequenceId { val id = "mh-access-adequate" }
-  val all: List[SequenceId] = List(SequenceId.MhAccessCrisis, SequenceId.MhReferralNeeded, SequenceId.MhAccessAdequate)
+  val all: List[SequenceId] = List(SequenceId.MhAccessCrisis, SequenceId.MhReferralNeeded, SequenceId.MhComorbidityRisk, SequenceId.MhAccessAdequate)
 }

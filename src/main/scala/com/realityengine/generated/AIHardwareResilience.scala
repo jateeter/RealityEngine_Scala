@@ -8,7 +8,7 @@ object MachineSpec {
   val machineSlug  = "AIHardwareResilience"
   val inputOffset  = 276
   val inputLength  = 4
-  val outputOffset = 3923
+  val outputOffset = 7390
   val outputLength = 6
 }
 
@@ -16,11 +16,11 @@ sealed trait StateId { def id: String }
 object StateId {
   case object AihrCritical extends StateId { val id = "aihr-critical" }
   case object AihrDegraded extends StateId { val id = "aihr-degraded" }
-  case object AihrHealthy extends StateId { val id = "aihr-healthy" }
+  case object AihrInHealthy extends StateId { val id = "aihr-in-healthy" }
   case object AihrNetFault extends StateId { val id = "aihr-net-fault" }
   case object AihrNetNominal extends StateId { val id = "aihr-net-nominal" }
   case object AihrWarning extends StateId { val id = "aihr-warning" }
-  val all: List[StateId] = List(StateId.AihrCritical, StateId.AihrDegraded, StateId.AihrHealthy, StateId.AihrNetFault, StateId.AihrNetNominal, StateId.AihrWarning)
+  val all: List[StateId] = List(StateId.AihrCritical, StateId.AihrDegraded, StateId.AihrInHealthy, StateId.AihrNetFault, StateId.AihrNetNominal, StateId.AihrWarning)
 }
 
 sealed trait SequenceId { def id: String }

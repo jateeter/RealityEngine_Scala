@@ -8,7 +8,7 @@ object MachineSpec {
   val machineSlug  = "LBL094_projection-automation-and-outcomes-care-team-escalation-router"
   val inputOffset  = 3215
   val inputLength  = 4
-  val outputOffset = 3831
+  val outputOffset = 7354
   val outputLength = 4
 }
 

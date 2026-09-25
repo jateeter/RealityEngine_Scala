@@ -8,7 +8,7 @@ object MachineSpec {
   val machineSlug  = "DLX042_mutex-lock-unlock"
   val inputOffset  = 4071
   val inputLength  = 4
-  val outputOffset = 4075
+  val outputOffset = 7430
   val outputLength = 2
 }
 

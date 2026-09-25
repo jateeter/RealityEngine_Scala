@@ -8,7 +8,7 @@ object MachineSpec {
   val machineSlug  = "DLX013_req-ack-done"
   val inputOffset  = 4027
   val inputLength  = 4
-  val outputOffset = 4031
+  val outputOffset = 7422
   val outputLength = 2
 }
 

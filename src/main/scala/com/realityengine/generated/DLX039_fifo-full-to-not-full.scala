@@ -8,7 +8,7 @@ object MachineSpec {
   val machineSlug  = "DLX039_fifo-full-to-not-full"
   val inputOffset  = 4057
   val inputLength  = 4
-  val outputOffset = 4061
+  val outputOffset = 7428
   val outputLength = 2
 }
 

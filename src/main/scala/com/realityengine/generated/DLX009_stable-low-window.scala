@@ -8,7 +8,7 @@ object MachineSpec {
   val machineSlug  = "DLX009_stable-low-window"
   val inputOffset  = 1579
   val inputLength  = 4
-  val outputOffset = 4009
+  val outputOffset = 7418
   val outputLength = 2
 }
 

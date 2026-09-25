@@ -8,7 +8,7 @@ object MachineSpec {
   val machineSlug  = "DLX017_start-busy-done"
   val inputOffset  = 1589
   val inputLength  = 4
-  val outputOffset = 4047
+  val outputOffset = 7426
   val outputLength = 2
 }
 

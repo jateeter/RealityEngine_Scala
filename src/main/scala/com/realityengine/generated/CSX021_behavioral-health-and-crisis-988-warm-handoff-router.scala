@@ -8,7 +8,7 @@ object MachineSpec {
   val machineSlug  = "CSX021_behavioral-health-and-crisis-988-warm-handoff-router"
   val inputOffset  = 1080
   val inputLength  = 4
-  val outputOffset = 3831
+  val outputOffset = 7300
   val outputLength = 4
 }
 

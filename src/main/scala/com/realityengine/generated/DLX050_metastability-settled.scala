@@ -8,7 +8,7 @@ object MachineSpec {
   val machineSlug  = "DLX050_metastability-settled"
   val inputOffset  = 4103
   val inputLength  = 4
-  val outputOffset = 4107
+  val outputOffset = 7438
   val outputLength = 2
 }
 

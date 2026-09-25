@@ -8,7 +8,7 @@ object MachineSpec {
   val machineSlug  = "AIWellnessCoach"
   val inputOffset  = 3931
   val inputLength  = 8
-  val outputOffset = 3941
+  val outputOffset = 7396
   val outputLength = 8
 }
 

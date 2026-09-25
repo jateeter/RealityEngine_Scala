@@ -8,7 +8,7 @@ object MachineSpec {
   val machineSlug  = "DLX001_rising-edge-detector"
   val inputOffset  = 1569
   val inputLength  = 4
-  val outputOffset = 3971
+  val outputOffset = 7410
   val outputLength = 2
 }
 

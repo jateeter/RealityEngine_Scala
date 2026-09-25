@@ -8,7 +8,7 @@ object MachineSpec {
   val machineSlug  = "CSX032_law-enforcement-and-public-safety-community-policing-beat-monitor"
   val inputOffset  = 1124
   val inputLength  = 4
-  val outputOffset = 3867
+  val outputOffset = 7308
   val outputLength = 4
 }
 

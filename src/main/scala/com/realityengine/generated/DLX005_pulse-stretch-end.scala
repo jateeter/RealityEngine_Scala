@@ -8,7 +8,7 @@ object MachineSpec {
   val machineSlug  = "DLX005_pulse-stretch-end"
   val inputOffset  = 3989
   val inputLength  = 4
-  val outputOffset = 3993
+  val outputOffset = 7414
   val outputLength = 2
 }
 

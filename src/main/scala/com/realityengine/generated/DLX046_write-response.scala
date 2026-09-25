@@ -8,7 +8,7 @@ object MachineSpec {
   val machineSlug  = "DLX046_write-response"
   val inputOffset  = 4087
   val inputLength  = 4
-  val outputOffset = 4091
+  val outputOffset = 7434
   val outputLength = 2
 }
 
