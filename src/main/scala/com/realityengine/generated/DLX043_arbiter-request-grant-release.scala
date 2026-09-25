@@ -8,7 +8,7 @@ object MachineSpec {
   val machineSlug  = "DLX043_arbiter-request-grant-release"
   val inputOffset  = 1715
   val inputLength  = 4
-  val outputOffset = 4077
+  val outputOffset = 7432
   val outputLength = 2
 }
 

@@ -8,7 +8,7 @@ object MachineSpec {
   val machineSlug  = "LBL098_projection-automation-and-outcomes-medication-lifestyle-e2e"
   val inputOffset  = 3231
   val inputLength  = 4
-  val outputOffset = 3939
+  val outputOffset = 7358
   val outputLength = 4
 }
 

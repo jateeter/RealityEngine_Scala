@@ -8,7 +8,7 @@ object MachineSpec {
   val machineSlug  = "CSX089_community-executive-optimization-public-trust-feedback-loop"
   val inputOffset  = 1336
   val inputLength  = 4
-  val outputOffset = 3895
+  val outputOffset = 7340
   val outputLength = 4
 }
 

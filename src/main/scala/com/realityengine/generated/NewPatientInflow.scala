@@ -8,7 +8,7 @@ object MachineSpec {
   val machineSlug  = "NewPatientInflow"
   val inputOffset  = 3907
   val inputLength  = 8
-  val outputOffset = 3915
+  val outputOffset = 7370
   val outputLength = 8
 }
 

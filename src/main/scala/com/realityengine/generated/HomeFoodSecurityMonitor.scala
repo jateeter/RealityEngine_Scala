@@ -16,17 +16,19 @@ sealed trait StateId { def id: String }
 object StateId {
   case object HfAdequate extends StateId { val id = "hf-adequate" }
   case object HfCrisis extends StateId { val id = "hf-crisis" }
+  case object HfFoodInsecureState extends StateId { val id = "hf-food-insecure-state" }
   case object HfInsecure extends StateId { val id = "hf-insecure" }
   case object HfSecure extends StateId { val id = "hf-secure" }
   case object HfStrained extends StateId { val id = "hf-strained" }
   case object HfStruggling extends StateId { val id = "hf-struggling" }
-  val all: List[StateId] = List(StateId.HfAdequate, StateId.HfCrisis, StateId.HfInsecure, StateId.HfSecure, StateId.HfStrained, StateId.HfStruggling)
+  val all: List[StateId] = List(StateId.HfAdequate, StateId.HfCrisis, StateId.HfFoodInsecureState, StateId.HfInsecure, StateId.HfSecure, StateId.HfStrained, StateId.HfStruggling)
 }
 
 sealed trait SequenceId { def id: String }
 object SequenceId {
   case object HomeFoodCrisisEscalation extends SequenceId { val id = "home-food-crisis-escalation" }
   case object HomeFoodAssistanceNeeded extends SequenceId { val id = "home-food-assistance-needed" }
+  case object HomeFoodInsecure extends SequenceId { val id = "home-food-insecure" }
   case object HomeFoodSecure extends SequenceId { val id = "home-food-secure" }
-  val all: List[SequenceId] = List(SequenceId.HomeFoodCrisisEscalation, SequenceId.HomeFoodAssistanceNeeded, SequenceId.HomeFoodSecure)
+  val all: List[SequenceId] = List(SequenceId.HomeFoodCrisisEscalation, SequenceId.HomeFoodAssistanceNeeded, SequenceId.HomeFoodInsecure, SequenceId.HomeFoodSecure)
 }

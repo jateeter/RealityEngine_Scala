@@ -8,7 +8,7 @@ object MachineSpec {
   val machineSlug  = "LBL093_projection-automation-and-outcomes-plan-adjustment-dispatcher"
   val inputOffset  = 3211
   val inputLength  = 4
-  val outputOffset = 3931
+  val outputOffset = 7350
   val outputLength = 4
 }
 

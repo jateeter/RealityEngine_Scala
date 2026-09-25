@@ -8,7 +8,7 @@ object MachineSpec {
   val machineSlug  = "CSX088_community-executive-optimization-community-operations-digital-twin"
   val inputOffset  = 1332
   val inputLength  = 4
-  val outputOffset = 3847
+  val outputOffset = 7336
   val outputLength = 4
 }
 

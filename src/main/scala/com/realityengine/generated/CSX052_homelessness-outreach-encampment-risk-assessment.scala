@@ -8,7 +8,7 @@ object MachineSpec {
   val machineSlug  = "CSX052_homelessness-outreach-encampment-risk-assessment"
   val inputOffset  = 1200
   val inputLength  = 4
-  val outputOffset = 3855
+  val outputOffset = 7316
   val outputLength = 4
 }
 

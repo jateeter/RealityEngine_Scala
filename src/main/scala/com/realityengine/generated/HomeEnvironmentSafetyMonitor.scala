@@ -16,18 +16,20 @@ sealed trait StateId { def id: String }
 object StateId {
   case object HenvDeteriorating extends StateId { val id = "henv-deteriorating" }
   case object HenvHazardous extends StateId { val id = "henv-hazardous" }
+  case object HenvHealthHazardRisk extends StateId { val id = "henv-health-hazard-risk" }
   case object HenvPastDue extends StateId { val id = "henv-past-due" }
   case object HenvSafe extends StateId { val id = "henv-safe" }
   case object HenvShutoffRisk extends StateId { val id = "henv-shutoff-risk" }
   case object HenvSound extends StateId { val id = "henv-sound" }
   case object HenvUtilityCurrent extends StateId { val id = "henv-utility-current" }
-  val all: List[StateId] = List(StateId.HenvDeteriorating, StateId.HenvHazardous, StateId.HenvPastDue, StateId.HenvSafe, StateId.HenvShutoffRisk, StateId.HenvSound, StateId.HenvUtilityCurrent)
+  val all: List[StateId] = List(StateId.HenvDeteriorating, StateId.HenvHazardous, StateId.HenvHealthHazardRisk, StateId.HenvPastDue, StateId.HenvSafe, StateId.HenvShutoffRisk, StateId.HenvSound, StateId.HenvUtilityCurrent)
 }
 
 sealed trait SequenceId { def id: String }
 object SequenceId {
   case object HomeEnvHazardEscalation extends SequenceId { val id = "home-env-hazard-escalation" }
   case object HomeEnvUtilityFailure extends SequenceId { val id = "home-env-utility-failure" }
+  case object HomeEnvHealthHazardRisk extends SequenceId { val id = "home-env-health-hazard-risk" }
   case object HomeEnvSafe extends SequenceId { val id = "home-env-safe" }
-  val all: List[SequenceId] = List(SequenceId.HomeEnvHazardEscalation, SequenceId.HomeEnvUtilityFailure, SequenceId.HomeEnvSafe)
+  val all: List[SequenceId] = List(SequenceId.HomeEnvHazardEscalation, SequenceId.HomeEnvUtilityFailure, SequenceId.HomeEnvHealthHazardRisk, SequenceId.HomeEnvSafe)
 }
