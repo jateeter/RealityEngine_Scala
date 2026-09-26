@@ -1151,7 +1151,6 @@ import com.realityengine.generated.pediatricnutritionmonitor.{MachineSpec => Ped
 import com.realityengine.generated.qualificationverificationmonitor.{MachineSpec => QualificationVerificationMonitorSpec}
 import com.realityengine.generated.rs2.{MachineSpec => RS2Spec}
 import com.realityengine.generated.rsflipflop.{MachineSpec => RSFlipFlopSpec}
-import com.realityengine.generated.rsflipflopdeprecateddemo.{MachineSpec => RSFlipFlopDeprecatedDemoSpec}
 import com.realityengine.generated.rsflipfloptrigger.{MachineSpec => RSFlipFlopTriggerSpec}
 import com.realityengine.generated.rsringlatchstagea.{MachineSpec => RSRingLatchStageASpec}
 import com.realityengine.generated.rsringlatchstageb.{MachineSpec => RSRingLatchStageBSpec}
@@ -2482,7 +2481,6 @@ object Machines {
     "QualificationVerificationMonitor" -> QualificationVerificationMonitorSpec,
     "RS2" -> RS2Spec,
     "RSFlipFlop" -> RSFlipFlopSpec,
-    "RSFlipFlopDeprecatedDemo" -> RSFlipFlopDeprecatedDemoSpec,
     "RSFlipFlopTrigger" -> RSFlipFlopTriggerSpec,
     "RSRingLatchStageA" -> RSRingLatchStageASpec,
     "RSRingLatchStageB" -> RSRingLatchStageBSpec,
