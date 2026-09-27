@@ -1286,9 +1286,15 @@ class PerceptionRoutes(
           case Left(err) =>
             complete(StatusCodes.NotFound -> Json.obj("error" -> err.asJson))
           case Right(target) =>
-            val result = ingestResolved(body, target)
+            // The record ingestResolved returns is what the Ollama and OpenAI
+            // dispatch routes embed; this route answers with the completion
+            // envelope C++ and LSP return (RealityEngine_Scala#162).
+            ingestResolved(body, target)
+            val source = engine.getSource(target.sensorId)
+              .map(s => engine.reported(s).asJson).getOrElse(Json.Null)
+            val reply = CompletionResolution.envelope(body, target, source, System.currentTimeMillis())
             onComplete(saveAndBroadcast()) { _ =>
-              complete(result)
+              complete(reply)
             }
         }
       } }

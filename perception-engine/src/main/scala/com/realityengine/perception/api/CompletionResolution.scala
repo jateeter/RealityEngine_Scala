@@ -67,4 +67,44 @@ object CompletionResolution {
 
   private def template(tpl: String, tokens: Map[String, String]): String =
     tokens.foldLeft(tpl) { case (t, (k, v)) => t.replace(s"{$k}", v) }
+
+  /** The `POST /api/integrations/completions` reply, as C++ `ingest_completion`
+    * and LSP `ingest-completion` build it (RealityEngine_Scala#162).
+    *
+    * This runtime replied with the stored record, whose top-level keys are
+    * `id, type, timestamp, sensorId, sourceMappingId, body`. The caller's
+    * `correlationId`, `envelopeId` and `completionId` were buried in `body`
+    * rather than echoed, so the OpenClaw adapter — and the shared e2e
+    * (`test-openclaw-integration.sh`), which asserts
+    * `completion.{correlationId, envelopeId, completionId}` — could not
+    * confirm which dispatch the completion answered. That was the only failure
+    * of regression run 20260924T215111Z (`openclaw-integration-scala-1`).
+    *
+    * Absent correlation fields are `null`, as LSP renders them; `completionId`
+    * falls back to `id`. `signal` has the shape LSP gives it: the committed
+    * source as `/api/sources` reports it, no push, and the commit time.
+    */
+  def envelope(body: Json, t: Target, source: Json, receivedAt: Long): Json = {
+    val c = body.hcursor
+    def str(k: String): Option[String] = c.get[String](k).toOption
+    Json.obj(
+      "success"    -> Json.True,
+      "completion" -> Json.obj(
+        "provider"        -> Json.fromString(t.provider),
+        "agent"           -> Json.fromString(t.agent),
+        "sensorId"        -> Json.fromString(t.sensorId),
+        "sourceMappingId" -> Json.fromString(t.smId.getOrElse("")),
+        "correlationId"   -> str("correlationId").fold(Json.Null)(Json.fromString),
+        "envelopeId"      -> str("envelopeId").fold(Json.Null)(Json.fromString),
+        "completionId"    -> str("completionId").orElse(str("id")).fold(Json.Null)(Json.fromString),
+        "receivedAt"      -> Json.fromLong(receivedAt),
+      ),
+      "signal" -> Json.obj(
+        "success"   -> Json.True,
+        "source"    -> source,
+        "push"      -> Json.Null,
+        "timestamp" -> Json.fromLong(receivedAt),
+      ),
+    )
+  }
 }
