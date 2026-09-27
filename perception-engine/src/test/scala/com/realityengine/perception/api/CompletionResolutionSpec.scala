@@ -66,4 +66,52 @@ class CompletionResolutionSpec extends AnyWordSpec with Matchers {
       CompletionResolution.sourceIdPart("") shouldBe "unnamed"
     }
   }
+
+  // RealityEngine_Scala#162: the reply is the completion envelope C++ and LSP
+  // return, not the stored record.
+  "CompletionResolution.envelope" should {
+    val request = body("""{"provider":"openclaw","agent":"hello-world",
+      "sourceMappingId":"acp-openclaw-completion","values":[1,0,0.95,0],
+      "correlationId":"trigger-correlation-1","envelopeId":"trigger-envelope-1",
+      "completionId":"openclaw-e2e-completion-1"}""")
+    val target = CompletionResolution.resolve(request, mappings).toOption.get
+    val source = Json.obj("id" -> Json.fromString(target.sensorId))
+    val reply  = CompletionResolution.envelope(request, target, source, 1790287326296L)
+    val c      = reply.hcursor
+
+    "echo the caller's correlation fields under completion" in {
+      // Exactly what test-openclaw-integration.sh asserts.
+      c.downField("completion").get[String]("correlationId") shouldBe Right("trigger-correlation-1")
+      c.downField("completion").get[String]("envelopeId")    shouldBe Right("trigger-envelope-1")
+      c.downField("completion").get[String]("completionId")  shouldBe Right("openclaw-e2e-completion-1")
+    }
+
+    "carry the C++/LSP key sets at every level" in {
+      reply.asObject.get.keys.toSet shouldBe Set("success", "completion", "signal")
+      c.downField("completion").focus.get.asObject.get.keys.toSet shouldBe
+        Set("provider", "agent", "sensorId", "sourceMappingId",
+            "correlationId", "envelopeId", "completionId", "receivedAt")
+      c.downField("signal").focus.get.asObject.get.keys.toSet shouldBe
+        Set("success", "source", "push", "timestamp")
+    }
+
+    "describe the resolved target, not the raw body" in {
+      c.get[Boolean]("success") shouldBe Right(true)
+      c.downField("completion").get[String]("sensorId")        shouldBe Right("acp.openclaw.hello-world.completion")
+      c.downField("completion").get[String]("sourceMappingId") shouldBe Right("acp-openclaw-completion")
+      c.downField("completion").get[Long]("receivedAt")        shouldBe Right(1790287326296L)
+      c.downField("signal").downField("source").focus          shouldBe Some(source)
+      c.downField("signal").downField("push").focus            shouldBe Some(Json.Null)
+    }
+
+    "render absent correlation fields as null, and fall back from completionId to id" in {
+      val bare  = body("""{"agent":"Planner","id":"compl-7"}""")
+      val t     = CompletionResolution.resolve(bare, mappings).toOption.get
+      val comp  = CompletionResolution.envelope(bare, t, Json.Null, 1L).hcursor.downField("completion")
+      comp.downField("correlationId").focus shouldBe Some(Json.Null)
+      comp.downField("envelopeId").focus    shouldBe Some(Json.Null)
+      comp.get[String]("completionId")      shouldBe Right("compl-7")
+      comp.get[String]("sourceMappingId")   shouldBe Right("")
+    }
+  }
 }
