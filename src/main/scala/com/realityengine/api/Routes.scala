@@ -1699,7 +1699,8 @@ class Routes(
         pathPrefix("perceptual-simulation") {
           concat(
             path("configure" / "chunk") { post { entity(as[Json]) { body =>
-              val chunk = body.hcursor.downField("vectors").as[Vector[Vector[Double]]].getOrElse(Vector.empty)
+              // The input sequence's Reality Events, under `events` (RealityEngine_CI#489).
+              val chunk = body.hcursor.downField("events").as[Vector[Vector[Double]]].getOrElse(Vector.empty)
               if (body.hcursor.downField("reset").as[Boolean].getOrElse(false)) sequenceBuffer.set(Vector.empty)
               val newLen = sequenceBuffer.updateAndGet(_ ++ chunk).length
               // Accept config from nested "config" field OR top-level fields (backwards compat)
@@ -1714,7 +1715,7 @@ class Routes(
                 val maxS  = src.get[Int]("maxSteps").toOption
                 sequenceBufferConfig.set(Some((RegionMapping(iOff, iLen), delay, maxS)))
               }
-              complete(Json.obj("success" -> Json.fromBoolean(true), "bufferedVectors" -> Json.fromInt(newLen)))
+              complete(Json.obj("success" -> Json.fromBoolean(true), "bufferedEvents" -> Json.fromInt(newLen)))
             } } },
             path("configure" / "commit") { post {
               sequenceBufferConfig.get() match {
