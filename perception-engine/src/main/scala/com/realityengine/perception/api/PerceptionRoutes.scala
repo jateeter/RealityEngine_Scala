@@ -132,7 +132,7 @@ class PerceptionRoutes(
 
   // MQTT bridge — boots from env vars at construction; also startable via POST /api/mqtt/enable.
   // mqttBrokerUrlRef is kept separately for the status endpoint display.
-  import com.realityengine.perception.mqtt.{MqttBridge, MqttMappingRule}
+  import com.realityengine.perception.mqtt.{MqttBridge, MqttMappingRule, MqttSources}
   private val mqttBridgeRef    = new AtomicReference[Option[MqttBridge]](None)
   private val mqttBrokerUrlRef = new AtomicReference[Option[String]](None)
 
@@ -174,46 +174,25 @@ class PerceptionRoutes(
     (created, skipped)
   }
 
-  private def mqttSource(sensorId: String, offset: Int, length: Int, ttlMs: Long): SensorSourceConfig =
-    SensorSourceConfig(
-      id          = sensorId,
-      name        = s"mqtt:$sensorId",
-      region      = com.realityengine.perception.models.Region(offset, length),
-      active      = false,
-      sensorId    = sensorId,
-      lastValue   = Vector.empty,
-      lastUpdated = None,
-      ttlMs       = ttlMs,
-      origin      = Some("mqtt"),
-    )
-
-  /** Enabling the bridge is the MQTT integration registering, so it declares
-    * its whole source set there and then — one inactive sensor source per
-    * mapping rule — rather than materialising each one when its first message
-    * lands (RealityEngine_CI#163 points 1 and 2a).
-    *
-    * A rule whose `sensorIdTemplate` interpolates topic captures (`{1}`, `{2}`)
-    * names a source per matching topic, so its id is not knowable until a
-    * message arrives; those still declare on first signal, via the same
-    * idempotent `declareSource` call in `mqttIngest`.
+  /** Declares the MQTT integration's sources at registration — see
+    * [[MqttSources.declarable]] for which rules qualify. The rest declare on
+    * first signal, via the same idempotent `declareSource` call in `mqttIngest`.
     *
     * Returns how many rules were declarable up front.
     */
   private def declareMqttSources(rules: Vector[MqttMappingRule]): Int = {
-    val declarable = rules.filterNot(_.sensorIdTemplate.contains("{"))
-    declarable.foreach { r =>
-      engine.declareSource(mqttSource(r.sensorIdTemplate, r.regionOffset, r.regionLength, r.ttlMs))
-    }
+    val declarable = MqttSources.declarable(rules)
+    declarable.foreach(engine.declareSource)
     declarable.length
   }
 
   private def mqttIngest(sensorId: String, offset: Int, length: Int,
                           values: Vector[Double], ttlMs: Long,
                           topic: String, mappingId: String): Unit = {
-    // Idempotent: declared at registration for every rule with a static
-    // sensorIdTemplate, and here for the topic-interpolated ones. Either way
-    // the record exists inactive before updateSensorValue earns it activity.
-    engine.declareSource(mqttSource(sensorId, offset, length, ttlMs))
+    // Idempotent: declared at registration for every rule that fixes its own
+    // id and topic, and here for the rest. Either way the record exists
+    // inactive before updateSensorValue earns it activity.
+    engine.declareSource(MqttSources.source(sensorId, topic, offset, length, ttlMs))
     engine.updateSensorValue(sensorId, values)
     broadcast(Json.obj(
       "type"      -> "mqtt-ingest".asJson,
