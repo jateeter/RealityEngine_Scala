@@ -208,7 +208,10 @@ class PerceptualSpaceRuntime(dimension: Int = sys.env.getOrElse("VECTOR_DIMENSIO
   // ── Step execution ────────────────────────────────────────────────────────
 
   def step(): Option[SimulationStep] = {
-    val cfg = config.getOrElse(throw new IllegalStateException("Simulation not configured. Call configure() first."))
+    // IllegalArgumentException is the route's 400: an unconfigured step is a
+    // caller precondition, not a server fault (RealityEngine_CI#489). It was
+    // IllegalStateException, which the handler answers 500.
+    val cfg = config.getOrElse(throw new IllegalArgumentException("Simulation not configured. Call configure() first."))
     if (currentStep >= cfg.inputSequence.length)     { stop(); return None }
     if (cfg.maxSteps.exists(currentStep >= _))        { stop(); return None }
 
@@ -218,7 +221,9 @@ class PerceptualSpaceRuntime(dimension: Int = sys.env.getOrElse("VECTOR_DIMENSIO
     val result = runPhases(currentStep)
     currentStep += 1
     history = result :: history
-    if (isRunning && currentStep >= cfg.inputSequence.length) stop()
+    // A live run ends on the step that finishes the walk -- the end of the
+    // sequence or maxSteps (RealityEngine_CI#489; maxSteps was not checked here).
+    if (isRunning && (currentStep >= cfg.inputSequence.length || cfg.maxSteps.exists(currentStep >= _))) stop()
     Some(result)
   }
 

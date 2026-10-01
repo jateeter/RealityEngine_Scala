@@ -357,7 +357,12 @@ class Routes(
   private def startAutoPlay(delayMs: Long): Unit = {
     cancelAutoPlay()
     val task = system.scheduler.scheduleWithFixedDelay(0.milliseconds, delayMs.milliseconds) { () =>
-      spaceRuntime.step() match {
+      // Step only while the run is live. A reset or a recommit stops the run
+      // without cancelling this task, and step() does not check isRunning, so
+      // the task used to keep walking the sequence after a reset
+      // (RealityEngine_CI#489).
+      if (!spaceRuntime.getIsRunning) cancelAutoPlay()
+      else spaceRuntime.step() match {
         case None       => cancelAutoPlay()
         case Some(step) => sseQueue.offer(step); ()
       }
