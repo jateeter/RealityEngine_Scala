@@ -6,9 +6,9 @@ object MachineSpec {
   val machineId    = "machine-dailyactivitywellnessinterconnect"
   val machineName  = "Daily Activity Wellness Interconnect"
   val machineSlug  = "DailyActivityWellnessInterconnect"
-  val inputOffset  = 4310
+  val inputOffset  = 4960
   val inputLength  = 10
-  val outputOffset = 4320
+  val outputOffset = 4970
   val outputLength = 4
 }
 
