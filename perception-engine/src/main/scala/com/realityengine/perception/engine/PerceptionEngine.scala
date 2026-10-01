@@ -256,19 +256,28 @@ class PerceptionEngine(initialDimension: Int = sys.env.getOrElse("VECTOR_DIMENSI
     * activity come with it — validated, so a value outside its TTL restores as
     * inactive. That is what lets an interrupted dispatch resume against a
     * source known to have been live, without letting a stale one claim it.
+    *
+    * Only a sensor's activity is inherited. A test or simulated source's
+    * activity is its rule's, already evaluated by the registration that is
+    * declaring it (RealityEngine_CI#358), and nothing the store kept can add to
+    * or subtract from that. Applying the cached flag to them overwrote the rule
+    * with `false` — `cachedValueSupportsActivity` has no evidence for any
+    * non-sensor — so every corpus test source this runtime had ever persisted
+    * booted inactive while C++ and LSP armed it: 0 of 21 against 21 and 21 on a
+    * restarted regression universe.
     */
   private def inheritCached(declared: SourceConfig): SourceConfig =
     cachedFromStore.get(declared.id) match {
       case None => declared
       case Some(cached) =>
         cachedFromStore = cachedFromStore - declared.id
-        val withValue = (declared, cached) match {
+        (declared, cached) match {
           case (d: SensorSourceConfig, c: SensorSourceConfig) =>
-            d.copy(lastValue = c.lastValue, lastUpdated = c.lastUpdated)
+            val withValue = d.copy(lastValue = c.lastValue, lastUpdated = c.lastUpdated)
+            withValue.withActive(
+              cached.active && cachedValueSupportsActivity(withValue, System.currentTimeMillis()))
           case _ => declared
         }
-        withValue.withActive(
-          cached.active && cachedValueSupportsActivity(withValue, System.currentTimeMillis()))
     }
 
   /** Sources the store cached that nothing has registered this run.
