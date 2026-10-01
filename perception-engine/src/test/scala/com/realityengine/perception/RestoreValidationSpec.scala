@@ -109,6 +109,34 @@ class RestoreValidationSpec extends AnyFlatSpec with Matchers {
     engine.assembleVector().forall(_ == 0.0) shouldBe true
   }
 
+  it should "let the registration rule, not the cached flag, decide a re-added test source" in {
+    // RealityEngine_CI#358. Boot seeding re-adds every corpus test source
+    // through addSource, which evaluates the test rule — armed iff its interned
+    // sequence is non-empty. The cached flag used to be applied over that, and
+    // with no cached value to support it every persisted test source came back
+    // inactive: scala-1 armed 0 of 21 on a restart where C++ and LSP armed 21.
+    val engine = new PerceptionEngine(256)
+    engine.restoreSource(persistedTest("was-armed",  active = true))
+    engine.restoreSource(persistedTest("was-paused", active = false))
+    engine.addSource(persistedTest("was-armed",  active = false))
+    engine.addSource(persistedTest("was-paused", active = false))
+    engine.getSource("was-armed").map(_.active)  shouldBe Some(true)
+    engine.getSource("was-paused").map(_.active) shouldBe Some(true)
+    engine.unclaimedCachedCount shouldBe 0
+  }
+
+  it should "still validate a re-added sensor's cached activity against its TTL" in {
+    // The sensor half is unchanged: its activity is earned by ingress, and the
+    // cached value is the only evidence that ingress happened.
+    val engine = new PerceptionEngine(256)
+    engine.restoreSource(persistedSensor("stale", active = true, ageMs = 60000L, ttlMs = 1000L))
+    engine.restoreSource(persistedSensor("live",  active = true, ageMs = 0L,     ttlMs = 600000L))
+    engine.addSource(persistedSensor("stale", active = false, ageMs = 0L, ttlMs = 1000L))
+    engine.addSource(persistedSensor("live",  active = false, ageMs = 0L, ttlMs = 600000L))
+    engine.getSource("stale").map(_.active) shouldBe Some(false)
+    engine.getSource("live").map(_.active)  shouldBe Some(true)
+  }
+
   it should "leave re-arming a restored test source to whoever is entitled to" in {
     // Nobody is entitled to re-arm a source no integration registered this run.
     // Reset returns the engine to the clean step 0 condition, so a restored
