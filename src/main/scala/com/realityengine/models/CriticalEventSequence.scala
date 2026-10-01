@@ -194,8 +194,14 @@ class CriticalEventSequence(
 
   // ── Reset ─────────────────────────────────────────────────────────────────
 
+  /** Every event back to its loaded state, `wasJustMatched` included
+    * (RealityEngine_CI SURFACE_SPEC.md, "Already-settled instances", #464).
+    * Keeping it left a reset engine reporting a match from a step its own
+    * histories no longer held, so the same machine exported differently here
+    * than on LSP immediately after a reset. */
   def reset(): Unit = vectors.values.foreach { v =>
     if (v.isInitial) v.setActive() else v.clearActive()
+    v.clearWasJustMatched()
   }
 
   // ── Stats ─────────────────────────────────────────────────────────────────

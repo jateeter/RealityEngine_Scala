@@ -107,6 +107,31 @@ class RealityEngineSpec extends AnyFlatSpec with Matchers {
     r2.matchedVectors should contain(successor.id)
   }
 
+  it should "return every event to its loaded state on reset, wasJustMatched included" in {
+    // RealityEngine_CI SURFACE_SPEC.md, "Already-settled instances" (#464). This
+    // runtime and C++ kept the last match across a reset while LSP cleared it,
+    // so 20 of 21 machines exported differently immediately after a reset.
+    val elem      = VectorElement(value = 0.9, threshold = Some(0.5))
+    val initial   = new RealityEvent(Vector(elem), isInitial = true)
+    val successor = new RealityEvent(Vector(elem), isInitial = false)
+    initial.addOutputVector(OutputVector("out-1", Vector(1.0), Map.empty, System.currentTimeMillis()))
+    initial.addNextVector(successor.id)
+
+    val seq = new CriticalEventSequence("reset-seq")
+    seq.addVector(initial)
+    seq.addVector(successor)
+
+    seq.transition(Vector(0.8))
+    initial.wasJustMatched shouldBe true
+    successor.isActive shouldBe true
+
+    seq.reset()
+    initial.wasJustMatched shouldBe false
+    successor.wasJustMatched shouldBe false
+    initial.isActive shouldBe true
+    successor.isActive shouldBe false
+  }
+
   it should "validate correctly" in {
     val seq = new CriticalEventSequence("empty")
     val (valid, errors) = seq.validate()
