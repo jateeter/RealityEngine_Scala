@@ -350,6 +350,13 @@ class Routes(
       .run()
   }
 
+  // Serialises the auto-play tick with every call that resets, configures or
+  // steps the simulation. Without it a tick could check isRunning, a reset
+  // could land, and the tick's step() then ran on the reset state: a reset
+  // during auto-play left currentStep at 1 here and 0 on C++ and LSP, whose
+  // steps and resets already exclude each other (RealityEngine_CI#489).
+  private val simLock = new Object
+
   private def cancelAutoPlay(): Unit = {
     autoPlayTask.getAndSet(None).foreach(_.cancel())
   }
@@ -361,10 +368,12 @@ class Routes(
       // without cancelling this task, and step() does not check isRunning, so
       // the task used to keep walking the sequence after a reset
       // (RealityEngine_CI#489).
-      if (!spaceRuntime.getIsRunning) cancelAutoPlay()
-      else spaceRuntime.step() match {
-        case None       => cancelAutoPlay()
-        case Some(step) => sseQueue.offer(step); ()
+      simLock.synchronized {
+        if (!spaceRuntime.getIsRunning) cancelAutoPlay()
+        else spaceRuntime.step() match {
+          case None       => cancelAutoPlay()
+          case Some(step) => sseQueue.offer(step); ()
+        }
       }
     }
     autoPlayTask.set(Some(task))
@@ -1203,7 +1212,7 @@ class Routes(
                     .flatMap(_.hcursor.get[Boolean]("clearAudit").toOption)
                   val clearAudit = clearQuery.orElse(clearBody).getOrElse(false)
                   engine.resetAllSequences()
-                  spaceRuntime.reset()
+                  simLock.synchronized { cancelAutoPlay(); spaceRuntime.reset() }
                   engine.perceptionEngine.getPerceptualSpace.reset()
                   if (clearAudit) com.realityengine.services.SemanticAuditLog.clear()
                   complete(Json.obj(
@@ -1712,7 +1721,7 @@ class Routes(
                 case None => complete(StatusCodes.BadRequest -> Json.obj("error" -> Json.fromString("No config buffered. Send a chunk with config first.")))
                 case Some((region, delay, maxS)) =>
                   val cfg = SimulationConfig(sequenceBuffer.get(), region, delay, maxS)
-                  spaceRuntime.configure(cfg)
+                  simLock.synchronized { cancelAutoPlay(); spaceRuntime.configure(cfg) }
                   sequenceBuffer.set(Vector.empty); sequenceBufferConfig.set(None)
                   complete(Json.obj("success" -> Json.fromBoolean(true)))
               }
@@ -1727,12 +1736,12 @@ class Routes(
                 complete(StatusCodes.BadRequest -> Json.obj("error" -> Json.fromString(e.getMessage)))
               }
             } },
-            path("stop")    { post { cancelAutoPlay(); spaceRuntime.stop(); complete(Json.obj("success" -> Json.fromBoolean(true))) } },
-            path("step")    { post { spaceRuntime.step() match {
+            path("stop")    { post { simLock.synchronized { cancelAutoPlay(); spaceRuntime.stop() }; complete(Json.obj("success" -> Json.fromBoolean(true))) } },
+            path("step")    { post { simLock.synchronized(spaceRuntime.step()) match {
               case None    => complete(Json.obj("done" -> Json.fromBoolean(true), "success" -> Json.fromBoolean(true)))
               case Some(s) => complete(Json.obj("success" -> Json.fromBoolean(true), "step" -> s.asJson))
             } } },
-            path("reset")   { post { spaceRuntime.reset(); complete(Json.obj("success" -> Json.fromBoolean(true))) } },
+            path("reset")   { post { simLock.synchronized { cancelAutoPlay(); spaceRuntime.reset() }; complete(Json.obj("success" -> Json.fromBoolean(true))) } },
             path("state")   { get {
               val ps = spaceRuntime.getPerceptualSpace.getPerceptualVector
               val stateObj = Json.obj(
