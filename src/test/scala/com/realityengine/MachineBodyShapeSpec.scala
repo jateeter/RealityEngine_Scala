@@ -39,8 +39,8 @@ class MachineBodyShapeSpec extends AnyFlatSpec with Matchers with ScalatestRoute
       |  "perceptualMapping": {"input": {"offset": 0, "length": 2},
       |                        "output": {"offset": 8, "length": 2}},
       |  "sequences": [{"id": "seq-shape", "name": "Shape Seq",
-      |                 "vectors": [{"id": "v1", "name": "A", "isInitial": true,
-      |                              "values": [1, 0]}]}]
+      |                 "events": [{"id": "v1", "name": "A", "isInitial": true,
+      |                              "elements": [{"value": 1}, {"value": 0}]}]}]
       |}""".stripMargin
 
   private def body(json: String) = HttpEntity(ContentTypes.`application/json`, json)
@@ -55,6 +55,11 @@ class MachineBodyShapeSpec extends AnyFlatSpec with Matchers with ScalatestRoute
       machine.get[String]("name").toOption shouldBe Some("Shape Fixture")
       machine.downField("perceptualMapping").downField("input")
         .get[Int]("offset").toOption shouldBe Some(0)
+      // The Reality Event itself, not just its sequence. The fixture spelled
+      // the list `vectors` after the #220 rename moved it to `events`, so the
+      // sequence loaded empty and the assertions above still passed.
+      engine.getAllMachines.find(_.name == "Shape Fixture")
+        .flatMap(_.getAllSequences.headOption).map(_.getAllVectors.size) shouldBe Some(1)
     }
   }
 
