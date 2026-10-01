@@ -41,8 +41,8 @@ class MachineIngestionSpec extends AnyFlatSpec with Matchers with ScalatestRoute
        |  "perceptualMapping": {"input": {"offset": $declaredIn, "length": 4},
        |                        "output": {"offset": $declaredOut, "length": 2}},
        |  "sequences": [{"id": "seq-ingest", "name": "Ingest Seq",
-       |                 "vectors": [{"id": "v1", "name": "A", "isInitial": true,
-       |                              "values": [1, 0, 0, 0]}]}]
+       |                 "events": [{"id": "v1", "name": "A", "isInitial": true,
+       |                              "elements": [{"value": 1}, {"value": 0}, {"value": 0}, {"value": 0}]}]}]
        |}""".stripMargin
 
   private def post(): (String, Boolean, Option[PerceptualMapping]) =
