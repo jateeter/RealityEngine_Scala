@@ -452,7 +452,15 @@ class PerceptionEngine(initialDimension: Int = sys.env.getOrElse("VECTOR_DIMENSI
     //
     // Sorted by (name, id) — the order already used for the listing endpoints,
     // and derived from corpus-declared names rather than runtime-minted ids.
-    for ((id, src) <- sources.toSeq.sortBy { case (i, s) => (s.name, i) } if src.active) {
+    //
+    // Preceded by a tier: the seed first, live inputs last. Interned test
+    // sources are ISRESeed(n), the base every live input folds over — the
+    // direction of the OSRE->ISRE fold — so where a machine's seed and a live
+    // source share a lane the live source wins, always (owner decision,
+    // 2026-10-02, RealityEngine_CPP#146). Within each tier the canonical
+    // (name, id) order is unchanged, so the runtimes still compose identically.
+    val liveTier: SourceConfig => Int = { case _: TestSourceConfig => 0; case _ => 1 }
+    for ((id, src) <- sources.toSeq.sortBy { case (i, s) => (liveTier(s), s.name, i) } if src.active) {
       val values = getSourceValues(id, src)
       val Region(offset, length) = src.region
       // Growth on addSource and on RE sync should make this unreachable; if a
