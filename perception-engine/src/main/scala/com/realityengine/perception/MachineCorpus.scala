@@ -24,6 +24,14 @@ final class MachineCorpus(machinesById: Map[String, Json]) {
   private def machineName(machineId: String): Option[String] =
     machinesById.get(machineId).flatMap(_.hcursor.get[String]("name").toOption)
 
+  /** (name, declared outputMergeTransformation — default "or") for a machine,
+    * used to fold a source on its OSRE cells (ARBITER_CONTRACT.md §4.4b). */
+  def foldOperator(machineId: String): Option[(String, String)] =
+    machinesById.get(machineId).map { m =>
+      val c = m.hcursor
+      (c.get[String]("name").getOrElse(machineId), c.get[String]("outputMergeTransformation").getOrElse("or"))
+    }
+
   /** The ids of the fired sequence's Initial Reality Event vectors.
     *
     * Every machine CES carries at least one initial event vector — it may

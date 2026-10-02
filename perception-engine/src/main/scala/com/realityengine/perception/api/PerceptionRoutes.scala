@@ -6,7 +6,7 @@ import akka.http.scaladsl.server.Directives._
 import akka.http.scaladsl.server.Route
 import akka.stream.Materializer
 import com.realityengine.perception.{MachineCorpus, VectorAggregator}
-import com.realityengine.perception.engine.PerceptionEngine
+import com.realityengine.perception.engine.{OsreFold, PerceptionEngine}
 import com.realityengine.perception.metrics.SemanticMetrics
 import com.realityengine.perception.models._
 import com.realityengine.perception.models.PerceptionJsonCodecs._
@@ -808,6 +808,9 @@ class PerceptionRoutes(
             engine.updateFromPerceptualSpace(nextPs)
           case _ =>
         }
+        // The OSRE cells this push produced, read before the reply is narrowed
+        // (ARBITER_CONTRACT.md §4.4b).
+        engine.setOsreFold(OsreFold.cells(parsed, machineCorpus.get().foldOperator))
 
         // Consume the Reality Engine's mergeBatch; do not rebuild it.
         //
