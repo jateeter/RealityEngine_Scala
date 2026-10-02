@@ -731,7 +731,13 @@ class PerceptionRoutes(
     *   fed it with a selector present.
     */
   def doPush(compact: Boolean = false, only: Option[Json] = None): Future[PushResult] = Future {
-    val vector  = engine.assembleVector()
+    val vector  = engine.synchronized {
+      // The push is the transition: record what this assembly resolved. A read
+      // of /api/state assembles too, and must not count (§4.4b).
+      val v = engine.assembleVector()
+      engine.recordContention()
+      v
+    }
     val algoStr = MatchAlgorithm.asString(engine.matchAlgorithm)
 
     val bodyJson = Json.obj(
@@ -1077,6 +1083,14 @@ class PerceptionRoutes(
           }
         }}
       )
+    },
+
+    // STT contention (ARBITER_CONTRACT.md §4.4b): contended cells of the last
+    // push assembly and cumulative per-source counters.
+    path("api" / "sources" / "contention") {
+      get {
+        complete(engine.contentionJson)
+      }
     },
 
     path("api" / "sources" / Segment) { id =>

@@ -21,6 +21,14 @@ class PerceptionEngine(initialDimension: Int = sys.env.getOrElse("VECTOR_DIMENSI
   private var sources: Map[String, SourceConfig]        = Map.empty
   private var testStep: Map[String, Int]                = Map.empty
   private var walkState: Map[String, Vector[Double]]    = Map.empty
+  // Activation instants (ARBITER_CONTRACT.md §4.4b): the globalStep at which
+  // each source last became active. Kept beside the source rather than on it,
+  // because SourceConfig is what GET /api/sources serialises.
+  private var activatedAt: Map[String, Long]            = Map.empty
+  // STT contention of the last push assembly, and per-source counters.
+  private var lastContention: Vector[ContendedCell]     = Vector.empty
+  private var contentionTransition: Long                = 0L
+  private var contentionCounters: Map[String, (Long, Long)] = Map.empty
   // Run state the store cached, held aside until an integration registers the
   // source it belongs to. Membership comes from re-registration
   // (RealityEngine_CI SURFACE_SPEC.md point 5), so nothing here is a member of
@@ -162,7 +170,7 @@ class PerceptionEngine(initialDimension: Int = sys.env.getOrElse("VECTOR_DIMENSI
     val src = deriveRegistrationActivity(applyId(config, id))
     ensureCapacity(src.region.offset + src.region.length)
     val withCached = inheritCached(src)
-    sources = sources + (id -> withCached)
+    store(id, withCached)
     initRuntimeState(id, withCached)
     withCached
   }
@@ -205,7 +213,7 @@ class PerceptionEngine(initialDimension: Int = sys.env.getOrElse("VECTOR_DIMENSI
       // value and, if that value still supports it, the cached activity.
       val declared = inheritCached(applyId(config.withActive(false), id))
       ensureCapacity(declared.region.offset + declared.region.length)
-      sources = sources + (id -> declared)
+      store(id, declared)
       initRuntimeState(id, declared)
       declared
     }
@@ -300,6 +308,8 @@ class PerceptionEngine(initialDimension: Int = sys.env.getOrElse("VECTOR_DIMENSI
       testStep      = testStep  - id
       walkState     = walkState - id
       sources       = sources   - id
+      activatedAt   = activatedAt - id
+      contentionCounters = contentionCounters - id
       true
     } else false
   }
@@ -308,7 +318,7 @@ class PerceptionEngine(initialDimension: Int = sys.env.getOrElse("VECTOR_DIMENSI
     if (!sources.contains(id)) None
     else {
       val updated = applyId(patch, id)
-      sources = sources + (id -> updated)
+      store(id, updated)
       Some(updated)
     }
   }
@@ -326,7 +336,7 @@ class PerceptionEngine(initialDimension: Int = sys.env.getOrElse("VECTOR_DIMENSI
     sources.get(id) match {
       case None => false
       case Some(src) =>
-        sources = sources + (id -> src.withActive(false))
+        store(id, src.withActive(false))
         true
     }
   }
@@ -427,7 +437,7 @@ class PerceptionEngine(initialDimension: Int = sys.env.getOrElse("VECTOR_DIMENSI
           lastValue   = values.take(s.region.length),
           lastUpdated = Some(System.currentTimeMillis()),
         )
-        sources = sources + (s.id -> updated)
+        store(s.id, updated)  // earning activity is an activation (§4.4b)
         true
       case _ => false
     }
@@ -459,8 +469,15 @@ class PerceptionEngine(initialDimension: Int = sys.env.getOrElse("VECTOR_DIMENSI
     // source share a lane the live source wins, always (owner decision,
     // 2026-10-02, RealityEngine_CPP#146). Within each tier the canonical
     // (name, id) order is unchanged, so the runtimes still compose identically.
-    val liveTier: SourceConfig => Int = { case _: TestSourceConfig => 0; case _ => 1 }
-    for ((id, src) <- sources.toSeq.sortBy { case (i, s) => (liveTier(s), s.name, i) } if src.active) {
+    //
+    // Within a tier the incumbent writer keeps the cell (ARBITER_CONTRACT.md
+    // §4.4b, owner decision 2026-10-02): two sources on one cell in one
+    // transition violates the single transition time constraint, and the
+    // source activated earliest wins; equal instants — every seed interned at
+    // boot — fall back to canonical (name, id), first winning. Assembly is
+    // last-writer-wins, so compositionOrder writes each tier newest first in
+    // descending (name, id) and the incumbent lands last.
+    for ((id, src) <- compositionOrder) {
       val values = getSourceValues(id, src)
       val Region(offset, length) = src.region
       // Growth on addSource and on RE sync should make this unreachable; if a
@@ -517,7 +534,7 @@ class PerceptionEngine(initialDimension: Int = sys.env.getOrElse("VECTOR_DIMENSI
             if (t.loop) {
               testStep = testStep + (id -> 0)
             } else {
-              sources  = sources  + (id -> t.copy(active = false))
+              store(id, t.copy(active = false))
               testStep = testStep + (id -> 0)
             }
           } else {
@@ -617,6 +634,13 @@ class PerceptionEngine(initialDimension: Int = sys.env.getOrElse("VECTOR_DIMENSI
       val validated = validatedActive(src, now)
       if (validated != src.active) sources = sources + (id -> src.withActive(validated))
     }
+    // A reset is a boot for the run: every source starts at instant 0 and the
+    // canonical (name, id) tie-break decides contended cells; contention
+    // records and counters start over (§4.4b).
+    activatedAt          = sources.keys.map(_ -> 0L).toMap
+    lastContention       = Vector.empty
+    contentionTransition = 0L
+    contentionCounters   = Map.empty
   }
 
   // ── State snapshot ────────────────────────────────────────────────────────
@@ -636,6 +660,98 @@ class PerceptionEngine(initialDimension: Int = sys.env.getOrElse("VECTOR_DIMENSI
       matchAlgorithm  = matchAlgorithm,
       perceptionDimension = _vectorDimension,
     )
+  }
+
+  // ── STT contention (ARBITER_CONTRACT.md §4.4b) ───────────────────────────
+
+  private def isLive(src: SourceConfig): Boolean = src match {
+    case _: TestSourceConfig => false
+    case _                   => true
+  }
+
+  /** Active sources in the order assembly writes them: seed tier, then live;
+    * within a tier newest activation first, then descending (name, id). */
+  private def compositionOrder: Seq[(String, SourceConfig)] =
+    sources.toSeq.filter(_._2.active).sortWith { case ((ia, a), (ib, b)) =>
+      val (la, lb) = (isLive(a), isLive(b))
+      if (la != lb) !la
+      else {
+        val (ta, tb) = (activatedAt.getOrElse(ia, 0L), activatedAt.getOrElse(ib, 0L))
+        if (ta != tb) ta > tb
+        else if (a.name != b.name) a.name > b.name
+        else ia > ib
+      }
+    }
+
+  private def sourceRef(id: String, src: SourceConfig): SourceRef =
+    SourceRef(id, src.name, src match {
+      case _: TestSourceConfig      => "test"
+      case _: SensorSourceConfig    => "sensor"
+      case _: SimulatedSourceConfig => "simulated"
+    }, activatedAt.getOrElse(id, 0L))
+
+  /** Cells written by more than one active source, resolved as `assembleVector`
+    * resolves them. A pure read: it neither records nor counts. */
+  def sourceContention(): Vector[ContendedCell] = synchronized {
+    val outLen  = persistentVector.length
+    val writers = scala.collection.mutable.TreeMap.empty[Int, Vector[(String, SourceConfig)]]
+    for ((id, src) <- compositionOrder) {
+      val values = getSourceValues(id, src)
+      val Region(offset, length) = src.region
+      var i = 0
+      while (i < length && i < values.length) {
+        val cell = offset + i
+        if (cell >= 0 && cell < outLen) writers(cell) = writers.getOrElse(cell, Vector.empty) :+ (id -> src)
+        i += 1
+      }
+    }
+    writers.iterator.collect { case (cell, ws) if ws.length > 1 =>
+      val (wid, w) = ws.last
+      val lost = ws.init.sortBy { case (i, s) => (s.name, i) }
+      val sameTier = lost.exists { case (_, l) => isLive(l) == isLive(w) }
+      ContendedCell(cell, if (sameTier) "incumbent" else "live-over-seed",
+        sourceRef(wid, w), lost.map { case (i, s) => sourceRef(i, s) })
+    }.toVector
+  }
+
+  /** Record the contention of the assembly a push sends, and count it. Push path only. */
+  def recordContention(): Unit = synchronized {
+    lastContention       = sourceContention()
+    contentionTransition = globalStep
+    val lost      = lastContention.flatMap(_.suppressed.map(_.id)).toSet
+    val contended = lastContention.flatMap(c => c.winner.id +: c.suppressed.map(_.id)).toSet
+    for (id <- contended) {
+      val (c, s) = contentionCounters.getOrElse(id, (0L, 0L))
+      contentionCounters = contentionCounters + (id -> ((c + 1, if (lost(id)) s + 1 else s)))
+    }
+  }
+
+  /** GET /api/sources/contention. */
+  def contentionJson: Json = synchronized {
+    def ref(r: SourceRef): Json = Json.obj(
+      "id" -> Json.fromString(r.id), "name" -> Json.fromString(r.name),
+      "kind" -> Json.fromString(r.kind), "activatedAt" -> Json.fromLong(r.activatedAt))
+    Json.obj(
+      "transition" -> Json.fromLong(contentionTransition),
+      "cells" -> Json.fromValues(lastContention.map(c => Json.obj(
+        "cell" -> Json.fromInt(c.cell), "resolution" -> Json.fromString(c.resolution),
+        "winner" -> ref(c.winner), "suppressed" -> Json.fromValues(c.suppressed.map(ref))))),
+      "counters" -> Json.fromValues(getSources.flatMap { s =>
+        contentionCounters.get(s.id).map { case (c, l) =>
+          Json.obj("id" -> Json.fromString(s.id), "name" -> Json.fromString(s.name),
+            "contended" -> Json.fromLong(c), "suppressed" -> Json.fromLong(l))
+        }
+      })
+    )
+  }
+
+  /** Every write to `sources` goes through here so the activation instant is
+    * kept: a source that was active and stays active keeps its claim; any
+    * other write stamps the current transition (§4.4b). */
+  private def store(id: String, next: SourceConfig): Unit = {
+    val continuing = sources.get(id).exists(_.active) && next.active
+    if (!continuing) activatedAt = activatedAt + (id -> globalStep)
+    sources = sources + (id -> next)
   }
 
   // ── Private helpers ───────────────────────────────────────────────────────
@@ -813,3 +929,9 @@ object PerceptionEngine {
     }
   }
 }
+
+/** A source as an STT contention record names it (ARBITER_CONTRACT.md §4.4b). */
+final case class SourceRef(id: String, name: String, kind: String, activatedAt: Long)
+
+/** One contended cell from the most recent push assembly. */
+final case class ContendedCell(cell: Int, resolution: String, winner: SourceRef, suppressed: Vector[SourceRef])
