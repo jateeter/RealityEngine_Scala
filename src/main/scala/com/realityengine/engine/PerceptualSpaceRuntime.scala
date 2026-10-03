@@ -183,12 +183,49 @@ class PerceptualSpaceRuntime(dimension: Int = sys.env.getOrElse("VECTOR_DIMENSIO
     else { perceptualSpace.growTo(requested); true }
   }
 
-  def configure(cfg: SimulationConfig): Unit = {
+  // ── The step completion point (RealityEngine_CI#375) ─────────────────────
+  //
+  // One monitor, stepLock, guards every step, every reset and every read of the
+  // trajectory histories, so a step and its pair are committed together and a
+  // reader never sees half of one. When a step's (ISRE, OSRE) pair is committed
+  // -- after every composer has joined and OSRE has resolved -- completedStep
+  // takes its number and every waiter is woken (notifyAll). awaitStepPair waits
+  // on the same monitor, which releases it while waiting so the step can run.
+  // Steps are numbered from 0; -1 means none has completed.
+  private val stepLock      = new Object
+  private var completedStep = -1L
+
+  /** The (ISRE, OSRE) pair for step `n`, waiting up to `timeoutMs` for it.
+    * Left(408) when step `n` has not resolved within the window; Left(410)
+    * when it resolved and is no longer retained. */
+  def awaitStepPair(n: Long, timeoutMs: Long): Either[Int, (TrajectoryEntry, TrajectoryEntry)] =
+    stepLock.synchronized {
+      val deadline = System.nanoTime() + timeoutMs * 1000000L
+      var remaining = timeoutMs * 1000000L
+      while (completedStep < n && remaining > 0) {
+        stepLock.wait(math.max(1L, remaining / 1000000L))
+        remaining = deadline - System.nanoTime()
+      }
+      if (completedStep < n) Left(408)
+      else {
+        val isre = isreHistory.find(_.stepNumber == n)
+        val osre = osreHistory.find(_.stepNumber == n)
+        (isre, osre) match {
+          case (Some(i), Some(o)) => Right((i, o))
+          case _                  => Left(410)
+        }
+      }
+    }
+
+  def configure(cfg: SimulationConfig): Unit = stepLock.synchronized {
     config = Some(cfg)
     reset()
   }
 
-  def reset(): Unit = {
+  def reset(): Unit = stepLock.synchronized {
+    // Step numbers restart, so the completion point does too (#375).
+    completedStep = -1L
+    stepLock.notifyAll()
     stop()
     perceptualSpace.reset()
     history = Nil
@@ -207,7 +244,7 @@ class PerceptualSpaceRuntime(dimension: Int = sys.env.getOrElse("VECTOR_DIMENSIO
 
   // ── Step execution ────────────────────────────────────────────────────────
 
-  def step(): Option[SimulationStep] = {
+  def step(): Option[SimulationStep] = stepLock.synchronized {
     // IllegalArgumentException is the route's 400: an unconfigured step is a
     // caller precondition, not a server fault (RealityEngine_CI#489). It was
     // IllegalStateException, which the handler answers 500.
@@ -231,7 +268,7 @@ class PerceptualSpaceRuntime(dimension: Int = sys.env.getOrElse("VECTOR_DIMENSIO
    * Process a pre-assembled full perceptual vector (used by Perception Engine integration).
    * Does not touch currentStep or the configured input sequence.
    */
-  def processImmediate(vector: Vector[Double], matchAlgorithmOverride: Option[ComparatorType] = None): SimulationStep = {
+  def processImmediate(vector: Vector[Double], matchAlgorithmOverride: Option[ComparatorType] = None): SimulationStep = stepLock.synchronized {
     perceptualSpace.setPerceptualVector(vector)
     val result = runPhases(immediateStepCount, matchAlgorithmOverride)
     immediateStepCount += 1
@@ -274,9 +311,29 @@ class PerceptualSpaceRuntime(dimension: Int = sys.env.getOrElse("VECTOR_DIMENSIO
     val firedSequences    = scala.collection.mutable.ListBuffer.empty[(String, String)]
     val mergeOps          = scala.collection.mutable.ListBuffer.empty[MergeOperation]
 
+    // Composition, in parallel (RealityEngine_CI#375). Every machine composes its
+    // Reality Event from ISRE(n) at once, each as a Future on its own machine;
+    // Future.sequence + Await is the join, so nothing below runs until every
+    // composer has completed. Only then are the results folded — here, in
+    // canonical machine order — and OSRE(n) resolved atomically. This loop used
+    // to call processInput machine after machine: canonical, but serial, and
+    // with no join for the contract to rest on. The audit is recorded after the
+    // join, in the same canonical order, so it does not follow completion order.
+    val composed: Map[String, MachineTransitionResult] = {
+      import scala.concurrent.{Await, Future}
+      import scala.concurrent.duration.Duration
+      implicit val ec: scala.concurrent.ExecutionContext = ArbiterParallelism.ec
+      Await.result(
+        Future.sequence(mappedMachines.map { m =>
+          Future(m.id -> m.processInput(inputSnapshots(m.id), matchOverride, audit = false))
+        }),
+        Duration.Inf
+      ).toMap
+    }
+
     for (machine <- mappedMachines) {
-      val snapshot     = inputSnapshots(machine.id)
-      val transition   = machine.processInput(snapshot, matchOverride)
+      val transition   = composed(machine.id)
+      machine.recordSemanticAudit(transition)
       coverageRegistry.foreach(_.record(machine, transition))
       val outputVector = transition.machineOutput.map(_.vector)
       val mapping      = machine.perceptualMapping.get
@@ -465,7 +522,7 @@ class PerceptualSpaceRuntime(dimension: Int = sys.env.getOrElse("VECTOR_DIMENSIO
       machineResults(machine.id) = MachineStepResult(
         machineId        = machine.id,
         machineName      = machine.name,
-        inputVector      = snapshot,
+        inputVector      = inputSnapshots(machine.id),
         outputVector     = outputVector,
         mergedOutputVector        = merged,
         outputMergeTransformation = machine.outputMergeTransformation,
@@ -590,9 +647,12 @@ class PerceptualSpaceRuntime(dimension: Int = sys.env.getOrElse("VECTOR_DIMENSIO
     * because it is read as "what just happened"; these are read as sequences to
     * be compared element by element, and the index of the first disagreement is
     * the answer they exist to give. */
-  private def recordTrajectory(isre: TrajectoryEntry, osre: TrajectoryEntry): Unit = {
+  private def recordTrajectory(isre: TrajectoryEntry, osre: TrajectoryEntry): Unit = stepLock.synchronized {
     isreHistory = (isreHistory :+ isre).takeRight(maxTrajectory)
     osreHistory = (osreHistory :+ osre).takeRight(maxTrajectory)
+    // The pair is committed: the step's completion point (#375).
+    completedStep = isre.stepNumber.toLong
+    stepLock.notifyAll()
   }
 
   // ── Auto-play (synchronous scheduler stub) ────────────────────────────────
@@ -620,8 +680,10 @@ class PerceptualSpaceRuntime(dimension: Int = sys.env.getOrElse("VECTOR_DIMENSIO
     * include; `limit` caps the entries returned from there (0 = all). A
     * comparison walks these by index across engines and reports the first
     * disagreement, so the window has to be selectable by step, not by recency. */
-  def getOsreHistory(from: Int = 0, limit: Int = 0): List[TrajectoryEntry] = window(osreHistory, from, limit)
-  def getIsreHistory(from: Int = 0, limit: Int = 0): List[TrajectoryEntry] = window(isreHistory, from, limit)
+  // Under stepLock: the histories are appended by the step, and an unguarded
+  // read could see one before the other was written (RealityEngine_CI#375).
+  def getOsreHistory(from: Int = 0, limit: Int = 0): List[TrajectoryEntry] = stepLock.synchronized(window(osreHistory, from, limit))
+  def getIsreHistory(from: Int = 0, limit: Int = 0): List[TrajectoryEntry] = stepLock.synchronized(window(isreHistory, from, limit))
 
   private def window(entries: Vector[TrajectoryEntry], from: Int, limit: Int): List[TrajectoryEntry] = {
     val fromStep = entries.dropWhile(_.stepNumber < from)
