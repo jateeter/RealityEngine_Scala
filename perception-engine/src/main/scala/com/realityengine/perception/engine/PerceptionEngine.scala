@@ -17,6 +17,10 @@ import scala.util.Random
  */
 class PerceptionEngine(initialDimension: Int = sys.env.getOrElse("VECTOR_DIMENSION", "7680").toIntOption.getOrElse(7680)) {
   private val uuidGen = Generators.timeBasedReorderedGenerator()
+  // Minted identity is `<prefix>-<uuid>` on every runtime (RealityEngine_CI#518):
+  // a source id this engine mints carries the `source-` prefix the C++ and LSP
+  // PEs use, so all three are one shape and recognisable as minted.
+  private def mintSourceId(): String = s"source-${uuidGen.generate()}"
 
   private var sources: Map[String, SourceConfig]        = Map.empty
   private var testStep: Map[String, Int]                = Map.empty
@@ -172,7 +176,7 @@ class PerceptionEngine(initialDimension: Int = sys.env.getOrElse("VECTOR_DIMENSI
   }
 
   def addSource(config: SourceConfig): SourceConfig = synchronized {
-    val id  = if (config.id.nonEmpty) config.id else uuidGen.generate().toString
+    val id  = if (config.id.nonEmpty) config.id else mintSourceId()
     val src = deriveRegistrationActivity(applyId(config, id))
     ensureCapacity(src.region.offset + src.region.length)
     val withCached = inheritCached(src)
@@ -214,7 +218,7 @@ class PerceptionEngine(initialDimension: Int = sys.env.getOrElse("VECTOR_DIMENSI
       case other => sources.get(other.id)
     }
     existing.getOrElse {
-      val id       = if (config.id.nonEmpty) config.id else uuidGen.generate().toString
+      val id       = if (config.id.nonEmpty) config.id else mintSourceId()
       // Declared inactive (point 2a); inheritCached may then restore a cached
       // value and, if that value still supports it, the cached activity.
       val declared = inheritCached(applyId(config.withActive(false), id))
