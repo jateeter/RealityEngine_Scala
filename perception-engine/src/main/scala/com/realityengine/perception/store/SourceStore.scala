@@ -31,6 +31,15 @@ import scala.util.{Failure, Success, Try}
  *
  * save() is called from a blocking-io-dispatcher Future in PerceptionRoutes
  * so the file I/O never blocks Akka's default dispatcher.
+ *
+ * **Every save is one atomic action, and saves are serialised.** Concurrent
+ * source PATCHes each launch a save, and they used to run at once against the
+ * one shared `.tmp`: one writer's rename moved the file out from under another's
+ * (`Failed to save sources: …json.tmp -> …json`), and whichever finished last
+ * won, whether or not its snapshot was the newest (RealityEngine_CI#518). Now
+ * the snapshot is taken *inside* the lock — `save` takes it by name — so the
+ * write order is the snapshot order, and the last write always carries the
+ * newest state. Write-then-rename keeps each save atomic on disk.
  */
 class SourceStore(dataDir: String) {
   private val dir: Path      = Paths.get(dataDir)
@@ -53,7 +62,10 @@ class SourceStore(dataDir: String) {
     }
   }
 
-  def save(sources: Vector[SourceConfig]): Unit = {
+  private val saveLock = new Object
+
+  /** Snapshot `sources` and write it, serialised with every other save. */
+  def save(sources: => Vector[SourceConfig]): Unit = saveLock.synchronized {
     val payload = io.circe.Json.obj(
       "version" -> 1.asJson,
       "sources" -> sources.asJson,
