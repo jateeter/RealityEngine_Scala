@@ -518,6 +518,63 @@ class Routes(
       Json.False)
 
 
+  /** The clock as every surface reports it: {instance, lamport, step}. */
+  private def clockJson(instance: String, lamport: Long, step: Long): Json =
+    Json.obj("instance" -> Json.fromString(instance),
+             "lamport"  -> Json.fromLong(lamport),
+             "step"     -> Json.fromLong(step))
+
+  /** Records as GET /api/arbitration lists them. `canonical` is the retention
+    * mode (RealityEngine_CI#296): records by cell, contributions by
+    * (provider, originId, cesId, outputVectorId), and a machine contribution's
+    * outputVectorId as the contract's "0" -- the other runtimes pin it there
+    * since outputIndex went, and this one emitted null (baseline finding E).
+    * Without it the legacy order and fields are kept exactly.
+    *
+    * `cesId` is an opaque key, not a sequence identifier (FOLD_PLACEMENT.md
+    * A3): a machine contribution carries the comma-joined, sorted,
+    * deduplicated set of the sequences that folded into it, so a reader must
+    * not split it and look a sequence up. A one-element set renders as the
+    * bare id. */
+  private def arbitrationRecordsJson(records: List[Arbiter.ArbitrationRecord], canonical: Boolean): Json = {
+    def normalised(c: Arbiter.Contribution) =
+      if (canonical && c.provider == "machine" && c.outputVectorId.isEmpty) c.copy(outputVectorId = Some("0"))
+      else c
+    def ordered(cs: List[Arbiter.Contribution]) = {
+      val ns = cs.map(normalised)
+      if (canonical) ns.sortBy(c => (c.provider, c.originId, c.cesId.getOrElse(""), c.outputVectorId.getOrElse("")))
+      else ns
+    }
+    def contrib(c: Arbiter.Contribution) = Json.obj(
+      "provider"       -> Json.fromString(c.provider),
+      "determinism"    -> Json.fromString(c.determinism),
+      "originId"       -> Json.fromString(c.originId),
+      "cesId"          -> c.cesId.map(Json.fromString).getOrElse(Json.Null),
+      "outputVectorId" -> c.outputVectorId.map(Json.fromString).getOrElse(Json.Null),
+      "ragStatusCode"  -> c.ragStatusCode.map(Json.fromString).getOrElse(Json.Null),
+      "value"          -> Json.fromDoubleOrNull(c.value))
+    Json.arr((if (canonical) records.sortBy(_.cell) else records).map { r =>
+      Json.obj(
+        "instant"      -> Json.fromInt(r.instant),
+        "cell"         -> Json.fromInt(r.cell),
+        "rule"         -> Json.fromString(r.rule),
+        "resolved"     -> Json.fromDoubleOrNull(r.resolved),
+        "contributors" -> Json.arr(ordered(r.contributors).map(contrib): _*),
+        "suppressed"   -> Json.arr(ordered(r.suppressed).map(contrib): _*))
+    }: _*)
+  }
+
+  /** One retained step: its records, canonically ordered, under its clock. */
+  private def arbitrationStepJson(step: Long, lamport: Long, records: List[Arbiter.ArbitrationRecord]): Json =
+    Json.obj(
+      "clock"           -> clockJson(spaceRuntime.instanceUuid, lamport, step),
+      "registryEntries" -> Json.fromInt(com.realityengine.engine.ArbitrationRegistry.size),
+      "registrySource"  -> com.realityengine.engine.ArbitrationRegistry.source
+                             .map(Json.fromString).getOrElse(Json.Null),
+      "shards"          -> Json.fromInt(com.realityengine.engine.ArbiterParallelism.shards),
+      "count"           -> Json.fromInt(records.length),
+      "records"         -> arbitrationRecordsJson(records, canonical = true))
+
   private def engineControls: List[EngineControl] = {
     // An engine-scoped boolean, written once rather than four times so the four
     // cannot drift apart the way the runtimes they mirror did.
@@ -534,7 +591,35 @@ class Routes(
     def historyLimitJson(): Json =
       controlJson("historyLimit", "engine", Json.fromInt(historyLimitRef.get()), Json.fromInt(250))
 
+    // Retention off is the legacy escape (RealityEngine_CI#296): the legacy
+    // response, and nothing kept per step.
+    def arbitrationRetentionJson(): Json =
+      controlJson("arbitrationRetention", "engine",
+                  Json.fromBoolean(spaceRuntime.getArbitrationRetention), Json.False)
+    def arbitrationWindowJson(): Json =
+      controlJson("arbitrationWindow", "engine", Json.fromInt(spaceRuntime.getArbitrationWindow),
+                  Json.fromInt(PerceptualSpaceRuntime.ArbitrationWindowDefault))
+
     List(
+      EngineControl("arbitrationRetention", "engine", () => arbitrationRetentionJson(),
+        body => body.hcursor.get[Boolean]("value").toOption match {
+          case None     => Left(ControlRefusal("arbitrationRetention requires a boolean `value`",
+                                               StatusCodes.BadRequest))
+          case Some(on) => spaceRuntime.setArbitrationRetention(on); Right(arbitrationRetentionJson())
+        },
+        () => { spaceRuntime.setArbitrationRetention(false); arbitrationRetentionJson() }),
+      EngineControl("arbitrationWindow", "engine", () => arbitrationWindowJson(),
+        body => body.hcursor.get[Int]("value").toOption match {
+          case Some(v) if v >= 0 && v <= PerceptualSpaceRuntime.ArbitrationWindowMax =>
+            spaceRuntime.setArbitrationWindow(v); Right(arbitrationWindowJson())
+          case _ => Left(ControlRefusal(
+            s"arbitrationWindow requires a whole-number `value` in [0, ${PerceptualSpaceRuntime.ArbitrationWindowMax}]",
+            StatusCodes.BadRequest))
+        },
+        () => {
+          spaceRuntime.setArbitrationWindow(PerceptualSpaceRuntime.ArbitrationWindowDefault)
+          arbitrationWindowJson()
+        }),
       EngineControl("historyLimit", "engine", () => historyLimitJson(),
         body => {
           // A negative limit is refused rather than stored, where it would make
@@ -1266,6 +1351,13 @@ class Routes(
             path("isre-history") { get { parameters("from".as[Int].?, "limit".as[Int].?) { (from, limit) =>
               complete(Json.obj("history" -> spaceRuntime.getIsreHistory(from.getOrElse(0), limit.getOrElse(0)).asJson))
             } } },
+            // The instance's clock (RealityEngine_CI#296): its UUID, the Lamport
+            // value of the newest committed step (never reset), and that step's
+            // number (-1 before the first since boot or reset).
+            path("clock") { get {
+              val (instance, lamport, step) = spaceRuntime.clockNow
+              complete(clockJson(instance, lamport, step))
+            } },
             // The step completion point (RealityEngine_CI#375, SURFACE_SPEC.md
             // "Step completion"): the (ISRE, OSRE) pair for step n, waiting up to
             // timeoutMs on the runtime's step monitor. The wait blocks, so it runs
@@ -1697,37 +1789,39 @@ class Routes(
         // resolution, and a suppressed agent assessment has to stay
         // attributable — "the agent's answer was discarded" is exactly the
         // operational fact the domain bus exists to surface.
-        path("arbitration") { get {
-          val recs = spaceRuntime.getLastArbitration
-          complete(Json.obj(
-            "registryEntries" -> Json.fromInt(com.realityengine.engine.ArbitrationRegistry.size),
-            "registrySource"  -> com.realityengine.engine.ArbitrationRegistry.source
-                                   .map(Json.fromString).getOrElse(Json.Null),
-            "shards"          -> Json.fromInt(com.realityengine.engine.ArbiterParallelism.shards),
-            "count"           -> Json.fromInt(recs.length),
-            "records"         -> Json.arr(recs.map { r =>
-              // `cesId` is an opaque key, not a sequence identifier
-              // (FOLD_PLACEMENT.md A3): a machine contribution carries the
-              // comma-joined, sorted, deduplicated set of the sequences that
-              // folded into it, so a reader must not split it and look a
-              // sequence up. A one-element set renders as the bare id.
-              def contrib(c: com.realityengine.engine.Arbiter.Contribution) = Json.obj(
-                "provider"       -> Json.fromString(c.provider),
-                "determinism"    -> Json.fromString(c.determinism),
-                "originId"       -> Json.fromString(c.originId),
-                "cesId"          -> c.cesId.map(Json.fromString).getOrElse(Json.Null),
-                "outputVectorId" -> c.outputVectorId.map(Json.fromString).getOrElse(Json.Null),
-                "ragStatusCode"  -> c.ragStatusCode.map(Json.fromString).getOrElse(Json.Null),
-                "value"          -> Json.fromDoubleOrNull(c.value))
-              Json.obj(
-                "instant"      -> Json.fromInt(r.instant),
-                "cell"         -> Json.fromInt(r.cell),
-                "rule"         -> Json.fromString(r.rule),
-                "resolved"     -> Json.fromDoubleOrNull(r.resolved),
-                "contributors" -> Json.arr(r.contributors.map(contrib): _*),
-                "suppressed"   -> Json.arr(r.suppressed.map(contrib): _*))
-            }: _*)))
-        } },
+        //
+        // Retention keyed by step (RealityEngine_CI#296): with
+        // arbitrationRetention off this is the legacy object, its bytes
+        // unchanged; on, it is the list of retained steps in the window, oldest
+        // first, and `?step=N` addresses one of them.
+        path("arbitration") { get { parameters("step".?) {
+          case Some(raw) =>
+            def error(status: StatusCode, message: String) =
+              complete(status -> Json.obj("error" -> Json.fromString(message)))
+            raw.toLongOption.filter(n => n >= 0 && raw.forall(_.isDigit)) match {
+              case None => error(StatusCodes.BadRequest, "step must be a non-negative integer")
+              case Some(n) => spaceRuntime.arbitrationAt(n) match {
+                case Right((lamport, records)) => complete(arbitrationStepJson(n, lamport, records))
+                case Left(409) => error(StatusCodes.Conflict,
+                  "arbitration retention is off; GET /api/arbitration?step=N needs arbitrationRetention true")
+                case Left(404) => error(StatusCodes.NotFound, s"step $n has not resolved")
+                case Left(_)   => error(StatusCodes.Gone, s"step $n is no longer retained")
+              }
+            }
+          case None if spaceRuntime.getArbitrationRetention =>
+            complete(Json.arr(spaceRuntime.retainedArbitration.map { case (step, lamport, records) =>
+              arbitrationStepJson(step, lamport, records)
+            }: _*))
+          case None =>
+            val recs = spaceRuntime.getLastArbitration
+            complete(Json.obj(
+              "registryEntries" -> Json.fromInt(com.realityengine.engine.ArbitrationRegistry.size),
+              "registrySource"  -> com.realityengine.engine.ArbitrationRegistry.source
+                                     .map(Json.fromString).getOrElse(Json.Null),
+              "shards"          -> Json.fromInt(com.realityengine.engine.ArbiterParallelism.shards),
+              "count"           -> Json.fromInt(recs.length),
+              "records"         -> arbitrationRecordsJson(recs, canonical = false)))
+        } } },
 
         // Perceptual simulation
         pathPrefix("perceptual-simulation") {

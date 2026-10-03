@@ -54,6 +54,15 @@ object Main extends App {
   val vectorStore  = new VectorStore()
   val engine       = new RealityEngine(vectorStore)
   val spaceRuntime    = new PerceptualSpaceRuntime(sys.env.getOrElse("VECTOR_DIMENSION", "7680").toIntOption.getOrElse(7680))
+  // The instance clock (RealityEngine_CI#296), before anything else is loaded:
+  // an allocated instance that cannot keep its clock, or whose UUID another
+  // live process holds, fails here rather than after the corpus load.
+  try spaceRuntime.useInstanceClock(com.realityengine.engine.InstanceClock.boot())
+  catch {
+    case e: Exception =>
+      System.err.println(s"Reality Engine startup failed: ${e.getMessage}")
+      sys.exit(1)
+  }
 
   // Share the engine's coverage registry so /api/perceive transitions
   // route through to /api/metrics without a second instance drifting.
