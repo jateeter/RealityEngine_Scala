@@ -10,7 +10,8 @@ import org.scalatest.wordspec.AnyWordSpec
   * A completion that names no sourceMappingId used to be filed under the
   * ACP/OpenClaw mapping: the MCP smoke's `region: [4200:4204]` landed on
   * [4210:4214], this runtime only, and sat in the OpenClaw seed's window.
-  * C++ `ingest_completion` is the reference behaviour these cases pin.
+  * These cases pin the resolution SURFACE_SPEC.md declares for completion
+  * ingest, which all three runtimes must agree on.
   */
 class CompletionResolutionSpec extends AnyWordSpec with Matchers {
   private def body(s: String): Json = parse(s).fold(throw _, identity)

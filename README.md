@@ -1,7 +1,8 @@
 # RealityEngine_Scala
 
-Scala implementation of the Reality Engine (RE) and Perception Engine (PE), and the
-active reference implementation for the suite. Black-box equivalent to
+Scala implementation of the Reality Engine (RE) and Perception Engine (PE). No
+runtime is a reference implementation: each is held to `RealityEngine_CI/SURFACE_SPEC.md`
+and to 3-of-3 agreement at every observation point. Black-box equivalent to
 [`RealityEngine_CPP`](../RealityEngine_CPP) (native C++) and
 [`RealityEngine_LSP`](../RealityEngine_LSP) (Common Lisp) on the same machine JSON
 corpus, governance contracts, and Prometheus metrics shape.
