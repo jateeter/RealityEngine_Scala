@@ -1673,8 +1673,14 @@ class PerceptionRoutes(
                     // registry can name up front; a sample whose mapping
                     // interpolates its type or source name declares here, still
                     // inactive, and the value below is what activates it.
+                    //
+                    // The declared sensorId is the source's id, as on C++ and
+                    // LSP (RealityEngine_CI#518): `healthkit.sleep` from
+                    // integrations.json survives registration on every runtime,
+                    // so a later K-line can re-attach to it. Only undeclared
+                    // identity is minted.
                     engine.declareSource(SensorSourceConfig(
-                      id          = "",
+                      id          = sensorId,
                       name        = name,
                       region      = region,
                       active      = false,
