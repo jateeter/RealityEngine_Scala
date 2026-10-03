@@ -20,7 +20,7 @@ import akka.stream.scaladsl.{BroadcastHub, Keep, Source}
 import akka.stream.{Materializer, OverflowStrategy}
 import akka.http.scaladsl.model.sse.ServerSentEvent
 import akka.http.scaladsl.marshalling.sse.EventStreamMarshalling._
-import scala.concurrent.ExecutionContext
+import scala.concurrent.{ExecutionContext, Future}
 import scala.concurrent.duration._
 import scala.util.{Failure, Success, Try}
 import java.io.File
@@ -39,6 +39,19 @@ class Routes(
   auditCfg:    AuditConfig,
   machinesDir: String = com.realityengine.MachineCorpus.dir
 )(implicit system: ActorSystem, ec: ExecutionContext) {
+
+  // GET /api/engine/steps/:n/pair window (RealityEngine_CI#375): the default and
+  // the largest a caller may ask for. SURFACE_SPEC.md states both.
+  private val StepPairDefaultTimeoutMs = 5000L
+  private val StepPairMaxTimeoutMs     = 60000L
+  // Waiters block on the runtime's step monitor, so they get their own threads
+  // rather than Akka's dispatcher (daemon: never holds the JVM open).
+  private lazy val stepWaitEc: ExecutionContext = ExecutionContext.fromExecutorService(
+    java.util.concurrent.Executors.newCachedThreadPool { (r: Runnable) =>
+      val t = new Thread(r, "re-step-wait")
+      t.setDaemon(true)
+      t
+    })
 
   // Canonical JSON key order: sorted.  C++ emits every object key-sorted
   // (its Json::Object is a std::map); Scala and LSP preserved insertion order,
@@ -1252,6 +1265,27 @@ class Routes(
             } } },
             path("isre-history") { get { parameters("from".as[Int].?, "limit".as[Int].?) { (from, limit) =>
               complete(Json.obj("history" -> spaceRuntime.getIsreHistory(from.getOrElse(0), limit.getOrElse(0)).asJson))
+            } } },
+            // The step completion point (RealityEngine_CI#375, SURFACE_SPEC.md
+            // "Step completion"): the (ISRE, OSRE) pair for step n, waiting up to
+            // timeoutMs on the runtime's step monitor. The wait blocks, so it runs
+            // on stepWaitEc, never Akka's dispatcher.
+            path("steps" / Segment / "pair") { raw => get { parameters("timeoutMs".?) { rawTimeout =>
+              def error(status: StatusCode, message: String) =
+                complete(status -> Json.obj("error" -> Json.fromString(message)))
+              val step    = raw.toLongOption.filter(_ >= 0)
+              val timeout = rawTimeout.fold(Option(StepPairDefaultTimeoutMs))(_.toLongOption).filter(t => t >= 0 && t <= StepPairMaxTimeoutMs)
+              (step, timeout) match {
+                case (None, _) => error(StatusCodes.BadRequest, "step must be a non-negative integer")
+                case (_, None) => error(StatusCodes.BadRequest, s"timeoutMs must be an integer in [0, $StepPairMaxTimeoutMs]")
+                case (Some(n), Some(t)) =>
+                  onSuccess(Future(spaceRuntime.awaitStepPair(n, t))(stepWaitEc)) {
+                    case Right((isre, osre)) =>
+                      complete(Json.obj("stepNumber" -> Json.fromLong(n), "isre" -> isre.asJson, "osre" -> osre.asJson))
+                    case Left(408) => error(StatusCodes.RequestTimeout, s"step $n not resolved within $t ms")
+                    case Left(_)   => error(StatusCodes.Gone, s"step $n is no longer retained")
+                  }
+              }
             } } }
           )
         },

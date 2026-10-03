@@ -76,6 +76,18 @@ Use Metals with `sbt`. Import both root and `perception-engine` builds when work
 - Run PE `make` targets for standalone PE changes.
 - Do not commit generated runtime state or local data unless explicitly requested.
 
+## Step completion point (RealityEngine_CI#375)
+
+`runPhases` composes every machine from ISRE(n) in parallel — a `Future` per
+machine on `ArbiterParallelism.ec`, joined by `Await.result(Future.sequence(...))`
+— with the semantic audit off, then records each machine's audit
+(`Machine.recordSemanticAudit`), coverage and fold serially in canonical order,
+and only then resolves OSRE(n). One monitor, `stepLock`, guards every step,
+reset, configure and trajectory-history read; the commit sets `completedStep` and
+`notifyAll`s. `awaitStepPair` waits on it (timed `wait`), and
+`GET /api/engine/steps/:n/pair?timeoutMs=` runs that wait on its own daemon
+pool, never Akka's dispatcher. Steps are numbered from 0.
+
 ## Standing rules — authoritative in `../RealityEngine_CI/docs/ENGINEERING_CONTRACT.md`
 
 These apply here and are **not** restated in this file. The table is an index
