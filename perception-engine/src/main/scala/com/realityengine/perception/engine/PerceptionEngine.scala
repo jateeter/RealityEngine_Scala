@@ -21,6 +21,12 @@ class PerceptionEngine(initialDimension: Int = sys.env.getOrElse("VECTOR_DIMENSI
   private var sources: Map[String, SourceConfig]        = Map.empty
   private var testStep: Map[String, Int]                = Map.empty
   private var walkState: Map[String, Vector[Double]]    = Map.empty
+  // The OSRE cells of the last push: cell -> the writing machine's declared
+  // outputMergeTransformation (ARBITER_CONTRACT.md §4.4b).
+  private var osreFold: Map[Int, String]                = Map.empty
+
+  /** Set from each push's mergeBatch; see OsreFold. */
+  def setOsreFold(cells: Map[Int, String]): Unit = synchronized { osreFold = cells }
   // Activation instants (ARBITER_CONTRACT.md §4.4b): the globalStep at which
   // each source last became active. Kept beside the source rather than on it,
   // because SourceConfig is what GET /api/sources serialises.
@@ -452,6 +458,9 @@ class PerceptionEngine(initialDimension: Int = sys.env.getOrElse("VECTOR_DIMENSI
   def assembleVector(): Vector[Double] = synchronized {
     val out    = persistentVector.clone()
     val outLen = out.length
+    // Which cells a source wrote this instant: only those are folded with the
+    // OSRE term; a cell only the OSRE holds keeps its value.
+    val sourceWrote = new Array[Boolean](outLen)
     // Canonical order, not Map order. Two machines may declare the same input
     // region — AGX032 and AGX054 both map [228:232] — and a source owns its
     // region, so where regions overlap the last writer wins. Iterating `sources`
@@ -499,10 +508,18 @@ class PerceptionEngine(initialDimension: Int = sys.env.getOrElse("VECTOR_DIMENSI
       if (offset < outLen) {
         var i = 0
         while (i < length && i < values.length && offset + i < outLen) {
-          out(offset + i) = math.max(0.0, math.min(1.0, values(i)))
+          if (offset + i >= 0) {
+            out(offset + i) = math.max(0.0, math.min(1.0, values(i)))
+            sourceWrote(offset + i) = true
+          }
           i += 1
         }
       }
+    }
+    // A source on an OSRE cell is folded with the OSRE value by the writing
+    // machine's operator rather than replacing it (§4.4b).
+    for ((cell, transformation) <- osreFold if cell >= 0 && cell < outLen && sourceWrote(cell)) {
+      out(cell) = math.max(0.0, math.min(1.0, OsreFold(transformation, out(cell), persistentVector(cell))))
     }
     out.toVector
   }
@@ -620,6 +637,8 @@ class PerceptionEngine(initialDimension: Int = sys.env.getOrElse("VECTOR_DIMENSI
     // here to remove. Reset stays membership-neutral in the strict sense.
 
     persistentVector = new Array[Double](_vectorDimension)
+    // No push since the reset, so no OSRE term to fold with.
+    osreFold = Map.empty
     val now = System.currentTimeMillis()
     for ((id, src) <- sources) {
       // Run state first — the flags below are validated against the state the
