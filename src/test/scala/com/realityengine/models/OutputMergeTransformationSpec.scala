@@ -11,7 +11,7 @@ import org.scalatest.matchers.should.Matchers
  * The properties here are the ones a live probe cannot establish. Closure and
  * symmetry hold for every collection or for none, and a single run exercises
  * one collection — so they are checked by exhaustion over the chain, the same
- * way the reference implementation checks them, rather than sampled. Symmetry
+ * way `scripts/experiment-mv-transforms.py` checks them, rather than sampled. Symmetry
  * in particular is invisible in any single run and is the whole basis for
  * folding a collection that carries no order.
  */

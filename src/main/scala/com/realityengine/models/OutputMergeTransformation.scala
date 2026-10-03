@@ -20,7 +20,7 @@ package com.realityengine.models
   *
   * Defined in RealityEngine_Machines `semantics/ontology/re-core.ttl`; that
   * ontology is the definition and this is an implementation of it. The chain
-  * family's reference implementation, with its properties verified by
+  * family's executable definition, with its properties verified by
   * exhaustion rather than asserted, is RealityEngine_CI
   * `scripts/experiment-mv-transforms.py`. This agrees with it.
   */
@@ -360,8 +360,8 @@ object OutputMergeTransformation {
     * A strict simultaneous-onset threshold. It rises above 0 only on
     * near-unanimous high agreement, and one absolute disagreement extinguishes
     * it: [3,3,2] → 2 but [3,3,0] → 0 on the chain {0..3}. NOT idempotent, by
-    * design. It is the De Morgan dual of ⊕ under ¬x = k − x, verified in the
-    * reference implementation.
+    * design. It is the De Morgan dual of ⊕ under ¬x = k − x, verified by
+    * exhaustion in RealityEngine_CI `scripts/experiment-mv-transforms.py`.
     *
     * O(n) per cell, single pass sum. The threshold k(n−1) is a function of n and
     * k alone and is computed once per fold, above, rather than per cell. Two
