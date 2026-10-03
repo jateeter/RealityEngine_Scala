@@ -102,7 +102,7 @@ object MachineLoader {
     }
 
     val machine = new Machine(name, description, metadata, arbiterRule, mapping,
-      id.getOrElse(s"machine-${System.currentTimeMillis()}-${UUID.randomUUID().toString.take(8)}"))
+      id.getOrElse(s"machine-${UUID.randomUUID()}"))
     machine.matchAlgorithm = matchAlgo
     // Read at intern time so the machine carries it from the moment it loads.
     // Absent means "or", which is what every runtime already does, so no corpus
