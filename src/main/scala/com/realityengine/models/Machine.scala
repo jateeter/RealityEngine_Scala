@@ -21,11 +21,8 @@ class Machine(
   val metadata:         Map[String, Json]         = Map.empty,
   arbiterRule:          ArbiterRule               = ArbiterRule.PASSTHROUGH,
   var perceptualMapping: Option[PerceptualMapping] = None,
-  // Minted identity is `<prefix>-<uuid>` on every runtime (RealityEngine_CI#518):
-  // unique across the universe, and recognisable by shape, since corpus ids are
-  // never UUIDs. `machine-<millis>-<uuid8>` differed in length from the other
-  // runtimes' formats and made byte comparisons fail on identity alone.
-  val id:               String                    = s"machine-${java.util.UUID.randomUUID()}"
+  // Minted identity: `machine-<time-ordered uuid>` (MintedIds, RealityEngine_CI#518, #281).
+  val id:               String                    = MintedIds.mint("machine")
 ) {
   var matchAlgorithm: ComparatorType = ComparatorType.GTE
   // How this machine folds its collection of potential outputs into the one
