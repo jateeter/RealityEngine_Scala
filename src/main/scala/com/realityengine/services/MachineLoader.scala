@@ -90,8 +90,16 @@ object MachineLoader {
     }
 
     val metadataBase = m.downField("metadata").as[Map[String, Json]].getOrElse(Map.empty)
-    val inputSeqsJson = m.downField("inputSequences").as[Json].getOrElse(Json.arr())
-    val metadata     = metadataBase + ("inputSequences" -> inputSeqsJson)
+    // Carried into metadata only when the machine declares it. Defaulting it to
+    // [] invented a key C++ and LSP do not, on every machine imported without
+    // one (localAI's topology machines): `GET /api/machines` and
+    // `/api/machine-graph` then differed by `"inputSequences":[]` per machine,
+    // and a value the machine carried inside its own metadata was overwritten.
+    // Every reader already defaults an absent key.
+    val metadata = m.downField("inputSequences").as[Json].toOption match {
+      case Some(inputSeqs) => metadataBase + ("inputSequences" -> inputSeqs)
+      case None            => metadataBase
+    }
 
     val machine = new Machine(name, description, metadata, arbiterRule, mapping,
       id.getOrElse(s"machine-${System.currentTimeMillis()}-${UUID.randomUUID().toString.take(8)}"))

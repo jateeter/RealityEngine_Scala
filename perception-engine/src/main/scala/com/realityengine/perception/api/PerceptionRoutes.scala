@@ -1100,8 +1100,15 @@ class PerceptionRoutes(
             case None =>
               complete(StatusCodes.NotFound -> Json.obj("error" -> "Source not found".asJson))
             case Some(existing) =>
-              // Merge patch fields onto existing
-              val merged = mergeSourcePatch(existing, body)
+              // Merge patch fields onto existing. A PATCH is a registration path
+              // like POST and gets the same rule: activation is earned, so
+              // `{"active": true}` on a sensor that has never reported stores
+              // false. Without it "All On" stored unfed sensors active; the read
+              // still reported them inactive (it validates), but assembly uses
+              // the stored flag, so each wrote zeros over its lane's seed — a
+              // 2-1 split against cpp and lsp on every localAI lane
+              // (RealityEngine_CI tree-to-pe-manager-equivalence).
+              val merged = engine.deriveSensorActivity(mergeSourcePatch(existing, body), System.currentTimeMillis())
               // The patch merges onto the *stored* source (engine.getSource) and
               // the response reports the *validated* one — a PATCH must be able
               // to set a flag the read then declines to report, not have a stale
