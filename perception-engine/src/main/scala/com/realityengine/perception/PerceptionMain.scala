@@ -90,6 +90,9 @@ object PerceptionMain extends App {
   val vectorDimension = sys.env.getOrElse("VECTOR_DIMENSION", "7680").toIntOption.getOrElse(7680)
   val store   = new SourceStore(dataPath)
   val engine  = new PerceptionEngine(vectorDimension)
+  // The fold applies a cell's declared arbitration rule (ARBITER_CONTRACT.md
+  // §4.4b, RealityEngine_CI#525), so the PE reads the registry the RE loads.
+  com.realityengine.perception.engine.FoldArbitration.load()
 
   if (!isFresh) {
     val loaded = store.load()

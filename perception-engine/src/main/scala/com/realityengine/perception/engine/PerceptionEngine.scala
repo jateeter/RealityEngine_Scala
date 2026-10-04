@@ -25,12 +25,16 @@ class PerceptionEngine(initialDimension: Int = sys.env.getOrElse("VECTOR_DIMENSI
   private var sources: Map[String, SourceConfig]        = Map.empty
   private var testStep: Map[String, Int]                = Map.empty
   private var walkState: Map[String, Vector[Double]]    = Map.empty
-  // The OSRE cells of the last push: cell -> the writing machine's declared
-  // outputMergeTransformation (ARBITER_CONTRACT.md §4.4b).
-  private var osreFold: Map[Int, String]                = Map.empty
+  // The OSRE cells of the last push: cell -> (writing machine's name, its
+  // declared outputMergeTransformation) (ARBITER_CONTRACT.md §4.4b).
+  private var osreFold: Map[Int, (String, String)]      = Map.empty
+  // Source-vs-OSRE folds of the last push assembly (§4.4b, CI#525).
+  private var lastFolds: Vector[Json]                   = Vector.empty
 
   /** Set from each push's mergeBatch; see OsreFold. */
-  def setOsreFold(cells: Map[Int, String]): Unit = synchronized { osreFold = cells }
+  def setOsreFoldCells(cells: Map[Int, (String, String)]): Unit = synchronized { osreFold = cells }
+  /** A bare operator per cell, no machine name. */
+  def setOsreFold(cells: Map[Int, String]): Unit = synchronized { osreFold = cells.map { case (c, t) => c -> ("", t) } }
   // Activation instants (ARBITER_CONTRACT.md §4.4b): the globalStep at which
   // each source last became active. Kept beside the source rather than on it,
   // because SourceConfig is what GET /api/sources serialises.
@@ -459,12 +463,18 @@ class PerceptionEngine(initialDimension: Int = sys.env.getOrElse("VECTOR_DIMENSI
    * Assemble the next push vector from persistentVector + active sources.
    * Pure read — does not modify persistentVector.
    */
-  def assembleVector(): Vector[Double] = synchronized {
+  def assembleVector(): Vector[Double] = synchronized { assembleWithFolds()._1 }
+
+  /** The assembled vector and every Source-vs-OSRE fold it made, ascending by
+    * cell. Only the push records the folds (recordContention). */
+  def assembleWithFolds(): (Vector[Double], Vector[Json]) = synchronized {
     val out    = persistentVector.clone()
     val outLen = out.length
     // Which cells a source wrote this instant: only those are folded with the
-    // OSRE term; a cell only the OSRE holds keeps its value.
+    // OSRE term; a cell only the OSRE holds keeps its value. `writer` is the
+    // source whose value landed -- the last writer in composition order.
     val sourceWrote = new Array[Boolean](outLen)
+    val writer      = new Array[(String, SourceConfig)](outLen)
     // Canonical order, not Map order. Two machines may declare the same input
     // region — AGX032 and AGX054 both map [228:232] — and a source owns its
     // region, so where regions overlap the last writer wins. Iterating `sources`
@@ -515,17 +525,60 @@ class PerceptionEngine(initialDimension: Int = sys.env.getOrElse("VECTOR_DIMENSI
           if (offset + i >= 0) {
             out(offset + i) = math.max(0.0, math.min(1.0, values(i)))
             sourceWrote(offset + i) = true
+            writer(offset + i) = (id, src)
           }
           i += 1
         }
       }
     }
-    // A source on an OSRE cell is folded with the OSRE value by the writing
-    // machine's operator rather than replacing it (§4.4b).
-    for ((cell, transformation) <- osreFold if cell >= 0 && cell < outLen && sourceWrote(cell)) {
-      out(cell) = math.max(0.0, math.min(1.0, OsreFold(transformation, out(cell), persistentVector(cell))))
+    // A source on an OSRE cell is folded with the OSRE value rather than
+    // replacing it: by the cell's declared arbitration rule where the registry
+    // declares one -- PRECEDENCE takes the higher-ranked provider's value whole,
+    // so a deterministic machine beats a generated source at any value
+    // (criterion 5a) -- and otherwise by the writing machine's operator
+    // (ARBITER_CONTRACT.md §4.4b, amended 2026-10-04, RealityEngine_CI#525).
+    val folds = Vector.newBuilder[Json]
+    for ((cell, (machine, transformation)) <- osreFold.toVector.sortBy(_._1)
+         if cell >= 0 && cell < outLen && sourceWrote(cell)) {
+      val s = out(cell)
+      val o = persistentVector(cell)
+      val (id, src) = writer(cell)
+      val ref = sourceRef(id, src)
+      val origin = src match { case x: SensorSourceConfig => x.origin; case _ => None }
+      val provider = FoldArbitration.sourceProvider(origin, ref.kind)
+      val entry = FoldArbitration.entryFor(cell)
+      // The declared rule applies only to a provider the cell names. An unnamed
+      // provider keeps T_M and is flagged for review: it is either ranked
+      // explicitly or placed in the unnamed-provider trustability ranking,
+      // never overridden by default (owner decision 2026-10-04, CI#525).
+      val named = entry.exists(_.providerRanks.contains(provider))
+      val ranks = entry.filter(e => e.rule == "PRECEDENCE" && named).map(e =>
+        (FoldArbitration.rank("machine", e), FoldArbitration.rank(provider, e)))
+      val byRule = ranks.exists { case (m, p) => m != p }
+      val osreWins = ranks.exists { case (m, p) => m > p }
+      val resolved = if (byRule) (if (osreWins) o else s) else OsreFold(transformation, s, o)
+      out(cell) = math.max(0.0, math.min(1.0, resolved))
+      val kept =
+        if (byRule) (if (osreWins) "osre" else "source")
+        else if (resolved == o && resolved == s) "both"
+        else if (resolved == o) "osre"
+        else if (resolved == s) "source"
+        else "combined"
+      val how =
+        if (byRule) List("resolution" -> Json.fromString("declared-rule"), "rule" -> Json.fromString(entry.get.rule))
+        else List("resolution" -> Json.fromString("osre-fold"), "operator" -> Json.fromString(transformation)) ++
+          entry.map(e => "declaredRule" -> Json.fromString(e.rule)).toList ++
+          entry.filter(_ => !named).map(_ => "review" -> Json.fromString("provider-unranked")).toList
+      folds += Json.fromFields(List("cell" -> Json.fromInt(cell)) ++ how ++ List(
+        "osre" -> Json.obj("machine" -> Json.fromString(machine), "provider" -> Json.fromString("machine"),
+                           "value" -> Json.fromDoubleOrNull(o)),
+        "source" -> Json.obj("id" -> Json.fromString(id), "name" -> Json.fromString(ref.name),
+                             "kind" -> Json.fromString(ref.kind), "provider" -> Json.fromString(provider),
+                             "value" -> Json.fromDoubleOrNull(s)),
+        "resolved" -> Json.fromDoubleOrNull(resolved),
+        "kept" -> Json.fromString(kept)))
     }
-    out.toVector
+    (out.toVector, folds.result())
   }
 
   /** Sync the persistent base vector from the RE post-merge state.  RE may
@@ -662,6 +715,7 @@ class PerceptionEngine(initialDimension: Int = sys.env.getOrElse("VECTOR_DIMENSI
     // records and counters start over (§4.4b).
     activatedAt          = sources.keys.map(_ -> 0L).toMap
     lastContention       = Vector.empty
+    lastFolds            = Vector.empty
     contentionTransition = 0L
     contentionCounters   = Map.empty
   }
@@ -740,9 +794,14 @@ class PerceptionEngine(initialDimension: Int = sys.env.getOrElse("VECTOR_DIMENSI
   /** Record the contention of the assembly a push sends, and count it. Push path only. */
   def recordContention(): Unit = synchronized {
     lastContention       = sourceContention()
+    lastFolds            = assembleWithFolds()._2
     contentionTransition = globalStep
-    val lost      = lastContention.flatMap(_.suppressed.map(_.id)).toSet
-    val contended = lastContention.flatMap(c => c.winner.id +: c.suppressed.map(_.id)).toSet
+    // A fold counts toward its source's `contended`, and toward `suppressed`
+    // when the OSRE side was kept (§4.4b, CI#525).
+    def foldSource(f: Json) = f.hcursor.downField("source").get[String]("id").getOrElse("")
+    val foldLost  = lastFolds.filter(_.hcursor.get[String]("kept").contains("osre")).map(foldSource).toSet
+    val lost      = lastContention.flatMap(_.suppressed.map(_.id)).toSet ++ foldLost
+    val contended = lastContention.flatMap(c => c.winner.id +: c.suppressed.map(_.id)).toSet ++ lastFolds.map(foldSource)
     for (id <- contended) {
       val (c, s) = contentionCounters.getOrElse(id, (0L, 0L))
       contentionCounters = contentionCounters + (id -> ((c + 1, if (lost(id)) s + 1 else s)))
@@ -759,6 +818,7 @@ class PerceptionEngine(initialDimension: Int = sys.env.getOrElse("VECTOR_DIMENSI
       "cells" -> Json.fromValues(lastContention.map(c => Json.obj(
         "cell" -> Json.fromInt(c.cell), "resolution" -> Json.fromString(c.resolution),
         "winner" -> ref(c.winner), "suppressed" -> Json.fromValues(c.suppressed.map(ref))))),
+      "folds" -> Json.fromValues(lastFolds),
       "counters" -> Json.fromValues(getSources.flatMap { s =>
         contentionCounters.get(s.id).map { case (c, l) =>
           Json.obj("id" -> Json.fromString(s.id), "name" -> Json.fromString(s.name),
