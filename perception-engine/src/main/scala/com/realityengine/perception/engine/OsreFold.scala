@@ -27,7 +27,12 @@ object OsreFold {
     * writing machine's operator. Where several machines' outputs cover a cell,
     * the first by machine NAME decides — ids are minted per runtime, so id
     * order would differ between runtimes. */
-  def cells(step: Json, operator: String => Option[(String, String)]): Map[Int, String] = {
+  def cells(step: Json, operator: String => Option[(String, String)]): Map[Int, String] =
+    cellsWithMachine(step, operator).view.mapValues(_._2).toMap
+
+  /** As `cells`, keeping the writing machine's name beside its operator: the
+    * name goes into the fold's record (RealityEngine_CI#525). */
+  def cellsWithMachine(step: Json, operator: String => Option[(String, String)]): Map[Int, (String, String)] = {
     val ops = step.hcursor.downField("mergeBatch").as[Vector[Json]].getOrElse(Vector.empty)
     val byCell = scala.collection.mutable.Map.empty[Int, (String, String)]
     for (op <- ops) {
@@ -43,6 +48,6 @@ object OsreFold {
         }
       }
     }
-    byCell.view.mapValues(_._2).toMap
+    byCell.toMap
   }
 }

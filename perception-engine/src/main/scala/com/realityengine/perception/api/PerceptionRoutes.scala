@@ -810,7 +810,7 @@ class PerceptionRoutes(
         }
         // The OSRE cells this push produced, read before the reply is narrowed
         // (ARBITER_CONTRACT.md §4.4b).
-        engine.setOsreFold(OsreFold.cells(parsed, machineCorpus.get().foldOperator))
+        engine.setOsreFoldCells(OsreFold.cellsWithMachine(parsed, machineCorpus.get().foldOperator))
 
         // Consume the Reality Engine's mergeBatch; do not rebuild it.
         //
