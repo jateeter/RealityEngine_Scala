@@ -88,6 +88,31 @@ reset, configure and trajectory-history read; the commit sets `completedStep` an
 `GET /api/engine/steps/:n/pair?timeoutMs=` runs that wait on its own daemon
 pool, never Akka's dispatcher. Steps are numbered from 0.
 
+## Arbitration retention and the instance clock (RealityEngine_CI#296)
+
+The commit (`recordTrajectory`, under `stepLock`) also ticks the instance's
+Lamport clock and, with `arbitrationRetention` on, keeps `lastArbitration` in
+`arbitrationSteps` (a `TreeMap` keyed by step) with the Lamport value, before
+`notifyAll`. A reset clears `lastArbitration` and the retained steps; the clock
+keeps its value. `GET /api/arbitration` answers the legacy object while retention
+is off (its bytes unchanged) and the window's steps as a list while it is on
+(`?step=N` reads one; 404/410/409/400): records by cell, contributions by
+`(provider, originId, cesId, outputVectorId)`, and a machine contribution's
+`outputVectorId` as the contract's `"0"` (legacy keeps `null`). Controls
+`arbitrationRetention` (default `false`) and `arbitrationWindow` (default 1,
+max 1024).
+
+The clock is `{instance, lamport, step}` (`GET /api/engine/clock`,
+`engine/InstanceClock.scala`). A UUID belongs to an **instance**, never an
+engine type or image: CI allocates it (`INSTANCE_UUID`); without one the runtime
+mints a v7 UUID, and `Main` boots it before the corpus loads. `lamport` ticks
+once per committed step and never resets. An allocated instance keeps
+`<uuid>.lamport` in `INSTANCE_CLOCK_DIR` (default `~/.reality-engine/clock/`) —
+a high-water mark reserved 1024 ahead, written (temp + atomic move) before any
+tick past it — and holds `FileChannel.tryLock` on `<uuid>.lock` for its life.
+That lock is `fcntl`-based, so it excludes the C++ and LSP runtimes' `lockf` as
+well: no two live instances of any engine type can share a UUID.
+
 ## Standing rules — authoritative in `../RealityEngine_CI/docs/ENGINEERING_CONTRACT.md`
 
 These apply here and are **not** restated in this file. The table is an index
