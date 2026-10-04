@@ -547,7 +547,12 @@ class PerceptionEngine(initialDimension: Int = sys.env.getOrElse("VECTOR_DIMENSI
       val origin = src match { case x: SensorSourceConfig => x.origin; case _ => None }
       val provider = FoldArbitration.sourceProvider(origin, ref.kind)
       val entry = FoldArbitration.entryFor(cell)
-      val ranks = entry.filter(_.rule == "PRECEDENCE").map(e =>
+      // The declared rule applies only to a provider the cell names. An unnamed
+      // provider keeps T_M and is flagged for review: it is either ranked
+      // explicitly or placed in the unnamed-provider trustability ranking,
+      // never overridden by default (owner decision 2026-10-04, CI#525).
+      val named = entry.exists(_.providerRanks.contains(provider))
+      val ranks = entry.filter(e => e.rule == "PRECEDENCE" && named).map(e =>
         (FoldArbitration.rank("machine", e), FoldArbitration.rank(provider, e)))
       val byRule = ranks.exists { case (m, p) => m != p }
       val osreWins = ranks.exists { case (m, p) => m > p }
@@ -562,7 +567,8 @@ class PerceptionEngine(initialDimension: Int = sys.env.getOrElse("VECTOR_DIMENSI
       val how =
         if (byRule) List("resolution" -> Json.fromString("declared-rule"), "rule" -> Json.fromString(entry.get.rule))
         else List("resolution" -> Json.fromString("osre-fold"), "operator" -> Json.fromString(transformation)) ++
-          entry.map(e => "declaredRule" -> Json.fromString(e.rule)).toList
+          entry.map(e => "declaredRule" -> Json.fromString(e.rule)).toList ++
+          entry.filter(_ => !named).map(_ => "review" -> Json.fromString("provider-unranked")).toList
       folds += Json.fromFields(List("cell" -> Json.fromInt(cell)) ++ how ++ List(
         "osre" -> Json.obj("machine" -> Json.fromString(machine), "provider" -> Json.fromString("machine"),
                            "value" -> Json.fromDoubleOrNull(o)),

@@ -32,7 +32,8 @@ class FoldDeclaredRuleSpec extends AnyFlatSpec with Matchers with BeforeAndAfter
   "the fold" should "apply a declared PRECEDENCE, keep T_M elsewhere, and record every fold" in {
     FoldArbitration.install(Map(
       50 -> FoldArbitration.Entry("PRECEDENCE", Map("acp" -> 1, "machine" -> 3)),
-      52 -> FoldArbitration.Entry("PRECEDENCE", Map("acp" -> 3, "machine" -> 3))))
+      52 -> FoldArbitration.Entry("PRECEDENCE", Map("acp" -> 3, "machine" -> 3)),
+      53 -> FoldArbitration.Entry("PRECEDENCE", Map("acp" -> 1, "machine" -> 3))))
     val engine = new PerceptionEngine(64)
     engine.updateFromPerceptualSpace(Vector.tabulate(64)(i => if (i == 51) 0.2 else 0.0))
     engine.addSource(SensorSourceConfig(
@@ -40,13 +41,18 @@ class FoldDeclaredRuleSpec extends AnyFlatSpec with Matchers with BeforeAndAfter
       sensorId = "agent", lastValue = Vector.empty, lastUpdated = None, ttlMs = 300000L,
       origin = Some("acp.openclaw.target.assessment")))
     engine.updateSensorValue("agent", Vector(1.0, 1.0, 1.0)) shouldBe true
-    engine.setOsreFoldCells(Map(50 -> ("Peer", "or"), 51 -> ("Peer", "or"), 52 -> ("Peer", "or")))
+    // A seed the cell does not name, on declared cell 53: it keeps T_M.
+    engine.addSource(TestSourceConfig(
+      id = "seed", name = "unnamed seed", region = Region(53, 1), active = true,
+      machineId = "m", machineName = "m", sequenceName = "s", inputs = Vector(Vector(1.0)), loop = true))
+    engine.setOsreFoldCells(Map(50 -> ("Peer", "or"), 51 -> ("Peer", "or"), 52 -> ("Peer", "or"), 53 -> ("Peer", "or")))
 
     val (v, folds) = engine.assembleWithFolds()
     near(v(50), 0.0) shouldBe true // PRECEDENCE: the machine's 0 beats the agent's 1 (5a)
     near(v(51), 1.0) shouldBe true // undeclared: T_M = max(1, 0.2)
     near(v(52), 1.0) shouldBe true // equal ranks fall back to T_M
-    folds.map(_.hcursor.get[Int]("cell").toOption.get) shouldBe Vector(50, 51, 52)
+    near(v(53), 1.0) shouldBe true // an unnamed provider keeps T_M on a declared cell
+    folds.map(_.hcursor.get[Int]("cell").toOption.get) shouldBe Vector(50, 51, 52, 53)
     def str(i: Int, k: String) = folds(i).hcursor.get[String](k).toOption
     def side(i: Int, s: String, k: String) = folds(i).hcursor.downField(s).get[String](k).toOption
     str(0, "resolution") shouldBe Some("declared-rule")
@@ -58,10 +64,12 @@ class FoldDeclaredRuleSpec extends AnyFlatSpec with Matchers with BeforeAndAfter
     str(1, "operator") shouldBe Some("or")
     str(1, "kept") shouldBe Some("source")
     str(2, "declaredRule") shouldBe Some("PRECEDENCE")
+    str(3, "review") shouldBe Some("provider-unranked")
+    side(3, "source", "provider") shouldBe Some("synthetic")
 
     engine.recordContention()
     val json = engine.contentionJson
-    json.hcursor.downField("folds").focus.flatMap(_.asArray).map(_.size) shouldBe Some(3)
+    json.hcursor.downField("folds").focus.flatMap(_.asArray).map(_.size) shouldBe Some(4)
     val counter = json.hcursor.downField("counters").downN(0)
     counter.get[Long]("contended") shouldBe Right(1L)
     counter.get[Long]("suppressed") shouldBe Right(1L)
