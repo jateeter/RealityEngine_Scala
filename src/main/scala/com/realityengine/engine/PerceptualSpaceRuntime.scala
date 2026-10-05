@@ -215,6 +215,29 @@ class PerceptualSpaceRuntime(dimension: Int = sys.env.getOrElse("VECTOR_DIMENSIO
   private var arbitrationSteps     =
     scala.collection.immutable.TreeMap.empty[Long, (Long, List[Arbiter.ArbitrationRecord])]
 
+  // Step phase timing (SURFACE_SPEC.md, "phaseDetail"): the five universal step
+  // phases, each the span between two declared boundaries (B0 step start, B1
+  // ISRE captured, B2 every composer joined, B3 OSRE resolved, B4 pair
+  // committed, B5 completion published), summed in nanoseconds over the steps
+  // measured while phaseDetail is on. stepPhaseActive is decided at B0, so a
+  // toggle mid-step cannot split one step's phases. Guarded by stepLock, which
+  // every step holds.
+  private var phaseDetail     = false
+  private val stepPhaseNanos  = new Array[Long](5)
+  private var stepDetailSteps = 0L
+  private var stepPhaseActive = false
+  private var stepPhaseMark   = 0L
+  def getPhaseDetail: Boolean = stepLock.synchronized(phaseDetail)
+  def setPhaseDetail(on: Boolean): Unit = stepLock.synchronized { phaseDetail = on }
+  /** (nanoseconds per universal phase, steps measured). */
+  def stepPhaseTimings: (Vector[Long], Long) = stepLock.synchronized((stepPhaseNanos.toVector, stepDetailSteps))
+  private def tickStepPhase(phase: Int): Unit =
+    if (stepPhaseActive) {
+      val now = System.nanoTime()
+      stepPhaseNanos(phase) += now - stepPhaseMark
+      stepPhaseMark = now
+    }
+
   def getArbitrationRetention: Boolean = stepLock.synchronized(arbitrationRetention)
   def getArbitrationWindow: Int        = stepLock.synchronized(arbitrationWindow)
 
@@ -344,6 +367,8 @@ class PerceptualSpaceRuntime(dimension: Int = sys.env.getOrElse("VECTOR_DIMENSIO
   }
 
   private def runPhases(stepNum: Int, matchOverride: Option[ComparatorType] = None): SimulationStep = {
+    stepPhaseActive = phaseDetail                       // B0: the step starts
+    if (stepPhaseActive) stepPhaseMark = System.nanoTime()
     val mappedMachines = Machine.inCanonicalOrder(machines.values.filter(_.perceptualMapping.isDefined))
 
     // Phase 1: snapshot + re-apply latched event bits
@@ -357,6 +382,7 @@ class PerceptualSpaceRuntime(dimension: Int = sys.env.getOrElse("VECTOR_DIMENSIO
     // step n-1 is already merged in; the gap between this and the seed is what
     // arbitration did.
     val isre = sparseTrajectory(stepNum, perceptualSpace.getPerceptualVector)
+    tickStepPhase(0)                                    // B1: ISRE captured
 
     val inputSnapshots: Map[String, Vector[Double]] =
       mappedMachines.map(m => m.id -> perceptualSpace.extractMachineInput(m.perceptualMapping.get)).toMap
@@ -398,6 +424,7 @@ class PerceptualSpaceRuntime(dimension: Int = sys.env.getOrElse("VECTOR_DIMENSIO
       ).toMap
     }
 
+    tickStepPhase(1)                                    // B2: every composer joined
     for (machine <- mappedMachines) {
       val transition   = composed(machine.id)
       machine.recordSemanticAudit(transition)
@@ -650,6 +677,7 @@ class PerceptualSpaceRuntime(dimension: Int = sys.env.getOrElse("VECTOR_DIMENSIO
     })
     val osre = TrajectoryEntry(stepNum, perceptualSpace.getPerceptualVector.length,
                                osreCells.toList.sortBy(_.index))
+    tickStepPhase(2)                                    // B3: OSRE resolved
     lastArbitration = records.toList
     val eventBusWrites = applyEventBus(firedSequences.toSeq)
 
@@ -726,9 +754,12 @@ class PerceptualSpaceRuntime(dimension: Int = sys.env.getOrElse("VECTOR_DIMENSIO
       arbitrationSteps = arbitrationSteps.updated(step, (tick, lastArbitration))
       pruneArbitrationSteps(step)
     }
+    tickStepPhase(3)                                    // B4: pair committed
     // The pair is committed: the step's completion point (#375).
     completedStep = step
     stepLock.notifyAll()
+    tickStepPhase(4)                                    // B5: completion published
+    if (stepPhaseActive) { stepDetailSteps += 1; stepPhaseActive = false }
   }
 
   // ── Auto-play (synchronous scheduler stub) ────────────────────────────────
