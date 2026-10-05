@@ -588,6 +588,9 @@ class Routes(
         () => { ref.set(declaredDefault); current() })
     }
 
+    def phaseDetailJson(): Json =
+      controlJson("phaseDetail", "engine", Json.fromBoolean(spaceRuntime.getPhaseDetail), Json.False)
+
     def historyLimitJson(): Json =
       controlJson("historyLimit", "engine", Json.fromInt(historyLimitRef.get()), Json.fromInt(250))
 
@@ -632,6 +635,13 @@ class Routes(
           }
         },
         () => { historyLimitRef.set(250); historyLimitJson() }),
+      // Step phase timing on every runtime (SURFACE_SPEC.md, "phaseDetail").
+      EngineControl("phaseDetail", "engine", () => phaseDetailJson(),
+        body => body.hcursor.get[Boolean]("value").toOption match {
+          case None     => Left(ControlRefusal("phaseDetail requires a boolean `value`", StatusCodes.BadRequest))
+          case Some(on) => spaceRuntime.setPhaseDetail(on); Right(phaseDetailJson())
+        },
+        () => { spaceRuntime.setPhaseDetail(false); phaseDetailJson() }),
       booleanControl("includeActiveRegions", includeActiveRegionsRef, true),
       booleanControl("includeMachineResults", includeMachineResultsRef, true),
       booleanControl("includePerceptualSpace", includePerceptualSpaceRef, true),
@@ -970,6 +980,21 @@ class Routes(
         emit("ces_sequence_outputs_total", c.toDouble,
              Map("machine_id" -> parts(0), "machine" -> parts(1), "sequence" -> parts(2)))
     }
+
+    // ── Step phase timing (SURFACE_SPEC.md, "phaseDetail") ─────────────────
+    // The five universal phases, absent while the gate is off; the gauge always.
+    if (spaceRuntime.getPhaseDetail) {
+      val (nanos, steps) = spaceRuntime.stepPhaseTimings
+      emitMeta("re_step_phase_seconds_total", "Wall-clock seconds per step phase, summed over measured steps.", "counter")
+      List("step.isre_capture", "step.compose", "step.resolve", "step.commit", "step.publish")
+        .zipWithIndex.foreach { case (name, k) =>
+          emit("re_step_phase_seconds_total", nanos(k) / 1e9, Map("phase" -> name))
+        }
+      emitMeta("re_step_phase_detail_steps_total", "Steps the universal step phases were measured over.", "counter")
+      emit("re_step_phase_detail_steps_total", steps.toDouble)
+    }
+    emitMeta("re_step_phase_detail", "Whether step phase timing (phaseDetail) is on.", "gauge")
+    emit("re_step_phase_detail", if (spaceRuntime.getPhaseDetail) 1.0 else 0.0)
 
     // ── Runtime parity gauges — cross-runtime-parity.json dashboard ────────
     val vectorDim = spaceRuntime.getPerceptualSpace.getPerceptualVector.length
