@@ -947,7 +947,7 @@ class PerceptionRoutes(
             // The metric stays a timestamp; it now reads the one inside the step.
             lastPushMs         = lastPush.get().hcursor.get[Long]("timestamp").getOrElse(0L),
             auditBufferRecords = semanticAudit.size(),
-          )))
+          ) + SemanticMetrics.renderMqtt(mqttBridgeRef.get())))
       }
     },
 
