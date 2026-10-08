@@ -179,4 +179,37 @@ object SemanticMetrics {
 
     sb.result()
   }
+
+  /**
+   * The MQTT bridge block, PE_METRICS_CONTRACT.md "MQTT bridge": the names,
+   * HELP text and order the TypeScript PE emits, so the Semantic Guardrails
+   * MQTT panels read every runtime (RealityEngine_Scala#186). A disabled
+   * bridge emits the two gauges at 0 and no counters, as there.
+   */
+  def renderMqtt(bridge: Option[com.realityengine.perception.mqtt.MqttBridge]): String = {
+    val sb = new StringBuilder
+    bridge match {
+      case None =>
+        sb ++= line("mqtt_bridge_enabled", "MQTT bridge is configured (1) or disabled (0).", "gauge", Nil, 0L)
+        sb ++= line("mqtt_bridge_connected", "MQTT bridge is currently connected to the broker (1/0).", "gauge", Nil, 0L)
+      case Some(b) =>
+        val s = b.stats
+        sb ++= line("mqtt_bridge_enabled", "MQTT bridge is configured (1) or disabled (0).", "gauge", Nil, 1L)
+        sb ++= line("mqtt_bridge_connected", "MQTT bridge is currently connected to the broker (1/0).", "gauge", Nil,
+          if (b.isConnected) 1L else 0L)
+        sb ++= line("mqtt_messages_received_total", "Total MQTT PUBLISH messages received.", "counter", Nil,
+          s.messagesReceived.get())
+        sb ++= line("mqtt_messages_mapped_total", "Total messages successfully mapped to a region.", "counter", Nil,
+          s.messagesMapped.get())
+        sb ++= line("mqtt_messages_rejected_total", "Total messages rejected by mapping/normalize.", "counter", Nil,
+          s.messagesRejected.get())
+        sb ++= line("mqtt_messages_unmatched_total", "Total messages whose topic matched no rule.", "counter", Nil,
+          s.messagesUnmatched.get())
+        sb ++= line("mqtt_pushes_triggered_total", "Total perceive pushes triggered by MQTT ingest.", "counter", Nil,
+          s.pushesTriggered.get())
+        sb ++= line("mqtt_mappings_loaded", "Number of mapping rules in the registry.", "gauge", Nil,
+          b.rules.length.toLong)
+    }
+    sb.result()
+  }
 }

@@ -223,8 +223,11 @@ class MqttBridge(
       } else {
         ruleMetrics.received.incrementAndGet()
         ruleMetrics.lastMessageAtMs.set(System.currentTimeMillis())
-        decodeAndIngest(rule, ruleMetrics, topic, payload)
-        rule.pushMode match {
+        // Only a mapped message asks for a push, as in the C++, LSP and
+        // TypeScript bridges. A rejected one wrote nothing, so a push for it
+        // stepped the engine on unchanged input; mqtt_pushes_triggered_total
+        // made the difference visible (RealityEngine_Scala#186).
+        if (decodeAndIngest(rule, ruleMetrics, topic, payload)) rule.pushMode match {
           case "immediate" => anyImmediate = true
           case "debounced" => if (rule.debounceMs < minDebounce) minDebounce = rule.debounceMs
           case _           => // manual — no push
@@ -242,27 +245,32 @@ class MqttBridge(
     }
   }
 
+  /** True when the message was mapped and ingested; false when rejected. */
   private def decodeAndIngest(rule: MqttMappingRule, ruleMetrics: MqttRuleMetrics,
-                               topic: String, payload: String): Unit = {
+                               topic: String, payload: String): Boolean = {
     extractValues(rule, payload) match {
       case Left(err) =>
         ruleMetrics.noteError(topic, err)
         stats.messagesRejected.incrementAndGet()
+        false
       case Right(raw) =>
         val normalized = raw.map(v => normalizeValue(rule, v))
         if (normalized.exists(v => v.isNaN || v.isInfinite)) {
           ruleMetrics.noteError(topic, "value not finite after normalize")
           stats.messagesRejected.incrementAndGet()
+          false
         } else if (normalized.length != rule.regionLength) {
           ruleMetrics.noteError(topic,
             s"transformed value count ${normalized.length} != region.length ${rule.regionLength}")
           stats.messagesRejected.incrementAndGet()
+          false
         } else {
           val sensorId = resolveSensorId(rule.sensorIdTemplate, rule.topicFilter, topic)
           Try(onIngest(sensorId, rule.regionOffset, rule.regionLength, normalized, rule.ttlMs, topic, rule.id))
             .failed.foreach(e => ruleMetrics.noteError(topic, s"ingest error: ${e.getMessage}"))
           ruleMetrics.mapped.incrementAndGet()
           stats.messagesMapped.incrementAndGet()
+          true
         }
     }
   }
