@@ -53,6 +53,31 @@ class Routes(
       t
     })
 
+  // /api/metrics renders on its own thread, one render at a time, and every
+  // request that arrives while a render is running shares its result.
+  //
+  // It rendered on Akka's dispatcher, once per request. On 2026-10-08 scala-1
+  // went from <1 s per scrape to 110 s within three minutes of perceive pushes
+  // and Manager's /api/machines polling overlapping: Prometheus gave up on each
+  // scrape after 5 s and sent the next, every abandoned render still ran to
+  // completion, and the renders stacked until /api/health stopped answering
+  // (RealityEngine_Scala#184). With one render in flight there is nothing to
+  // stack, however many scrapers there are or however long they wait.
+  private lazy val metricsRenderEc: ExecutionContext = ExecutionContext.fromExecutorService(
+    java.util.concurrent.Executors.newSingleThreadExecutor { (r: Runnable) =>
+      val t = new Thread(r, "re-metrics-render")
+      t.setDaemon(true)
+      t
+    })
+  private val metricsRenderLock = new Object
+  private var metricsRenderInFlight: Future[String] = Future.successful("")
+
+  private def sharedMetricsRender(): Future[String] = metricsRenderLock.synchronized {
+    if (metricsRenderInFlight.isCompleted)
+      metricsRenderInFlight = Future(renderPrometheusMetrics())(metricsRenderEc)
+    metricsRenderInFlight
+  }
+
   // Canonical JSON key order: sorted.  C++ emits every object key-sorted
   // (its Json::Object is a std::map); Scala and LSP preserved insertion order,
   // and their orders differed from each other.  Sorting is the rule all
@@ -886,15 +911,11 @@ class Routes(
     emitMeta("ces_deprecated_fires_total", "Fires from machines tagged deprecated.",            "counter")
 
     val stepsSnap     = engine.coverage.stepsSnap
-    // Sum every counter belonging to one machine. Keys are tab-joined and
-    // prefixed by machineId \t machineName, so a prefix match is the machine's
-    // whole contribution.
-    def machineTotal(snap: Map[String, Long], base: String): Double =
-      snap.iterator.collect { case (k, v) if k == base || k.startsWith(base + "\t") => v }.sum.toDouble
-
     val matchedSnap   = engine.coverage.matchedSnap
     val activatedSnap = engine.coverage.activatedSnap
     val outputsSnap   = engine.coverage.outputsSnap
+    val pagingSnap    = engine.coverage.pagingDecisionsSnap
+    val deprecatedSnap = engine.coverage.deprecatedFiresSnap
     // ces_machine_steps_total shares its baseline's {machine, machine_id}
     // label set, so we suppress the baseline for machines that already
     // have a real step count to avoid duplicate-series warnings.
@@ -939,16 +960,20 @@ class Routes(
       emit("ces_machine_vector_count",   allVecs.size.toDouble, machineLabel)
       emit("ces_unfired_sequences",      unfiredSeqs.toDouble,  machineLabel)
       emit("ces_unfired_vectors",        unfiredVecs.toDouble,  machineLabel)
-      // Machine-level rollups. These were hardcoded 0.0 and stayed 0.0 no
-      // matter what the engine did, so every per-machine aggregation of them
-      // read zero (RealityEngine_CI#218). Event-keyed series carrying sequence
-      // and vector sub-labels are emitted separately below.
-      emit("ces_vector_matched_total",   machineTotal(matchedSnap, covBase),   machineLabel)
-      emit("ces_vector_activated_total", machineTotal(activatedSnap, covBase), machineLabel)
-      emit("ces_sequence_outputs_total", machineTotal(outputsSnap, covBase),   machineLabel)
+      // Zero baselines, as C++ and LSP emit them: they give `$machine` and
+      // `by (machine)` a series before anything fires. The counts live on the
+      // event-keyed series below, which carry the same machine labels, so any
+      // sum over machine already includes them.
+      //
+      // These baselines carried each machine's total instead, which every such
+      // sum then counted a second time: over 24 h live, scala-1 reported 3,068
+      // matches against 1,472 (cpp-1) and 1,467 (lsp-1) for the same traffic
+      // (RealityEngine_Scala#185). Summing the total also scanned the whole
+      // coverage snapshot once per machine, three times per scrape.
+      emit("ces_vector_matched_total",   0.0,                   machineLabel)
+      emit("ces_vector_activated_total", 0.0,                   machineLabel)
+      emit("ces_sequence_outputs_total", 0.0,                   machineLabel)
       emit("ces_deprecated_fires_total", 0.0,                   machineLabel)
-      emit("ces_paging_decisions_total", 0.0,
-           machineLabel ++ Map("owner_team" -> "unknown", "rag_status_code" -> "GREEN"))
       if (!seenSteps.contains(m.id))
         emit("ces_machine_steps_total",  0.0,                   machineLabel)
     }
@@ -979,6 +1004,27 @@ class Routes(
       if (parts.length == 3)
         emit("ces_sequence_outputs_total", c.toDouble,
              Map("machine_id" -> parts(0), "machine" -> parts(1), "sequence" -> parts(2)))
+    }
+    // Paging decisions and deprecated fires are recorded in the step path
+    // (PerceptualSpaceRuntime) but were never rendered: this runtime emitted
+    // one invented `owner_team="unknown", rag_status_code="GREEN"` zero per
+    // machine instead. Same label sets as C++ and LSP; `machine` is the name
+    // looked up from machine_id, as there.
+    val machineNames = machines.iterator.map(m => m.id -> m.name).toMap
+    pagingSnap.foreach { case (k, c) =>
+      val parts = com.realityengine.services.CesCoverageRegistry.splitKey(k)
+      if (parts.length == 4)
+        emit("ces_paging_decisions_total", c.toDouble,
+             Map("owner_team" -> parts(0), "process_status" -> parts(1),
+                 "rag_status_code" -> parts(2), "machine_id" -> parts(3),
+                 "machine" -> machineNames.getOrElse(parts(3), "")))
+    }
+    deprecatedSnap.foreach { case (k, c) =>
+      val parts = com.realityengine.services.CesCoverageRegistry.splitKey(k)
+      if (parts.length == 4)
+        emit("ces_deprecated_fires_total", c.toDouble,
+             Map("machine_id" -> parts(0), "machine" -> parts(1),
+                 "sequence" -> parts(2), "replaced_by" -> parts(3)))
     }
 
     // ── Step phase timing (SURFACE_SPEC.md, "phaseDetail") ─────────────────
@@ -1028,10 +1074,12 @@ class Routes(
 
         // Prometheus metrics — text/plain exposition format on /api/metrics
         path("metrics") { get {
-          complete(HttpResponse(
-            status = StatusCodes.OK,
-            entity = HttpEntity(ContentTypes.`text/plain(UTF-8)`, renderPrometheusMetrics()),
-          ))
+          onSuccess(sharedMetricsRender()) { body =>
+            complete(HttpResponse(
+              status = StatusCodes.OK,
+              entity = HttpEntity(ContentTypes.`text/plain(UTF-8)`, body),
+            ))
+          }
         } },
 
         // Config
