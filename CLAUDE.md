@@ -36,6 +36,14 @@ Read the contract before building or deploying:
 cd ../RealityEngine_CI && ./scripts/regression-test.sh --execute --build-only
 ```
 
+**Container images are built from CI's Dockerfiles, not from here**:
+`RealityEngine_CI/docker/scala/Dockerfile` (image `re-scala`, this repo as the
+context) and `RealityEngine_CI/docker/scala-perception-engine/Dockerfile`
+(image `re-scala-pe`, `perception-engine/` as the context). The release image
+catalog is `RealityEngine_CI/release/images.json`. This repo kept its own
+copies until 2026-10-17; they had drifted (no non-root user, and the perception
+engine one copied paths outside its build context), so they were removed.
+
 **This repository contains two independent sbt builds, not one build with two
 subprojects.** The root `build.sbt` declares no `lazy val` subprojects, no
 `aggregate` and no `dependsOn`, so **the root assembly does not produce the
