@@ -1654,7 +1654,16 @@ class Routes(
               concat(
                 get  { complete(Json.obj("machines" -> Json.arr(engine.getAllMachines.map(_.toJson): _*))) },
                 post { entity(as[Json]) { body =>
-                  Try(MachineLoader.loadFromJson(body.noSpaces)) match {
+                  // A corpus-declared id is kept when no resident machine holds
+                  // it, and minted otherwise (SURFACE_SPEC, "POST /api/machines
+                  // keeps a declared id"; owner decision 2026-10-18). This
+                  // minted for every POST while LSP kept the declared id, so a
+                  // machine loaded at runtime had a different identity on each
+                  // engine and the byte-equivalence surfaces diverged.
+                  val root     = body.hcursor.downField("machine").focus.filter(_.isObject).getOrElse(body)
+                  val declared = root.hcursor.downField("id").as[String].toOption
+                    .filter(id => id.nonEmpty && engine.getMachine(id).isEmpty)
+                  Try(MachineLoader.loadFromJson(body.noSpaces, declared)) match {
                     case Failure(e) => complete(StatusCodes.BadRequest -> Json.obj("error" -> Json.fromString(e.getMessage)))
                     case Success(machine) =>
                       // Always ingests; a resident name is versioned and
