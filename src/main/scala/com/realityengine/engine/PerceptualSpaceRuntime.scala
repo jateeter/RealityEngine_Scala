@@ -105,7 +105,17 @@ class PerceptualSpaceRuntime(dimension: Int = sys.env.getOrElse("VECTOR_DIMENSIO
   def setCoverageRegistry(reg: com.realityengine.services.CesCoverageRegistry): Unit =
     { coverageRegistry = Some(reg) }
 
-  def addMachine(machine: Machine): Unit = {
+  // Machines are added and removed from Akka HTTP's request threads, several
+  // at once when a caller loads in parallel (Manager's Load Machines posts 8
+  // at a time). `machines` is an immutable Map in a var, so an unserialized
+  // `machines = machines + (...)` lost a concurrent update: the engine's own
+  // TrieMap held the machine while this runtime, the simulation and the
+  // machine graph did not (found by the release install, 2026-10-18).
+  // Every mutation of the machine set, and of what is derived from it, runs
+  // under this lock; readers see a consistent immutable snapshot.
+  private val machinesLock = new Object
+
+  def addMachine(machine: Machine): Unit = machinesLock.synchronized {
     require(machine.perceptualMapping.isDefined,
       s"Machine ${machine.name} does not have a perceptual mapping")
     val mapping  = machine.perceptualMapping.get
@@ -120,7 +130,7 @@ class PerceptualSpaceRuntime(dimension: Int = sys.env.getOrElse("VECTOR_DIMENSIO
     rebuildEdgeCache()
   }
 
-  def removeMachine(machineId: String): Unit = {
+  def removeMachine(machineId: String): Unit = machinesLock.synchronized {
     unregisterComposeSubscriptions(machineId)
     machines = machines - machineId
     rebuildEdgeCache()
