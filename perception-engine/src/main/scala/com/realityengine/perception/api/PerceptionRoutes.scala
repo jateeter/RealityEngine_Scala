@@ -237,6 +237,14 @@ class PerceptionRoutes(
   // Canonical default shared by every runtime; override per engine with
   // OLLAMA_MODEL. See RealityEngine_CI/docs/OLLAMA_INTEGRATION.md.
   private val ollamaModel        = sys.env.getOrElse("OLLAMA_MODEL",      "llama3.1:8b")
+
+  // Model families Ollama refuses `format` for ("structured output is
+  // unavailable"). The same list and rule are in the C++, LSP and TypeScript
+  // PEs: all engines must send or omit `format` identically for a model
+  // (RealityEngine_CI docs/OLLAMA_INTEGRATION.md, "Structured output").
+  private val ollamaNoStructuredOutputModels = Set("nemotron-3-nano")
+  private def ollamaSupportsStructuredOutput(model: String): Boolean =
+    !ollamaNoStructuredOutputModels.contains(model.takeWhile(_ != ':'))
   private val ollamaCompletionSourceMappingId = sys.env.getOrElse("OLLAMA_COMPLETION_SOURCE_MAPPING_ID", "agent-completion-risk")
   private val openAiBaseUrl      = sys.env.getOrElse("OPENAI_BASE_URL",   "https://api.openai.com/v1")
   private val openAiApiKey       = sys.env.get("OPENAI_API_KEY")
@@ -1333,7 +1341,11 @@ class PerceptionRoutes(
           Json.obj("role" -> "system".asJson, "content" -> "Return one JSON object matching the configured RealityEngine source mapping.".asJson),
           Json.obj("role" -> "user".asJson, "content" -> body.hcursor.get[String]("prompt").getOrElse("Produce a provider completion.").asJson),
         ))
-        val reqBody  = Json.obj("model" -> model.asJson, "messages" -> messages, "format" -> "json".asJson, "stream" -> false.asJson).noSpaces
+        val formatJson = body.hcursor.get[Boolean]("formatJson").getOrElse(ollamaSupportsStructuredOutput(model))
+        val reqFields  = List("model" -> model.asJson, "messages" -> messages) ++
+          (if (formatJson) List("format" -> "json".asJson) else Nil) ++
+          List("stream" -> false.asJson)
+        val reqBody  = Json.obj(reqFields: _*).noSpaces
         try {
           val resp = basicRequest
             .post(uri"$ollamaBaseUrl/api/chat")

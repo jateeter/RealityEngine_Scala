@@ -23,6 +23,16 @@ until #64, so `--pe-source-bootstrap=off` silently did nothing here (#63). It
 still declares HealthKit sensors from `INTEGRATIONS_CONFIG` whether or not the
 bridge is enabled — the open half of #63.
 
+## Ollama `format` (structured output) — three-engine parity
+
+Whether a native Ollama dispatch sends `format` depends on the model: Ollama
+refuses it for some (`nemotron-3-nano` → `structured output is unavailable`).
+The C++, LSP and Scala PEs and the Manager TypeScript PE must send or omit it
+**identically** for every model — a divergence reads as an engine defect in the
+parity sweep. The rule and the model list are canonical in
+`RealityEngine_CI/docs/OLLAMA_INTEGRATION.md` § "Structured output"; here it is
+`ollamaSupportsStructuredOutput` (`PerceptionRoutes.scala`) with the `formatJson` body switch. A change to the list or the rule lands in all four repos together.
+
 ## Standing rules — authoritative in `../../RealityEngine_CI/docs/ENGINEERING_CONTRACT.md`
 
 These apply here and are **not** restated in this file. The table is an index
