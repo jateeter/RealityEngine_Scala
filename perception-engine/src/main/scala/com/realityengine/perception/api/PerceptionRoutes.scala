@@ -663,6 +663,27 @@ class PerceptionRoutes(
     }
   }
 
+  // For a model Ollama will not constrain with `format`: the keys that
+  // completionSchema would require, as plain words plus an example shape,
+  // appended to the system prompt. Built from the mapping's pointers in
+  // declaration order so the text is byte-identical in the C++, LSP and
+  // TypeScript PEs (RealityEngine_CI docs/OLLAMA_INTEGRATION.md, "Structured
+  // output"): the same model must see the same prompt from every engine.
+  private def completionContractPrompt(mapping: Option[Json]): String = {
+    val pointers = mapping.toVector.flatMap { m =>
+      val extract = m.hcursor.downField("extract")
+      if (extract.get[String]("type").toOption.contains("json"))
+        extract.downField("pointers").as[Vector[String]].toOption
+          .getOrElse(extract.get[String]("pointer").toOption.toVector)
+      else Vector.empty
+    }
+    val keys = pointers.map(topLevelPointerKey).distinct
+    val lead = "\n\nRespond with ONLY one JSON object, with no prose and no markdown fences, that has exactly "
+    if (keys.isEmpty) lead + "this key, an array of numbers: values. For example: {\"values\": [0]}"
+    else lead + "these keys, each a number or boolean: " + keys.mkString(", ") +
+      ". For example: {" + keys.map(k => "\"" + k + "\": 0").mkString(", ") + "}"
+  }
+
   private def openAiTextFormat(mapping: Option[Json]): Json =
     Json.obj("format" -> Json.obj(
       "type"   -> "json_schema".asJson,
@@ -1337,13 +1358,21 @@ class PerceptionRoutes(
         val sourceMappingId = body.hcursor.get[String]("sourceMappingId").getOrElse(ollamaCompletionSourceMappingId)
         val mapping         = sourceMappings.get(sourceMappingId)
         val agentId         = body.hcursor.get[String]("agentId").orElse(body.hcursor.get[String]("agent")).getOrElse("ollama")
+        val supportsStructured = ollamaSupportsStructuredOutput(model)
+        val formatJson = body.hcursor.get[Boolean]("formatJson").getOrElse(supportsStructured)
+        // No `format` to constrain the reply: say what it must contain, in the prompt.
+        val systemPrompt = "Return one JSON object matching the configured RealityEngine source mapping." +
+          (if (formatJson) "" else completionContractPrompt(mapping))
         val messages = body.hcursor.downField("messages").as[Json].getOrElse(Json.arr(
-          Json.obj("role" -> "system".asJson, "content" -> "Return one JSON object matching the configured RealityEngine source mapping.".asJson),
+          Json.obj("role" -> "system".asJson, "content" -> systemPrompt.asJson),
           Json.obj("role" -> "user".asJson, "content" -> body.hcursor.get[String]("prompt").getOrElse("Produce a provider completion.").asJson),
         ))
-        val formatJson = body.hcursor.get[Boolean]("formatJson").getOrElse(ollamaSupportsStructuredOutput(model))
+        // Reasoning adds nothing to filling in named fields and made replies slower and
+        // less reliable on the models that cannot take `format` (nemotron-3-nano: 8/8
+        // valid at 0.4 s with thinking off, 6/8 at 2-8 s on).
         val reqFields  = List("model" -> model.asJson, "messages" -> messages) ++
           (if (formatJson) List("format" -> "json".asJson) else Nil) ++
+          (if (supportsStructured) Nil else List("think" -> false.asJson)) ++
           List("stream" -> false.asJson)
         val reqBody  = Json.obj(reqFields: _*).noSpaces
         try {
