@@ -31,7 +31,11 @@ The C++, LSP and Scala PEs and the Manager TypeScript PE must send or omit it
 **identically** for every model — a divergence reads as an engine defect in the
 parity sweep. The rule and the model list are canonical in
 `RealityEngine_CI/docs/OLLAMA_INTEGRATION.md` § "Structured output"; here it is
-`ollamaSupportsStructuredOutput` (`PerceptionRoutes.scala`) with the `formatJson` body switch. A change to the list or the rule lands in all four repos together.
+`ollamaSupportsStructuredOutput` (`PerceptionRoutes.scala`) with the `formatJson` body switch. When `format` is omitted the engine instead
+puts the mapping's required keys and an example shape in the system prompt
+(`completionContractPrompt`, byte-identical text in all four) and, for these
+models, sends `think: false`. A change to the list or the rule lands in all four
+repos together.
 
 ## Standing rules — authoritative in `../../RealityEngine_CI/docs/ENGINEERING_CONTRACT.md`
 
