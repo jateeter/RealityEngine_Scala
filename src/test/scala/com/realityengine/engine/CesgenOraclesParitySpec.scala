@@ -134,6 +134,7 @@ class CesgenOraclesParitySpec extends AnyFlatSpec with Matchers {
       .flatMap(parseOracle)
 
     oracles should not be empty
+    info(s"Oracle source: ${oracleFile.getAbsolutePath}; parsed=${oracles.size}")
 
     val rawByFile = scala.collection.mutable.Map.empty[String, String]
     def rawFor(name: String): String =
