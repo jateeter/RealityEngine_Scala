@@ -1,7 +1,7 @@
 package com.realityengine.perception.api
 
 import akka.actor.{ActorRef, ActorSystem}
-import akka.http.scaladsl.model.{ContentTypes, HttpEntity, StatusCode, StatusCodes}
+import akka.http.scaladsl.model.{ContentTypes, HttpEntity, HttpResponse, StatusCode, StatusCodes}
 import akka.http.scaladsl.server.Directives._
 import akka.http.scaladsl.server.Route
 import akka.stream.Materializer
@@ -79,7 +79,9 @@ class PerceptionRoutes(
     Marshaller.StringMarshaller.wrap(MediaTypes.`application/json`)(json =>
       printer.print(CanonicalJson.canonicalizeNumbers(json)))
 
-  private val sttpBackend = HttpURLConnectionBackend()
+  // Lane TLS (#210): an https call to an internal peer uses the lane CA and
+  // this instance's certificate; nothing changes with the lane off.
+  private val sttpBackend = HttpURLConnectionBackend(customizeConnection = com.realityengine.tls.LaneTls.customizeConnection)
 
   // RC-5: thread-safe timer and state refs
   // Machine facts the PE resolves the merge mapping against — provenance and
@@ -2320,6 +2322,27 @@ class PerceptionRoutes(
 }
 
 object PerceptionRoutes {
+
+  /** The PE's device routes under lane TLS (RealityEngine_CI
+    * docs/TRANSPORT_SECURITY.md): the HealthKit bridge on a phone reaches them
+    * with server TLS and its bearer token, not a client certificate
+    * (localHealthkitBridge docs/INGEST_CONTRACT.md). resync is called by a
+    * service and is not one of them. C++ and LSP open the same three. */
+  val DeviceRoutes: Set[String] = Set(
+    "/api/integrations/healthkit/ingest",
+    "/api/integrations/healthkit/status",
+    "/api/integrations/healthkit/scope")
+
+  /** On the lane's TLS port: any route but a device route needs a verified
+    * client certificate, else 403 {"error":"client certificate required"},
+    * the body C++ and LSP answer. */
+  def laneGuard(inner: Route): Route = extractRequest { req =>
+    val verified = req.attribute(akka.http.scaladsl.model.AttributeKeys.sslSession)
+      .exists(info => com.realityengine.tls.LaneTls.peerVerified(info.session))
+    if (verified || DeviceRoutes.contains(req.uri.path.toString())) inner
+    else complete(HttpResponse(StatusCodes.Forbidden,
+      entity = HttpEntity(ContentTypes.`application/json`, """{"error":"client certificate required"}""")))
+  }
 
   /** Whether the integration owning a source mapping is enabled here.
     *

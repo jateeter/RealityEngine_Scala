@@ -121,6 +121,20 @@ tick past it — and holds `FileChannel.tryLock` on `<uuid>.lock` for its life.
 That lock is `fcntl`-based, so it excludes the C++ and LSP runtimes' `lockf` as
 well: no two live instances of any engine type can share a UUID.
 
+## Lane TLS
+
+With `RE_TLS_CERT` set (RealityEngine_CI#668, this repo's #210), the RE and PE
+serve TLS 1.3 with mTLS on their own ports, and the PE calls internal peers
+over `https` with the lane CA and its own certificate. With it unset, nothing
+changes, and `KEYSTORE_PATH` (Manager's proxied pair) keeps working as before.
+The contract, including which peers are internal and which PE routes are open
+to devices, is `RealityEngine_CI/docs/TRANSPORT_SECURITY.md`, and C++ and LSP
+implement the same choices. The code is `com.realityengine.tls.LaneTls`, one
+identical file in each build (`src/main/scala/...` and
+`perception-engine/src/main/scala/...`), and `PerceptionRoutes.laneGuard`.
+`LaneTlsSpec` (PE build) pins it. JDK 17 has no X25519MLKEM768, so the engines
+negotiate x25519 and report it at startup.
+
 ## Standing rules
 
 The standing rules are in

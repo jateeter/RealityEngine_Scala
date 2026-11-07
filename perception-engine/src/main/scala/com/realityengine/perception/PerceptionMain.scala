@@ -113,12 +113,30 @@ object PerceptionMain extends App {
     activateOnLoad   = activateOnLoad,
   )
 
-  val serverAt = Http().newServerAt(host, port)
-  val binding  = sslContext match {
-    case Some(ctx) =>
+  // Lane TLS (RealityEngine_CI#668, this repo's #210): RE_TLS_CERT set means
+  // TLS 1.3 on this port with no plaintext listener. The PE has device routes
+  // (PerceptionRoutes.laneGuard), so the handshake requests a client
+  // certificate and verifies any presented; the guard answers 403 for any other
+  // route reached without one. Takes precedence over KEYSTORE_PATH, which stays
+  // for Manager's proxied pair. A context that cannot be built stops the PE.
+  val lane = com.realityengine.tls.LaneTls.serving
+  val serverAt = lane match {
+    case Some(_) =>
+      val base = akka.http.scaladsl.settings.ServerSettings(system)
+      Http().newServerAt(host, port).withSettings(
+        base.withParserSettings(base.parserSettings.withIncludeSslSessionAttribute(true)))
+    case None => Http().newServerAt(host, port)
+  }
+  val binding  = (lane, sslContext) match {
+    case (Some(s), _) =>
+      val ctx = com.realityengine.tls.LaneTls.serverContext(s)
+      println(com.realityengine.tls.LaneTls.startupLine(port, deviceRoutes = true))
+      serverAt.enableHttps(ConnectionContext.httpsServer(() =>
+        com.realityengine.tls.LaneTls.serverEngine(ctx, requireAtHandshake = false))).bind(PerceptionRoutes.laneGuard(routes.routes))
+    case (None, Some(ctx)) =>
       println(s"✓ TLS enabled (keystore: $keystorePath)")
       serverAt.enableHttps(ConnectionContext.httpsServer(ctx)).bind(routes.routes)
-    case None =>
+    case (None, None) =>
       println("  TLS not configured — binding plain HTTP")
       serverAt.bind(routes.routes)
   }
@@ -128,7 +146,7 @@ object PerceptionMain extends App {
       println(s"Failed to bind to $host:$port — ${e.getMessage}")
       system.terminate()
     case Success(b) =>
-      val scheme = if (tlsEnabled) "https" else "http"
+      val scheme = if (tlsEnabled || lane.isDefined) "https" else "http"
       println(s"\n✅ Perception Engine running on $scheme://$host:$port")
       println(s"   Reality Engine : $realityEngineUrl")
       // Reload every corpus machine, whether or not a persisted source claims
@@ -158,7 +176,7 @@ object PerceptionMain extends App {
                   pruneCorpus: Boolean = false,
                   activateOnLoad: Boolean = false): Unit = {
     Future {
-      val backend = HttpURLConnectionBackend()
+      val backend = HttpURLConnectionBackend(customizeConnection = com.realityengine.tls.LaneTls.customizeConnection)
       var machinesJson: io.circe.Json = io.circe.Json.Null
       var success = false
       var attempt = 0
