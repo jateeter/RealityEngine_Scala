@@ -91,11 +91,21 @@ object Main extends App {
       routes.loadDefaultMachines()
 
       val serverAt = Http().newServerAt(host, port)
-      val binding  = sslContext match {
-        case Some(ctx) =>
+      // Lane TLS (RealityEngine_CI#668, this repo's #210): RE_TLS_CERT set means
+      // TLS 1.3 with mTLS at the handshake on this port and no plaintext
+      // listener. It takes precedence over KEYSTORE_PATH, which stays for
+      // Manager's proxied pair. A context that cannot be built stops the RE.
+      val lane = com.realityengine.tls.LaneTls.serving
+      val binding  = (lane, sslContext) match {
+        case (Some(s), _) =>
+          val ctx = com.realityengine.tls.LaneTls.serverContext(s)
+          println(com.realityengine.tls.LaneTls.startupLine(port, deviceRoutes = false))
+          serverAt.enableHttps(ConnectionContext.httpsServer(() =>
+            com.realityengine.tls.LaneTls.serverEngine(ctx, requireAtHandshake = true))).bind(routes.routes)
+        case (None, Some(ctx)) =>
           println(s"✓ TLS enabled (keystore: $keystorePath)")
           serverAt.enableHttps(ConnectionContext.httpsServer(ctx)).bind(routes.routes)
-        case None =>
+        case (None, None) =>
           println("  TLS not configured — binding plain HTTP")
           serverAt.bind(routes.routes)
       }
@@ -105,7 +115,7 @@ object Main extends App {
           println(s"Failed to bind to $host:$port: ${e.getMessage}")
           system.terminate()
         case Success(b) =>
-          val scheme = if (tlsEnabled) "https" else "http"
+          val scheme = if (tlsEnabled || lane.isDefined) "https" else "http"
           println(s"\n✅ Reality Engine running on $scheme://$host:$port")
           println(s"🗄️  Qdrant URL: ${sys.env.getOrElse("QDRANT_URL", "http://localhost:4333")}")
 
