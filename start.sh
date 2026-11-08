@@ -28,7 +28,24 @@ RE_LOAD_MACHINES="${RE_LOAD_MACHINES:-1}"
 QDRANT_URL="${QDRANT_URL:-http://localhost:4333}"
 LOCAL_AI_API_URL="${LOCAL_AI_API_URL:-http://localhost:4000}"
 LOCAL_AI_MACHINES_DIR="${LOCAL_AI_MACHINES_DIR:-../localAIStack/data/machines}"
-REALITY_ENGINE_URL="${REALITY_ENGINE_URL:-http://localhost:${REALITY_ENGINE_PORT}}"
+# Lane TLS (RealityEngine_CI#668): with RE_TLS_CERT set the RE and PE serve TLS
+# 1.3 with mTLS, so this script's own probes and the PE's RE URL use https, the
+# lane CA and this instance's certificate (issued kind both, so it is a client
+# certificate too), through a curl that speaks TLS 1.3 (macOS /usr/bin/curl is
+# SecureTransport and cannot). With it unset, nothing changes.
+if [ -n "${RE_TLS_CERT:-}" ]; then
+  ENGINE_SCHEME=https
+  _lane_curl=curl
+  for _c in /opt/homebrew/opt/curl/bin/curl /usr/local/opt/curl/bin/curl; do
+    [ -x "$_c" ] && { _lane_curl="$_c"; break; }
+  done
+  ENGINE_CURL=("$_lane_curl" --tlsv1.3 --cacert "${RE_TLS_CA:?RE_TLS_CERT is set, so RE_TLS_CA must be too}" --cert "$RE_TLS_CERT" --key "${RE_TLS_KEY:?RE_TLS_CERT is set, so RE_TLS_KEY must be too}")
+else
+  ENGINE_SCHEME=http
+  ENGINE_CURL=(curl)
+fi
+
+REALITY_ENGINE_URL="${REALITY_ENGINE_URL:-${ENGINE_SCHEME}://localhost:${REALITY_ENGINE_PORT}}"
 # The PE persists its sources and restores them on start. Its store was never
 # passed here, so it defaulted to ./data relative to this script — one store
 # shared by every instance, and one that survives a corpus change. A run that
@@ -93,7 +110,7 @@ wait_for_http() {
   local url="$1" label="$2"
   local n=0
   while [ "$n" -lt "$RE_HEALTH_ATTEMPTS" ]; do
-    if curl -sf --max-time 2 "$url" >/dev/null 2>&1; then
+    if "${ENGINE_CURL[@]}" -sf --max-time 2 "$url" >/dev/null 2>&1; then
       echo "$label ready"
       return 0
     fi
@@ -173,7 +190,7 @@ LOCAL_AI_API_URL="$LOCAL_AI_API_URL" \
 nohup java ${RE_JAVA_OPTS:--Xmx6g} -jar "$RE_JAR" > "$RE_LOG_FILE" 2>&1 &
 echo "$!" > "$RE_PID_FILE"
 
-if ! wait_for_http "http://localhost:${REALITY_ENGINE_PORT}/api/health" "Scala RE"; then
+if ! wait_for_http "${ENGINE_SCHEME}://localhost:${REALITY_ENGINE_PORT}/api/health" "Scala RE"; then
   tail -60 "$RE_LOG_FILE" || true
   "$ROOT_DIR/stop.sh" "${INSTANCE_ID:+--instance=$INSTANCE_ID}" >/dev/null 2>&1 || true
   die "Scala Reality Engine failed to become healthy"
@@ -204,7 +221,7 @@ ACP_COMPLETION_SOURCE_MAPPING_ID="$ACP_COMPLETION_SOURCE_MAPPING_ID" \
   nohup java ${PE_JAVA_OPTS:--Xmx3g} -jar "$PE_JAR" > "$PE_LOG_FILE" 2>&1 &
 echo "$!" > "$PE_PID_FILE"
 
-if ! wait_for_http "http://localhost:${PERCEPTION_ENGINE_PORT}/api/health" "Scala PE"; then
+if ! wait_for_http "${ENGINE_SCHEME}://localhost:${PERCEPTION_ENGINE_PORT}/api/health" "Scala PE"; then
   tail -60 "$PE_LOG_FILE" || true
   "$ROOT_DIR/stop.sh" "${INSTANCE_ID:+--instance=$INSTANCE_ID}" >/dev/null 2>&1 || true
   die "Scala Perception Engine failed to become healthy"
@@ -212,8 +229,8 @@ fi
 
 cat <<EOF
 Scala RealityEngine started
-  Reality Engine:    http://localhost:${REALITY_ENGINE_PORT}
-  Perception Engine: http://localhost:${PERCEPTION_ENGINE_PORT}
+  Reality Engine:    ${ENGINE_SCHEME}://localhost:${REALITY_ENGINE_PORT}
+  Perception Engine: ${ENGINE_SCHEME}://localhost:${PERCEPTION_ENGINE_PORT}
   Machines:          ${MACHINES_DIR}
   Vector dimension:  ${VECTOR_DIMENSION}
   Qdrant:            ${QDRANT_URL}
