@@ -172,6 +172,13 @@ class Routes(
   // rather than chosen here. It was 256 on C++, 250 on LSP and 1000 on this
   // runtime: three reasonable values for one control, which is what happens
   // when each runtime picks its own.
+  // Live clones and block generations (SURFACE_SPEC.md, "Cloneable machines"),
+  // changed only under cloneLock, with the machine registration they go with.
+  private val cloneSpace = new CloneSpace()
+  private val cloneLock  = new Object
+  // The id this engine instance was launched as (INSTANCE_ID, e.g. scala-1): the
+  // middle segment of every clone id. Without it nothing can be cloned.
+  private val engineInstance = sys.env.getOrElse("INSTANCE_ID", "")
   private val historyLimitRef           = new AtomicReference[Int](250)
   private val includeMachineResultsRef  = new AtomicReference[Boolean](true)
   private val includePerceptualSpaceRef = new AtomicReference[Boolean](true)
@@ -449,6 +456,7 @@ class Routes(
         val json     = readJsonFile(file)
         val baseName = filename.replaceAll("\\.json$", "").toLowerCase.replaceAll("[^a-z0-9]+", "-")
         val machine  = MachineLoader.loadFromJson(json, Some(s"machine-$baseName"))
+        machine.sourceFile = Some(filename)
         addMachineToSystem(machine)
         println(s"  ✓ ${machine.name} loaded from $filename")
         loaded += 1
@@ -504,6 +512,53 @@ class Routes(
     }
     true
   }
+
+  /** A clone changes only through recycle: PUT, PATCH or DELETE on one would
+    * leave its block held by a machine that no longer exists. */
+  private def cloneRefused: Route =
+    complete(StatusCodes.Conflict -> Json.obj("error" -> Json.fromString(
+      "a clone changes only through POST /api/engine/recycle/machine/:cloneId")))
+
+  private def cloneMachine(machineId: String, asset: String, envelope: String): Route = {
+    def refuse(status: StatusCode, message: String, extra: (String, Json)*): Route =
+      complete(status -> Json.obj(("error" -> Json.fromString(message)) +: extra: _*))
+    engine.getMachine(machineId) match {
+      case None => refuse(StatusCodes.NotFound, "Machine not found")
+      case Some(template) if template.cloneOf.isDefined =>
+        refuse(StatusCodes.BadRequest, "a clone is not cloneable", "reason" -> Json.fromString("clone"))
+      case Some(template) =>
+        val verdict = CloneSpace.assess(template, CloneSpace.busTargetFiles(engine.getAllMachines))
+        val held    = cloneSpace.byEnvelope(envelope)
+        if (!verdict.cloneable)
+          refuse(StatusCodes.BadRequest, "machine is not cloneable", "reason" -> Json.fromString(verdict.reason.getOrElse("")))
+        else if (engineInstance.isEmpty) refuse(StatusCodes.Conflict, "engine launched without an INSTANCE_ID")
+        else if (held.exists(_.machineId == machineId)) complete(held.get.toJson) // a retried dispatch
+        else if (held.isDefined) refuse(StatusCodes.Conflict, s"envelope $envelope holds a clone of another machine")
+        else if (cloneSpace.liveOf(machineId) >= cloneSpace.maxActive) refuse(StatusCodes.Conflict, "template is at clone.maxActive")
+        else cloneSpace.lowestFreeBlock match {
+          case None => refuse(StatusCodes.Conflict, "the clone band has no free block")
+          case Some(block) =>
+            val pm = template.perceptualMapping.get
+            val c = CloneSpace.Clone(s"$machineId.$engineInstance.$envelope", machineId, engineInstance, envelope, asset,
+                                     block, cloneSpace.generation(block), pm.input.length, pm.output.length, verdict.folded)
+            addMachineToSystem(CloneSpace.cloneMachine(template, c))
+            cloneSpace.add(c)
+            complete(StatusCodes.Created -> c.toJson)
+        }
+    }
+  }
+
+  private def recycleClone(cloneId: String, generation: Long): Route =
+    cloneSpace.byId(cloneId) match {
+      case None => complete(StatusCodes.NotFound -> Json.obj("error" -> Json.fromString(s"No live clone $cloneId")))
+      case Some(c) if c.generation != generation =>
+        complete(StatusCodes.Conflict -> Json.obj("error" -> Json.fromString("generation is not the clone's"),
+                                                  "generation" -> Json.fromLong(c.generation)))
+      case Some(c) =>
+        engine.removeMachine(cloneId); spaceRuntime.removeMachine(cloneId)
+        val next = cloneSpace.recycle(cloneId)
+        complete(Json.obj("cloneId" -> Json.fromString(cloneId), "block" -> c.blockJson, "generation" -> Json.fromLong(next)))
+    }
 
   private def addMachineToSystem(machine: Machine): Unit = {
     engine.addMachine(machine)
@@ -613,6 +668,9 @@ class Routes(
         () => { ref.set(declaredDefault); current() })
     }
 
+    def cloneMaxActiveJson(): Json =
+      controlJson("clone.maxActive", "engine", Json.fromInt(cloneSpace.maxActive), Json.fromInt(CloneSpace.MaxActiveDefault))
+
     def phaseDetailJson(): Json =
       controlJson("phaseDetail", "engine", Json.fromBoolean(spaceRuntime.getPhaseDetail), Json.False)
 
@@ -648,6 +706,17 @@ class Routes(
           spaceRuntime.setArbitrationWindow(PerceptualSpaceRuntime.ArbitrationWindowDefault)
           arbitrationWindowJson()
         }),
+      // The bound on live clones of one template on this engine instance
+      // (SURFACE_SPEC.md, "The clone space"). Lowering it below the live count
+      // refuses new clones of that template until the count falls; it never
+      // recycles one.
+      EngineControl("clone.maxActive", "engine", () => cloneMaxActiveJson(),
+        body => body.hcursor.get[Int]("value").toOption match {
+          case Some(v) if v >= 0 && v <= CloneSpace.Blocks => cloneSpace.maxActive = v; Right(cloneMaxActiveJson())
+          case _ => Left(ControlRefusal(
+            s"clone.maxActive requires a whole-number `value` in [0, ${CloneSpace.Blocks}]", StatusCodes.BadRequest))
+        },
+        () => { cloneSpace.maxActive = CloneSpace.MaxActiveDefault; cloneMaxActiveJson() }),
       EngineControl("historyLimit", "engine", () => historyLimitJson(),
         body => {
           // A negative limit is refused rather than stored, where it would make
@@ -1307,6 +1376,31 @@ class Routes(
         // Engine
         pathPrefix("engine") {
           concat(
+            // ── Clone and recycle (SURFACE_SPEC.md, "Cloneable machines") ──
+            //
+            // One clone per dispatch envelope, at the template's initial state,
+            // in the lowest free 64-cell block of the clone band. The checks
+            // run in the specification's order, so the voting engines refuse a
+            // request alike.
+            path("clone" / "machine" / Segment) { machineId => post {
+              parameters("asset".?, "envelope".?) { (asset, envelope) =>
+                (asset.filter(_.nonEmpty), envelope.filter(_.nonEmpty)) match {
+                  case (Some(a), Some(e)) => cloneLock.synchronized { cloneMachine(machineId, a, e) }
+                  case _ => complete(StatusCodes.BadRequest -> Json.obj("error" -> Json.fromString("asset and envelope are required")))
+                }
+              }
+            } },
+            path("recycle" / "machine" / Segment) { cloneId => post {
+              parameter("generation".?) { raw =>
+                raw.filter(_.matches("-?\\d{1,18}")).flatMap(r => Try(r.toLong).toOption) match {
+                  case None => complete(StatusCodes.BadRequest -> Json.obj("error" -> Json.fromString("generation is required, as an integer")))
+                  case Some(g) => cloneLock.synchronized { recycleClone(cloneId, g) }
+                }
+              }
+            } },
+            path("clones") { get {
+              complete(Json.obj("clones" -> Json.arr(cloneLock.synchronized(cloneSpace.live).map(_.toJson): _*)))
+            } },
             // Maps across machines, in parallel — SURFACE_SPEC, "POST
             // /api/engine/process". `outputs` is one arbitrated output per
             // machine that fired, matching C++ (`reality_engine_server.cpp:279`)
@@ -1563,6 +1657,11 @@ class Routes(
         // Machines — fixed paths BEFORE parameterized
         pathPrefix("machines") {
           concat(
+            // Cloneable machines (SURFACE_SPEC.md, "Cloneable machines"), ahead
+            // of path(Segment), which would read "cloneable" as a machine id.
+            // Assessed on every read against the machines registered now — the
+            // specification's reassessment after every POST, PUT and DELETE.
+            path("cloneable") { get { complete(CloneSpace.listing(engine.getAllMachines)) } },
             // Fixed: /machines/json/...
             path("json" / "list") { get {
               val dir = new File(machinesDir)
@@ -1628,6 +1727,7 @@ class Routes(
                   val json    = readJsonFile(file)
                   val baseName = name.replaceAll("\\.json$", "").toLowerCase.replaceAll("[^a-z0-9]+", "-")
                   val machine = MachineLoader.loadFromJson(json, Some(s"machine-$baseName"))
+                  machine.sourceFile = Some(file.getName)
                   addMachineToSystem(machine)
                   machine
                 } match {
@@ -1699,6 +1799,7 @@ class Routes(
                 // was uncheckable here.
                 get    { engine.getMachine(id).fold(complete(StatusCodes.NotFound -> Json.obj("error" -> Json.fromString("Machine not found"))))(m => complete(Json.obj("machine" -> m.toFullJson))) },
                 patch  { entity(as[Json]) { body =>
+                  if (cloneSpace.isClone(id)) cloneRefused else
                   engine.getMachine(id).fold(
                     complete(StatusCodes.NotFound -> Json.obj("error" -> Json.fromString("Machine not found")))
                   ) { existing =>
@@ -1709,6 +1810,7 @@ class Routes(
                     val newMetadata = existing.metadata ++ metaPatch
                     val updated     = new Machine(newName, newDesc, newMetadata, existing.getArbiter.getRule, existing.perceptualMapping, id)
                     updated.matchAlgorithm = existing.matchAlgorithm
+                    updated.sourceFile = existing.sourceFile
                     existing.getAllSequences.foreach(updated.addSequence)
                     engine.removeMachine(id); spaceRuntime.removeMachine(id)
                     addMachineToSystem(updated)
@@ -1716,15 +1818,21 @@ class Routes(
                   }
                 } },
                 put    { entity(as[Json]) { body =>
+                  if (cloneSpace.isClone(id)) cloneRefused else
                   Try(MachineLoader.loadFromJson(body.noSpaces, Some(id))) match {
                     case Failure(e) => complete(StatusCodes.BadRequest -> Json.obj("error" -> Json.fromString(e.getMessage)))
                     case Success(machine) =>
+                      // A replaced corpus machine keeps its file.
+                      machine.sourceFile = engine.getMachine(id).flatMap(_.sourceFile)
                       engine.removeMachine(id); spaceRuntime.removeMachine(id)
                       addMachineToSystem(machine)
                       complete(Json.obj("success" -> Json.fromBoolean(true), "machine" -> machine.toJson))
                   }
                 } },
-                delete { engine.removeMachine(id); spaceRuntime.removeMachine(id); complete(Json.obj("success" -> Json.fromBoolean(true))) }
+                delete {
+                  if (cloneSpace.isClone(id)) cloneRefused
+                  else { engine.removeMachine(id); spaceRuntime.removeMachine(id); complete(Json.obj("success" -> Json.fromBoolean(true))) }
+                }
               )
             },
             path(Segment / "process") { id => post { entity(as[Json]) { body =>

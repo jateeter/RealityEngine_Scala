@@ -49,6 +49,22 @@ class Machine(
   // machine, which does not travel with the machine definition.
   var transitionsInhibited: Boolean = false
 
+  // The corpus file this machine was loaded from, by file name, or None for one
+  // registered from a request body. Cloneability reads it (SURFACE_SPEC.md,
+  // "Cloneable machines"): a document handoff names its source by file stem
+  // and a bus edge its target by file name, and the id is a normalised stem.
+  // Not serialised.
+  var sourceFile: Option[String] = None
+  // Set on a clone only: the template, the assetID and the dispatch envelope.
+  // Serialised only when set, so no other machine grows a field on the compared
+  // /api/machines surfaces.
+  var cloneOf: Option[String]    = None
+  var assetId: Option[String]    = None
+  var envelopeId: Option[String] = None
+  private def carryIdentity(to: Machine): Unit = {
+    to.sourceFile = sourceFile; to.cloneOf = cloneOf; to.assetId = assetId; to.envelopeId = envelopeId
+  }
+
   private var sequences: Map[String, CriticalEventSequence] = Map.empty
   private val arbiter = new OutputArbiter(arbiterRule)
 
@@ -244,6 +260,7 @@ class Machine(
     c.matchAlgorithm = matchAlgorithm
     c.cowBase = this.effectiveSeqs   // share reference — no deep copy
     c.isCow   = true
+    carryIdentity(c)
     c
   }
 
@@ -279,6 +296,7 @@ class Machine(
     val c = new Machine(name, description, metadata, arbiter.getRule, clonedMapping, id)
     c.matchAlgorithm = matchAlgorithm
     effectiveSeqs.values.foreach(seq => c.addSequence(seq.clone()))
+    carryIdentity(c)
     c
   }
 
@@ -326,7 +344,11 @@ class Machine(
       ): _*),
       "metadata"         -> metadata.asJson,
       "perceptualMapping" -> mappingJson
-    )
+    ).deepMerge(cloneOf.fold(Json.obj())(template => Json.obj(
+      "cloneOf"    -> Json.fromString(template),
+      "assetId"    -> Json.fromString(assetId.getOrElse("")),
+      "envelopeId" -> Json.fromString(envelopeId.getOrElse(""))
+    )))
   }
 
   /** Full serialization including sequence internals. */
