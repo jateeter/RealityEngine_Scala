@@ -148,11 +148,12 @@ class RealityEngine(
             if (inputVector.length != mapping.input.length)
               Future.failed(new IllegalArgumentException(
                 s"Input vector length ${inputVector.length} does not match machine input region length ${mapping.input.length}"))
-            else {
-              val universalSpace = Vector.fill(universalDimension)(0.0)
-                .patch(mapping.input.offset, inputVector, inputVector.length)
-              processUniversalInput(universalSpace, machineId)
-            }
+            // The machine's own input, as given: building a universal vector of
+            // universalDimension only to slice this region back out of it fails
+            // for a machine placed beyond that width — a clone in the clone band
+            // [20480:86015] (SURFACE_SPEC.md, "Cloneable machines") — where the
+            // patch appends rather than overwrites.
+            else processResolvedInput(machine, machineId, inputVector, universalDimension)
         }
     }
 
@@ -160,12 +161,18 @@ class RealityEngine(
     machines.get(machineId) match {
       case None => Future.failed(new NoSuchElementException(s"Machine not found: $machineId"))
       case Some(machine) =>
-        val actor        = machineActors(machineId)
         val machineInput = perceptionEngine.resolveInputEventVectorForMachine(universalInputSpace, machine)
+        processResolvedInput(machine, machineId, machineInput, universalInputSpace.length)
+    }
 
+  /** One machine's transition on its already-resolved input. `dimension` is
+    * reported in the output's metadata as the universal space it came from. */
+  private def processResolvedInput(machine: Machine, machineId: String, machineInput: Vector[Double],
+                                   dimension: Int): Future[MachineTransitionResult] = {
+        val actor          = machineActors(machineId)
         val tagMachineId   = Json.fromString(machineId)
         val tagMachineName = Json.fromString(machine.name)
-        val tagDim         = Json.fromInt(universalInputSpace.length)
+        val tagDim         = Json.fromInt(dimension)
         val hasMerge       = machine.perceptualMapping.isDefined
 
         (actor ? MachineActor.ProcessInput(machineInput)).mapTo[MachineActor.ProcessInputResult].map { pr =>
@@ -177,7 +184,10 @@ class RealityEngine(
               s"sequencesWithOutput=${result.arbiterMetadata.sequencesWithOutput} " +
               s"shouldOutput=${result.arbiterMetadata.shouldOutput} ts=${result.timestamp}")
 
-          machine.perceptualMapping.foreach { mapping =>
+          // This legacy space is universalDimension wide; a region beyond it
+          // (a clone's) has nowhere to go here. The perceptual space runtime,
+          // which grows, is where a clone's output is written on a step.
+          machine.perceptualMapping.filter(m => m.output.offset + m.output.length <= universalDimension).foreach { mapping =>
             if (result.arbiterMetadata.shouldOutput) {
               result.sequenceResults.values.foreach { sr =>
                 sr.assertedOutputs.foreach { ao =>
@@ -197,7 +207,7 @@ class RealityEngine(
                   "outputMergedToPerceptualSpace" -> tagMerged))
           })
         }
-    }
+  }
 
   /**
    * Process universal input through ALL machines in parallel across actors.
