@@ -197,10 +197,14 @@ object MachineLoader {
         "events"   -> Json.arr(seq.getAllVectors.map { vec =>
           val elements = vec.getElements.map { elem =>
             val base = Map("value" -> Json.fromDoubleOrNull(elem.value))
+            // The comparator the element declared, as declared, as C++ and LSP
+            // export it: one equal to the machine's matchAlgorithm was
+            // dropped, so an IFRS element's explicit "equals" vanished from
+            // the export (RealityEngine_Scala#205). An undeclared one stays
+            // absent; the machine's matchAlgorithm covers it.
             val withComp = elem.comparatorType match {
-              case Some(ct) if ct != machine.matchAlgorithm =>
-                base + ("comparatorType" -> Json.fromString(ComparatorType.serialize(ct)))
-              case _ => base
+              case Some(ct) => base + ("comparatorType" -> Json.fromString(ComparatorType.serialize(ct)))
+              case None     => base
             }
             val withThresh = elem.threshold.map(t => withComp + ("threshold" -> Json.fromDoubleOrNull(t))).getOrElse(withComp)
             Json.fromFields(withThresh.toSeq)

@@ -84,4 +84,23 @@ class MachineExportFidelitySpec extends AnyFlatSpec with Matchers {
     event.get[Boolean]("wasJustMatched").toOption shouldBe Some(false)
     event.get[String]("matchAlgorithm").toOption shouldBe Some("gte")
   }
+
+  "an exported element" should "carry the comparatorType it declared, even the machine's own" in {
+    // RealityEngine_Scala#205: a declared comparator equal to the machine's
+    // matchAlgorithm was dropped, so the IFRS machines' explicit "equals"
+    // exported on C++ and LSP and not here. Undeclared stays absent.
+    val m = new Machine("Comparator Probe", "", Map.empty, ArbiterRule.PASSTHROUGH,
+      Some(PerceptualMapping(RegionMapping(0, 3), RegionMapping(20, 1))), "machine-comparator")
+    m.matchAlgorithm = ComparatorType.Equals
+    val seq = new CriticalEventSequence("Comparator Seq", "seq-comparator")
+    seq.addVector(new RealityEvent(Vector(
+      VectorElement(0.5, Some(ComparatorType.Equals), None),
+      VectorElement(0.0, Some(ComparatorType.GTE), None),
+      VectorElement(1.0, None, None)), true, "ev-c"))
+    m.addSequence(seq)
+    val json = parse(MachineLoader.saveToJson(m)).toOption.get
+    val elements = json.hcursor.downField("machine").downField("sequences").downArray
+      .downField("events").downArray.downField("elements").as[List[io.circe.Json]].toOption.get
+    elements.map(_.hcursor.get[String]("comparatorType").toOption) shouldBe List(Some("equals"), Some("gte"), None)
+  }
 }
