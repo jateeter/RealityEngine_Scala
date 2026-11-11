@@ -55,9 +55,9 @@ object PerceptionJsonCodecs {
   implicit val decodeTestSourceConfig: Decoder[TestSourceConfig] = (c: HCursor) =>
     for {
       id           <- c.getOrElse[String]("id")("")
-      name         <- c.get[String]("name")
+      name         <- c.getOrElse[String]("name")("source")
       region       <- c.get[Region]("region")
-      active       <- c.get[Boolean]("active")
+      active       <- c.getOrElse[Boolean]("active")(true)
       // Optional, defaulting to "" as in C++ and LSP. An ad-hoc test source --
       // the OpenClaw dispatch seed in RealityEngine_CI's integration test is
       // one -- names no machine, and requiring these made POST /api/sources
@@ -65,8 +65,8 @@ object PerceptionJsonCodecs {
       machineId    <- c.getOrElse[String]("machineId")("")
       machineName  <- c.getOrElse[String]("machineName")("")
       sequenceName <- c.getOrElse[String]("sequenceName")("")
-      inputs       <- c.get[Vector[Vector[Double]]]("inputs")
-      loop         <- c.get[Boolean]("loop")
+      inputs       <- c.getOrElse[Vector[Vector[Double]]]("inputs")(Vector.empty)
+      loop         <- c.getOrElse[Boolean]("loop")(true)
       metadata     <- c.getOrElse[Json]("metadata")(Json.obj())
       sequence     <- c.getOrElse[Json]("sequence")(Json.obj())
     } yield TestSourceConfig(id, name, region, active, machineId, machineName, sequenceName, inputs, loop, metadata, sequence)
@@ -87,13 +87,13 @@ object PerceptionJsonCodecs {
   implicit val decodeSimulatedSourceConfig: Decoder[SimulatedSourceConfig] = (c: HCursor) =>
     for {
       id        <- c.getOrElse[String]("id")("")
-      name      <- c.get[String]("name")
+      name      <- c.getOrElse[String]("name")("source")
       region    <- c.get[Region]("region")
-      active    <- c.get[Boolean]("active")
-      pattern   <- c.get[SimPattern]("pattern")
-      frequency <- c.get[Double]("frequency")
-      amplitude <- c.get[Double]("amplitude")
-      dcOffset  <- c.get[Double]("dcOffset")
+      active    <- c.getOrElse[Boolean]("active")(true)
+      pattern   <- c.getOrElse[SimPattern]("pattern")(SimPattern.fromString("constant"))
+      frequency <- c.getOrElse[Double]("frequency")(1.0)
+      amplitude <- c.getOrElse[Double]("amplitude")(1.0)
+      dcOffset  <- c.getOrElse[Double]("dcOffset")(0.0)
     } yield SimulatedSourceConfig(id, name, region, active, pattern, frequency, amplitude, dcOffset)
 
   implicit val encodeSensorSourceConfig: Encoder[SensorSourceConfig] = src =>
@@ -112,13 +112,13 @@ object PerceptionJsonCodecs {
   implicit val decodeSensorSourceConfig: Decoder[SensorSourceConfig] = (c: HCursor) =>
     for {
       id          <- c.getOrElse[String]("id")("")
-      name        <- c.get[String]("name")
+      name        <- c.getOrElse[String]("name")("source")
       region      <- c.get[Region]("region")
-      active      <- c.get[Boolean]("active")
+      active      <- c.getOrElse[Boolean]("active")(true)
       sensorId    <- c.get[String]("sensorId")
-      lastValue   <- c.get[Vector[Double]]("lastValue")
-      lastUpdated <- c.get[Option[Long]]("lastUpdated")
-      ttlMs       <- c.get[Long]("ttlMs")
+      lastValue   <- c.getOrElse[Vector[Double]]("lastValue")(Vector.empty)
+      lastUpdated <- c.getOrElse[Option[Long]]("lastUpdated")(None)
+      ttlMs       <- c.getOrElse[Long]("ttlMs")(5000L)
       origin      <- c.getOrElse[Option[String]]("origin")(None)
     } yield SensorSourceConfig(id, name, region, active, sensorId, lastValue, lastUpdated, ttlMs, origin)
 
@@ -142,8 +142,17 @@ object PerceptionJsonCodecs {
     case s: SensorSourceConfig    => encodeSensorSourceConfig(s)
   }
 
+  // The create body (SURFACE_SPEC "POST /api/sources: the create body",
+  // RealityEngine_CI#755): `type` names the kind, `kind` is accepted in its
+  // place, and with neither the source is simulated. `region` is required, and
+  // `sensorId` for a sensor; every other field has the declared default the
+  // variant decoders above apply. This was the full serialized shape only, so
+  // a sparse create that C++ and LSP accepted answered 400 here.
   implicit val decodeSourceConfig: Decoder[SourceConfig] = (c: HCursor) =>
-    c.get[String]("type").flatMap {
+    c.get[Option[String]]("type")
+      .flatMap(t => t.fold(c.getOrElse[String]("kind")("simulated"))(Right(_)))
+      .map(_.toLowerCase)
+      .flatMap {
       case "test"      => decodeTestSourceConfig(c)
       case "simulated" => decodeSimulatedSourceConfig(c)
       case "sensor"    => decodeSensorSourceConfig(c)
