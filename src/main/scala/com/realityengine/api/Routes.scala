@@ -759,7 +759,10 @@ class Routes(
         },
         () => { engine.getAllMachines.foreach(_.transitionsInhibited = false)
                 transitionsInhibitedControl() })
-    )
+    // SURFACE_SPEC "/api/engine/config": sorted by name. Declaration order
+    // listed phaseDetail before the include* controls, where C++ sorts, so the
+    // compared list differed by order alone.
+    ).sortBy(_.name)
   }
 
   /** The flat view of the same state `/api/engine/config` enumerates. Two views,
