@@ -3,7 +3,7 @@ package com.realityengine.perception.api
 import akka.actor.{ActorRef, ActorSystem}
 import akka.http.scaladsl.model.{ContentTypes, HttpEntity, HttpResponse, StatusCode, StatusCodes}
 import akka.http.scaladsl.server.Directives._
-import akka.http.scaladsl.server.Route
+import akka.http.scaladsl.server.{Directive0, Route}
 import akka.stream.Materializer
 import com.realityengine.perception.{MachineCorpus, VectorAggregator}
 import com.realityengine.perception.engine.{OsreFold, PerceptionEngine}
@@ -263,6 +263,12 @@ class PerceptionRoutes(
   private val acpCompletionSourceMappingId = sys.env.getOrElse("ACP_COMPLETION_SOURCE_MAPPING_ID", "acp-openclaw-completion")
   private val hkBridgeToken      = sys.env.get("HEALTHKIT_BRIDGE_TOKEN")
   private val hkBridgeId         = sys.env.getOrElse("HEALTHKIT_BRIDGE_ID", "healthkit-ios-bridge")
+  // Per source (owner, 2026-11-12; RealityEngine_CI docs/TRANSPORT_SECURITY.md):
+  // a source named here (PIM's scope pushes) must present a lane certificate on
+  // the device routes too. C++, LSP, Rust and the TypeScript PE read the same.
+  private val hkCertificateSources = PerceptionRoutes.certificateSources(sys.env.get("HEALTHKIT_CLIENT_CERTIFICATE_REQUIRED"))
+  private def deviceCertificate(named: Option[String]): Directive0 =
+    PerceptionRoutes.deviceCertificate(named.filter(_.nonEmpty).getOrElse(hkBridgeId), hkCertificateSources)
   private val hkDefaultMappingId = sys.env.getOrElse("HEALTHKIT_DEFAULT_SOURCE_MAPPING_ID", "healthkit-activity")
   private val hkEnabled          = sys.env.get("HEALTHKIT_ENABLED").exists(v => v == "true" || v == "1")
   private val ckBridgeToken      = sys.env.get("CAREKIT_BRIDGE_TOKEN")
@@ -1580,7 +1586,7 @@ class PerceptionRoutes(
 
     // ── HealthKit ─────────────────────────────────────────────────────────────
     path("api" / "integrations" / "healthkit" / "status") {
-      get { complete(Json.obj(
+      get { parameter("bridgeId".optional) { named => deviceCertificate(named) { complete(Json.obj(
         "bridgeId"              -> hkBridgeId.asJson,
         "enabled"               -> hkEnabled.asJson,
         "defaultSourceMappingId" -> hkDefaultMappingId.asJson,
@@ -1597,11 +1603,13 @@ class PerceptionRoutes(
           "auth"         -> (if (hkBridgeToken.isDefined) "bridgeToken|bearer" else "none").asJson
         ),
         "scope"                 -> hkScope.json(hkBridgeId)
-      )) }
+      )) } } }
     },
     // Scope and resync (localHealthkitBridge INGEST_CONTRACT.md), 3-of-3.
     path("api" / "integrations" / "healthkit" / "scope") {
       post { optionalHeaderValueByName("Authorization") { authHeader => entity(as[Json]) { body =>
+        deviceCertificate(body.hcursor.get[String]("source").toOption.filter(_.nonEmpty)
+          .orElse(body.hcursor.get[String]("bridgeId").toOption)) {
         if (!hkTokenOk(body, authHeader))
           complete(StatusCodes.Unauthorized -> Json.obj("success" -> false.asJson, "error" -> "invalid HealthKit bridge token".asJson))
         else {
@@ -1621,6 +1629,7 @@ class PerceptionRoutes(
               complete(resp)
           }
         }
+        }
       } } }
     },
     path("api" / "integrations" / "healthkit" / "resync") {
@@ -1639,7 +1648,7 @@ class PerceptionRoutes(
     path("api" / "integrations" / "healthkit" / "ingest") {
       post {
         optionalHeaderValueByName("Authorization") { authHeader =>
-        entity(as[Json]) { body =>
+        entity(as[Json]) { body => deviceCertificate(body.hcursor.get[String]("bridgeId").toOption) {
           // No-token mode: allowed when HEALTHKIT_BRIDGE_TOKEN is unset.
           // If token is configured, require bridgeToken/token in body or
           // an equivalent Authorization: Bearer header.
@@ -1767,6 +1776,7 @@ class PerceptionRoutes(
             )
             complete(status -> resyncId.fold(out)(id => out.mapObject(_.add("resyncId", id.asJson))))
           }
+        }
         }
         }
       }
@@ -2336,6 +2346,23 @@ object PerceptionRoutes {
   /** On the lane's TLS port: any route but a device route needs a verified
     * client certificate, else 403 {"error":"client certificate required"},
     * the body C++ and LSP answer. */
+  /** HEALTHKIT_CLIENT_CERTIFICATE_REQUIRED: the sources that must present a
+    * client certificate on the device routes (comma-separated). */
+  def certificateSources(raw: Option[String]): Set[String] =
+    raw.toSeq.flatMap(_.split(",")).map(_.trim).filter(_.nonEmpty).toSet
+
+  /** On a TLS port, a 403 {"error":"client certificate required"} when `source`
+    * must present a client certificate and the connection carries no verified
+    * one; plaintext has no certificates to ask for. */
+  def deviceCertificate(source: String, required: Set[String]): Directive0 = extractRequest.flatMap { req =>
+    val session = req.attribute(akka.http.scaladsl.model.AttributeKeys.sslSession)
+    val refused = session.isDefined && required.contains(source) &&
+      !session.exists(info => com.realityengine.tls.LaneTls.peerVerified(info.session))
+    if (refused) complete(HttpResponse(StatusCodes.Forbidden,
+      entity = HttpEntity(ContentTypes.`application/json`, """{"error":"client certificate required"}""")))
+    else pass
+  }
+
   def laneGuard(inner: Route): Route = extractRequest { req =>
     val verified = req.attribute(akka.http.scaladsl.model.AttributeKeys.sslSession)
       .exists(info => com.realityengine.tls.LaneTls.peerVerified(info.session))
