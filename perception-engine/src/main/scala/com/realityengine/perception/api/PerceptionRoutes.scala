@@ -238,7 +238,7 @@ class PerceptionRoutes(
   private val ollamaBaseUrl      = sys.env.getOrElse("OLLAMA_BASE_URL",   "http://localhost:11434")
   // Canonical default shared by every runtime; override per engine with
   // OLLAMA_MODEL. See RealityEngine_CI/docs/OLLAMA_INTEGRATION.md.
-  private val ollamaModel        = sys.env.getOrElse("OLLAMA_MODEL",      "nemotron-3-nano:4b")
+  private val ollamaModel        = sys.env.getOrElse("OLLAMA_MODEL",      "nemotron-3-nano:4b-mlx")
 
   // Model families Ollama refuses `format` for ("structured output is
   // unavailable"). The same list and rule are in the C++, LSP and TypeScript
