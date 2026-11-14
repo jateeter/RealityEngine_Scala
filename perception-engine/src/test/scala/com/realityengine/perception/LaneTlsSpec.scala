@@ -78,7 +78,12 @@ class LaneTlsSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll {
       .bind(health), 10.seconds)
     val peRoutes = concat(
       path("api" / "integrations" / "healthkit" / "status")(get(complete(HttpEntity(ContentTypes.`application/json`, """{"device":true}""")))),
-      path("service")(get(complete(HttpEntity(ContentTypes.`application/json`, """{"service":true}""")))))
+      path("service")(get(complete(HttpEntity(ContentTypes.`application/json`, """{"service":true}""")))),
+      // A device route whose source (here the query's) may need a certificate.
+      path("api" / "integrations" / "healthkit" / "scope")(get(parameter("source") { source =>
+        PerceptionRoutes.deviceCertificate(source, PerceptionRoutes.certificateSources(Some(" pim , other")))(
+          complete(HttpEntity(ContentTypes.`application/json`, """{"scope":true}""")))
+      })))
     pePort = freePort()
     val base = ServerSettings(system)
     Await.result(Http().newServerAt("127.0.0.1", pePort)
@@ -142,6 +147,15 @@ class LaneTlsSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll {
     answered(out, 403) shouldBe true
     out should include("""{"error":"client certificate required"}""")
     answered(sClient(pePort, "/service", own), 200) shouldBe true
+  }
+  it should "require a client certificate of a source listed in HEALTHKIT_CLIENT_CERTIFICATE_REQUIRED, and of no other" in {
+    PerceptionRoutes.certificateSources(Some(" pim , other,")) shouldBe Set("pim", "other")
+    PerceptionRoutes.certificateSources(None) shouldBe Set.empty
+    val refused = sClient(pePort, "/api/integrations/healthkit/scope?source=pim", "")
+    answered(refused, 403) shouldBe true
+    refused should include("""{"error":"client certificate required"}""")
+    answered(sClient(pePort, "/api/integrations/healthkit/scope?source=pim", own), 200) shouldBe true
+    answered(sClient(pePort, "/api/integrations/healthkit/scope?source=healthkit-ios-bridge", ""), 200) shouldBe true
   }
   it should "still refuse a presented untrusted certificate" in {
     answered(sClient(pePort, "/api/integrations/healthkit/status", s"-cert ${f("rogue.chain")} -key ${f("rogue.key")}"), 200) shouldBe false

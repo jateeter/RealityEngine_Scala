@@ -133,7 +133,9 @@ implement the same choices. The code is `com.realityengine.tls.LaneTls`, one
 identical file in each build (`src/main/scala/...` and
 `perception-engine/src/main/scala/...`), and `PerceptionRoutes.laneGuard`.
 `LaneTlsSpec` (PE build) pins it. JDK 17 has no X25519MLKEM768, so the engines
-negotiate x25519 and report it at startup.
+negotiate x25519 and report it at startup. On the device routes a source named
+in `HEALTHKIT_CLIENT_CERTIFICATE_REQUIRED` must still present a certificate
+(owner, 2026-11-12; `PerceptionRoutes.deviceCertificate`).
 
 ## Standing rules
 
