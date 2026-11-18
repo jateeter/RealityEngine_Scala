@@ -2206,8 +2206,9 @@ class PerceptionRoutes(
             case Left(err) =>
               complete(StatusCodes.BadRequest -> Json.obj("error" -> err.asJson))
             case Right(rules) =>
-              mqttBridgeRef.get().foreach(_.stop())
-              val clientId = "reality-engine-pe-scala"
+              val current = mqttBridgeRef.get()
+              current.foreach(_.stop())
+              val clientId = MqttBridge.enableClientId(current)
               val username = body.hcursor.downField("username").as[String].toOption.filter(_.nonEmpty)
               val password = body.hcursor.downField("password").as[String].toOption.filter(_.nonEmpty)
               val bridge = new MqttBridge(brokerUrl, clientId, rules, mqttIngest, () => doPush(), username, password)

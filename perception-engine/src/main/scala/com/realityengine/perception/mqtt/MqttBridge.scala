@@ -424,6 +424,18 @@ class MqttBridge(
 object MqttBridge {
 
   val DEFAULT_BROKER_URL = "mqtt://yuma.lateraledge.cloud:1883"
+  val DEFAULT_CLIENT_ID  = "reality-engine-pe-scala"
+
+  /** The client id POST /api/mqtt/enable connects with: a running bridge's,
+    * else this PE's own MQTT_CLIENT_ID (startUniverse.sh sets one per
+    * instance), else the default. Enable always used the default, so every
+    * Scala PE on a shared broker was one client, each connect evicting the
+    * others (#207; the same defect churned LSP's connection, RealityEngine_LSP#197).
+    */
+  def enableClientId(current: Option[MqttBridge], env: Map[String, String] = sys.env): String =
+    current.map(_.clientId).filter(_.nonEmpty)
+      .orElse(env.get("MQTT_CLIENT_ID").filter(_.nonEmpty))
+      .getOrElse(DEFAULT_CLIENT_ID)
 
   def parseRegistry(body: Json): Either[String, Vector[MqttMappingRule]] = {
     val defaults = body.hcursor.downField("defaults").as[Json].getOrElse(Json.obj())
@@ -466,7 +478,7 @@ object MqttBridge {
         }
     }
 
-    val clientId = env.getOrElse("MQTT_CLIENT_ID", "reality-engine-pe-scala")
+    val clientId = env.get("MQTT_CLIENT_ID").filter(_.nonEmpty).getOrElse(DEFAULT_CLIENT_ID)
 
     val rawJson: Option[String] = env.get("MQTT_MAPPINGS_FILE").filter(_.nonEmpty).flatMap { path =>
       Try(scala.io.Source.fromFile(path).mkString).toOption
