@@ -1536,7 +1536,11 @@ class Routes(
             // number (-1 before the first since boot or reset).
             path("clock") { get {
               val (instance, lamport, commit, step) = spaceRuntime.clockNow
-              complete(clockJson(instance, lamport, commit, step))
+              val (received, missing, rejected)     = spaceRuntime.participantClock.headerCounts
+              complete(clockJson(instance, lamport, commit, step).mapObject(_.add("headers", Json.obj(
+                "received" -> Json.fromLong(received),
+                "missing"  -> Json.fromLong(missing),
+                "rejected" -> Json.fromLong(rejected)))))
             } },
             // The step completion point (RealityEngine_CI#375, SURFACE_SPEC.md
             // "Step completion"): the (ISRE, OSRE) pair for step n, waiting up to
@@ -2261,10 +2265,14 @@ class Routes(
     val values = request.headers.filter(_.lowercaseName == "re-clock").map(_.value)
     val stamp  = mapResponseHeaders(_ :+ RawHeader("RE-Clock", clock.header(clock.send())))
     values match {
-      case Seq()                                                    => clock.receive(None); stamp(handleRejections(RejectionHandler.default)(inner))
-      case Seq(one) if InstanceClock.parseHeader(one).isDefined     => clock.receive(InstanceClock.parseHeader(one)); stamp(handleRejections(RejectionHandler.default)(inner))
+      case Seq() =>
+        clock.countHeader(InstanceClock.HeaderMissing); clock.receive(None)
+        stamp(handleRejections(RejectionHandler.default)(inner))
+      case Seq(one) if InstanceClock.parseHeader(one).isDefined =>
+        clock.countHeader(InstanceClock.HeaderReceived); clock.receive(InstanceClock.parseHeader(one))
+        stamp(handleRejections(RejectionHandler.default)(inner))
       case _ =>
-        clock.receive(None)
+        clock.countHeader(InstanceClock.HeaderRejected); clock.receive(None)
         stamp(complete(StatusCodes.BadRequest, Json.obj("error" -> Json.fromString("malformed RE-Clock header"))))
     }
   }

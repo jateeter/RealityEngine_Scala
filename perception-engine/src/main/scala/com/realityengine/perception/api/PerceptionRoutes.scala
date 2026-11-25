@@ -505,7 +505,8 @@ class PerceptionRoutes(
   private def ingestCompletion(body: Json): Json =
     resolveCompletion(body).fold(err => Json.obj("error" -> err.asJson), ingestResolved(body, _))
 
-  private def ingestResolved(body: Json, t: CompletionResolution.Target): Json = {
+  private def ingestResolved(body: Json, t: CompletionResolution.Target,
+                             clocks: Option[(Json, Json)] = None): Json = {
     val CompletionResolution.Target(smId, provider, _, sensorId, name, region, values, ttl) = t
 
     // Declare the sensor source at the resolved region. Idempotent, and
@@ -540,7 +541,8 @@ class PerceptionRoutes(
     // Completions are not dispatch records and do not go in the dispatch
     // ledger: C++ and LSP keep it to records built from envelopes, and the
     // record key set is 3-of-3 (SURFACE_SPEC.md, Dispatch surface shapes).
-    broadcast(Json.obj("type" -> "agent.completion.received".asJson, "record" -> record))
+    val event = Json.obj("type" -> "agent.completion.received".asJson, "record" -> record)
+    broadcast(clocks.fold(event) { case (clock, causedBy) => event.mapObject(_.add("clock", clock).add("causedBy", causedBy)) })
     record
   }
 
@@ -1340,10 +1342,22 @@ class PerceptionRoutes(
             // The record ingestResolved returns is what the Ollama and OpenAI
             // dispatch routes embed; this route answers with the completion
             // envelope C++ and LSP return (RealityEngine_Scala#162).
-            ingestResolved(body, target)
+            // The completion's clock and causedBy (RealityEngine_CI#600): the
+            // dispatch's clock when its record is still in the ledger, else
+            // the sender's well-formed echo, else null.
+            val own = body.hcursor.get[String]("dispatchId").toOption.flatMap { id =>
+              dispatchLedger.get().find(_.hcursor.get[String]("id").toOption.contains(id))
+                .flatMap(_.hcursor.downField("clock").focus)
+            }
+            val causedBy        = com.realityengine.perception.clock.ParticipantClock.causedBy(own, body.hcursor.downField("causedBy").focus)
+            val completionClock = com.realityengine.perception.clock.ParticipantClock.event()
+            ingestResolved(body, target, Some(completionClock -> causedBy))
             val source = engine.getSource(target.sensorId)
               .map(s => engine.reported(s).asJson).getOrElse(Json.Null)
             val reply = CompletionResolution.envelope(body, target, source, System.currentTimeMillis())
+              .hcursor.downField("completion")
+              .withFocus(_.mapObject(_.add("clock", completionClock).add("causedBy", causedBy)))
+              .top.getOrElse(Json.Null)
             onComplete(saveAndBroadcast()) { _ =>
               complete(reply)
             }

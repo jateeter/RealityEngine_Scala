@@ -42,7 +42,27 @@ object ParticipantClock {
     "instance" -> Json.fromString(booted.instance),
     "lamport"  -> Json.fromLong(lastPush._1),
     "commit"   -> Json.fromLong(lastPush._2),
-    "step"     -> Json.fromLong(step))
+    "step"     -> Json.fromLong(step),
+    "headers"  -> {
+      val (received, missing, rejected) = booted.headerCounts
+      Json.obj("received" -> Json.fromLong(received), "missing" -> Json.fromLong(missing), "rejected" -> Json.fromLong(rejected))
+    })
+
+  /** `clock` on a message the PE stores or forwards: a tick, as {instance, lamport}. */
+  def event(): Json = {
+    val c = booted
+    Json.obj("instance" -> Json.fromString(c.instance), "lamport" -> Json.fromLong(c.send()))
+  }
+
+  /** A completion's causedBy: the dispatch's clock when `own` has it (the PE's
+    * own record wins), else the sender's well-formed echo, else null. */
+  def causedBy(own: Option[Json], echo: Option[Json]): Json =
+    own.filter(_.isObject).orElse(echo.flatMap { e =>
+      for {
+        instance <- e.hcursor.get[String]("instance").toOption if InstanceClock.canonicalUuid(instance) && instance == instance.toLowerCase
+        lamport  <- e.hcursor.get[Long]("lamport").toOption if lamport >= 0 && lamport <= InstanceClock.MaxLamport
+      } yield Json.obj("instance" -> Json.fromString(instance), "lamport" -> Json.fromLong(lamport))
+    }).getOrElse(Json.Null)
 
   /** The server half, around every route. */
   def directive(inner: Route): Route = extractRequest { request =>
@@ -50,10 +70,14 @@ object ParticipantClock {
     val values = request.headers.filter(_.lowercaseName == "re-clock").map(_.value)
     val stamp  = mapResponseHeaders(_ :+ RawHeader("RE-Clock", c.header(c.send())))
     values match {
-      case Seq()                                                => c.receive(None); stamp(handleRejections(RejectionHandler.default)(inner))
-      case Seq(one) if InstanceClock.parseHeader(one).isDefined => c.receive(InstanceClock.parseHeader(one)); stamp(handleRejections(RejectionHandler.default)(inner))
+      case Seq() =>
+        c.countHeader(InstanceClock.HeaderMissing); c.receive(None)
+        stamp(handleRejections(RejectionHandler.default)(inner))
+      case Seq(one) if InstanceClock.parseHeader(one).isDefined =>
+        c.countHeader(InstanceClock.HeaderReceived); c.receive(InstanceClock.parseHeader(one))
+        stamp(handleRejections(RejectionHandler.default)(inner))
       case _ =>
-        c.receive(None)
+        c.countHeader(InstanceClock.HeaderRejected); c.receive(None)
         stamp(complete(StatusCodes.BadRequest, Json.obj("error" -> Json.fromString("malformed RE-Clock header"))))
     }
   }

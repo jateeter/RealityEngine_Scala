@@ -75,6 +75,23 @@ final class InstanceClock private (val instance: String,
   def receive(received: Option[Long]): Long =
     synchronized(advance(math.max(currentLamport, received.getOrElse(0L)) + 1))
 
+  // The inbound RE-Clock headers since boot: well-formed, absent, refused.
+  private var headersReceived = 0L
+  private var headersMissing  = 0L
+  private var headersRejected = 0L
+
+  /** Count an inbound request's RE-Clock header. */
+  def countHeader(kind: InstanceClock.HeaderKind): Unit = synchronized {
+    kind match {
+      case InstanceClock.HeaderReceived => headersReceived += 1
+      case InstanceClock.HeaderMissing  => headersMissing += 1
+      case InstanceClock.HeaderRejected => headersRejected += 1
+    }
+  }
+
+  /** (received, missing, rejected) since boot: `headers` on a clock route. */
+  def headerCounts: (Long, Long, Long) = synchronized((headersReceived, headersMissing, headersRejected))
+
   /** The RE-Clock header value for `lamport`. */
   def header(lamport: Long): String = s"instance=$instance; lamport=$lamport"
 
@@ -107,6 +124,11 @@ final class InstanceClock private (val instance: String,
 }
 
 object InstanceClock {
+  sealed trait HeaderKind
+  case object HeaderReceived extends HeaderKind
+  case object HeaderMissing  extends HeaderKind
+  case object HeaderRejected extends HeaderKind
+
   val Reservation: Long = 1024L
   /** The largest lamport an RE-Clock header may carry: 2^53 - 1. */
   val MaxLamport: Long = 9007199254740991L
