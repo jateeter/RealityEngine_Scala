@@ -3,7 +3,7 @@ package com.realityengine.api
 import akka.actor.ActorSystem
 import akka.http.scaladsl.model._
 import akka.http.scaladsl.server.Directives._
-import akka.http.scaladsl.server.{ExceptionHandler, Route}
+import akka.http.scaladsl.server.{ExceptionHandler, RejectionHandler, Route}
 import com.realityengine.engine._
 import com.realityengine.models._
 import com.realityengine.services.MachineLoader
@@ -598,11 +598,21 @@ class Routes(
       Json.False)
 
 
-  /** The clock as every surface reports it: {instance, lamport, step}. */
-  private def clockJson(instance: String, lamport: Long, step: Long): Json =
+  /** The clock as every surface reports it: {instance, lamport, commit, step} (#600). */
+  private def clockJson(instance: String, lamport: Long, commit: Long, step: Long): Json =
     Json.obj("instance" -> Json.fromString(instance),
              "lamport"  -> Json.fromLong(lamport),
+             "commit"   -> Json.fromLong(commit),
              "step"     -> Json.fromLong(step))
+
+  /** A committed step's reply with its clock, so a PE can key what it records
+    * by the RE's (instance, commit) (SURFACE_SPEC "Identity, clock and parity"). */
+  private def withStepClock(stepJson: Json, stepNumber: Long): Json =
+    spaceRuntime.clockForStep(stepNumber) match {
+      case Some((lamport, commit)) =>
+        stepJson.mapObject(_.add("clock", clockJson(spaceRuntime.instanceUuid, lamport, commit, stepNumber)))
+      case None => stepJson
+    }
 
   /** Records as GET /api/arbitration lists them. `canonical` is the retention
     * mode (RealityEngine_CI#296): records by cell, contributions by
@@ -645,9 +655,9 @@ class Routes(
   }
 
   /** One retained step: its records, canonically ordered, under its clock. */
-  private def arbitrationStepJson(step: Long, lamport: Long, records: List[Arbiter.ArbitrationRecord]): Json =
+  private def arbitrationStepJson(step: Long, clockAt: (Long, Long), records: List[Arbiter.ArbitrationRecord]): Json =
     Json.obj(
-      "clock"           -> clockJson(spaceRuntime.instanceUuid, lamport, step),
+      "clock"           -> clockJson(spaceRuntime.instanceUuid, clockAt._1, clockAt._2, step),
       "registryEntries" -> Json.fromInt(com.realityengine.engine.ArbitrationRegistry.size),
       "registrySource"  -> com.realityengine.engine.ArbitrationRegistry.source
                              .map(Json.fromString).getOrElse(Json.Null),
@@ -1525,8 +1535,12 @@ class Routes(
             // value of the newest committed step (never reset), and that step's
             // number (-1 before the first since boot or reset).
             path("clock") { get {
-              val (instance, lamport, step) = spaceRuntime.clockNow
-              complete(clockJson(instance, lamport, step))
+              val (instance, lamport, commit, step) = spaceRuntime.clockNow
+              val (received, missing, rejected)     = spaceRuntime.participantClock.headerCounts
+              complete(clockJson(instance, lamport, commit, step).mapObject(_.add("headers", Json.obj(
+                "received" -> Json.fromLong(received),
+                "missing"  -> Json.fromLong(missing),
+                "rejected" -> Json.fromLong(rejected)))))
             } },
             // The step completion point (RealityEngine_CI#375, SURFACE_SPEC.md
             // "Step completion"): the (ISRE, OSRE) pair for step n, waiting up to
@@ -1994,7 +2008,7 @@ class Routes(
             raw.toLongOption.filter(n => n >= 0 && raw.forall(_.isDigit)) match {
               case None => error(StatusCodes.BadRequest, "step must be a non-negative integer")
               case Some(n) => spaceRuntime.arbitrationAt(n) match {
-                case Right((lamport, records)) => complete(arbitrationStepJson(n, lamport, records))
+                case Right((clockAt, records)) => complete(arbitrationStepJson(n, clockAt, records))
                 case Left(409) => error(StatusCodes.Conflict,
                   "arbitration retention is off; GET /api/arbitration?step=N needs arbitrationRetention true")
                 case Left(404) => error(StatusCodes.NotFound, s"step $n has not resolved")
@@ -2002,8 +2016,8 @@ class Routes(
               }
             }
           case None if spaceRuntime.getArbitrationRetention =>
-            complete(Json.arr(spaceRuntime.retainedArbitration.map { case (step, lamport, records) =>
-              arbitrationStepJson(step, lamport, records)
+            complete(Json.arr(spaceRuntime.retainedArbitration.map { case (step, clockAt, records) =>
+              arbitrationStepJson(step, clockAt, records)
             }: _*))
           case None =>
             val recs = spaceRuntime.getLastArbitration
@@ -2061,7 +2075,8 @@ class Routes(
             path("stop")    { post { simLock.synchronized { cancelAutoPlay(); spaceRuntime.stop() }; complete(Json.obj("success" -> Json.fromBoolean(true))) } },
             path("step")    { post { simLock.synchronized(spaceRuntime.step()) match {
               case None    => complete(Json.obj("done" -> Json.fromBoolean(true), "success" -> Json.fromBoolean(true)))
-              case Some(s) => complete(Json.obj("success" -> Json.fromBoolean(true), "step" -> s.asJson))
+              case Some(s) => complete(Json.obj("success" -> Json.fromBoolean(true),
+                                                "step" -> withStepClock(s.asJson, s.stepNumber.toLong)))
             } } },
             path("reset")   { post { simLock.synchronized { cancelAutoPlay(); spaceRuntime.reset() }; complete(Json.obj("success" -> Json.fromBoolean(true))) } },
             path("state")   { get {
@@ -2106,7 +2121,7 @@ class Routes(
           sseQueue.offer(step)
           // The SSE hub above gets the whole step: subscribers asked for
           // everything by subscribing. Only the caller's response is narrowed.
-          complete(trimStepJson(selectStepSubset(step, body).asJson, body))
+          complete(withStepClock(trimStepJson(selectStepSubset(step, body).asJson, body), step.stepNumber.toLong))
         } } },
 
         // ── /api/engine/config — one pathway for every runtime control ────
@@ -2240,8 +2255,32 @@ class Routes(
     )
   } }
 
+  /** The participant clock on every request (RealityEngine_CI#600): each
+    * request is a receive, applied before it is handled -- max(local, received)
+    * + 1 with an RE-Clock header, + 1 without -- and a malformed or repeated
+    * header is refused with 400 (still a receive). Each response, a rejection
+    * turned into one included, is a send: the clock ticks, then stamps it. */
+  private def participantClock(inner: Route): Route = extractRequest { request =>
+    val clock  = spaceRuntime.participantClock
+    val values = request.headers.filter(_.lowercaseName == "re-clock").map(_.value)
+    val stamp  = mapResponseHeaders(_ :+ RawHeader("RE-Clock", clock.header(clock.send())))
+    values match {
+      case Seq() =>
+        clock.countHeader(InstanceClock.HeaderMissing); clock.receive(None)
+        stamp(handleRejections(RejectionHandler.default)(inner))
+      case Seq(one) if InstanceClock.parseHeader(one).isDefined =>
+        clock.countHeader(InstanceClock.HeaderReceived); clock.receive(InstanceClock.parseHeader(one))
+        stamp(handleRejections(RejectionHandler.default)(inner))
+      case _ =>
+        clock.countHeader(InstanceClock.HeaderRejected); clock.receive(None)
+        stamp(complete(StatusCodes.BadRequest, Json.obj("error" -> Json.fromString("malformed RE-Clock header"))))
+    }
+  }
+
   val routes: Route = respondWithHeaders(corsHeaders) {
-    options { complete(StatusCodes.NoContent) } ~ innerRoutes
+    participantClock {
+      options { complete(StatusCodes.NoContent) } ~ innerRoutes
+    }
   }
 }
 

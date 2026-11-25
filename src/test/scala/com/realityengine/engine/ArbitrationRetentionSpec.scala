@@ -94,14 +94,14 @@ class ArbitrationRetentionSpec extends AnyFlatSpec with Matchers {
     sim.setArbitrationRetention(true)
     sim.processImmediate(fire)
     sim.processImmediate(fire)
-    val (instance, lamport, step) = sim.clockNow
-    (lamport, step) shouldBe ((2L, 1L))
+    val (instance, lamport, commit, step) = sim.clockNow
+    (lamport, commit, step) shouldBe ((2L, 2L, 1L))
     sim.reset()
     sim.getLastArbitration shouldBe empty
     sim.retainedArbitration shouldBe empty
-    sim.clockNow shouldBe ((instance, 2L, -1L))     // the step count restarts; lamport does not
+    sim.clockNow shouldBe ((instance, 2L, 2L, -1L)) // the step count restarts; lamport and commit do not
     sim.processImmediate(fire)
-    sim.arbitrationAt(0).map(_._1) shouldBe Right(3L) // step 0 again, at a new tick
+    sim.arbitrationAt(0).map(_._1) shouldBe Right((3L, 3L)) // step 0 again, at a new tick
   }
 
   "the instance clock" should "mint a canonical v7 UUID per instance when none is allocated" in {
@@ -118,16 +118,22 @@ class ArbitrationRetentionSpec extends AnyFlatSpec with Matchers {
     val file = dir.resolve("0192f3a0-0000-7000-8000-0000000002f3.lamport")
     val uuid = "0192f3a0-0000-7000-8000-0000000002f3"
     val first = InstanceClock.persisted(uuid, file)
-    List(first.tick(), first.tick(), first.tick()) shouldBe List(1L, 2L, 3L)
+    List(first.commitStep(), first.commitStep(), first.commitStep()).map(_._2) shouldBe List(1L, 2L, 3L)
     InstanceClock.readReservation(file) shouldBe InstanceClock.Reservation
+    InstanceClock.readReservation(dir.resolve(s"$uuid.commit")) shouldBe InstanceClock.Reservation
     first.close()
     val second = InstanceClock.persisted(uuid, file)
-    second.tick() shouldBe InstanceClock.Reservation + 1   // a restart never reissues a tick
-    val last = (1 to 1100).map(_ => second.tick()).last
+    second.commitStep() shouldBe ((InstanceClock.Reservation + 1, InstanceClock.Reservation + 1)) // never reissued
+    var last = (1 to 1100).map(_ => second.send()).last
     InstanceClock.readReservation(file) should be >= last  // persisted before issued
+    val jumped = second.receive(Some(last + 10 * InstanceClock.Reservation))
+    jumped shouldBe last + 10 * InstanceClock.Reservation + 1 // max(local, received) + 1
+    InstanceClock.readReservation(file) should be >= jumped   // durable before it is used
+    last = jumped
     second.close()
     val third = InstanceClock.persisted(uuid, file)
-    third.tick() should be > last
+    third.send() should be > last
+    third.commit should be < third.lamport                    // the marks are kept apart
     third.close()
   }
 
@@ -148,8 +154,41 @@ class ArbitrationRetentionSpec extends AnyFlatSpec with Matchers {
       holder.waitFor()
     }
     val after = InstanceClock.persisted(uuid, file)          // released when the holder exits
-    after.tick() shouldBe 1L
+    after.commitStep() shouldBe ((1L, 1L))
     after.close()
+  }
+
+  it should "tick lamport alone on a send or receive, and commit and lamport on a step (#600)" in {
+    val c = InstanceClock.minted()
+    c.commitStep() shouldBe ((1L, 1L))
+    c.send() shouldBe 2L
+    c.commit shouldBe 1L
+    c.receive(None) shouldBe 3L                       // no header: + 1
+    c.receive(Some(100L)) shouldBe 101L               // max(local, received) + 1
+    c.receive(Some(5L)) shouldBe 102L                 // a value behind moves it by one
+  }
+
+  it should "seed both marks from a directory written before #600" in {
+    val dir  = Files.createTempDirectory("re-scala-migrate")
+    val uuid = "0192f3a0-0000-7000-8000-0000000003aa"
+    Files.write(dir.resolve(s"$uuid.lamport"), "500\n".getBytes)
+    val migrated = InstanceClock.persisted(uuid, dir.resolve(s"$uuid.lamport"))
+    (migrated.lamport, migrated.commit) shouldBe ((500L, 500L))
+    migrated.commitStep()._2 shouldBe 501L
+    migrated.close()
+  }
+
+  it should "parse the RE-Clock header exactly as the specification states it" in {
+    val u = "0192f3a0-0000-7000-8000-0000000002d9"
+    InstanceClock.parseHeader(s"instance=$u; lamport=42") shouldBe Some(42L)
+    InstanceClock.parseHeader(s"instance=$u;lamport=0") shouldBe Some(0L)
+    InstanceClock.parseHeader(s"instance=$u ;  lamport=9007199254740991") shouldBe Some(9007199254740991L)
+    List("", s"lamport=1; instance=$u", s"instance=$u", s"instance=$u; lamport=", s"instance=$u; lamport=-1",
+         s"instance=$u; lamport=01", s"instance=$u; lamport=9007199254740992", s"instance=$u; lamport=1; x=2",
+         "instance=0192F3A0-0000-7000-8000-0000000002D9; lamport=1", "instance=cpp-1; lamport=1")
+      .foreach(bad => InstanceClock.parseHeader(bad) shouldBe None)
+    val c = InstanceClock.minted()
+    InstanceClock.parseHeader(c.header(7)) shouldBe Some(7L)
   }
 
   it should "refuse a corrupt or unwritable clock rather than reissue ticks" in {

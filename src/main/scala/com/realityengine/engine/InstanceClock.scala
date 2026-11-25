@@ -7,81 +7,170 @@ import java.nio.charset.StandardCharsets
 import java.nio.file.{Files, Path, Paths, StandardCopyOption, StandardOpenOption}
 
 /**
- * The instance's Lamport clock (RealityEngine_CI#296): {instance, lamport, step}.
+ * A participant's clock (RealityEngine_CI#296, #600; SURFACE_SPEC.md "The
+ * instance clock"): {instance, lamport, commit, step}.
  *
- * A UUID belongs to an *instance* -- cpp-1, lsp-2 -- never to an engine type or
- * an image, and no two instances of any engine type may share one. The instance
- * registry allocates it and passes it as INSTANCE_UUID; an instance launched
- * without one mints a version-7 UUID at boot, which is unique by construction.
+ * A UUID belongs to a *participant* -- an instance's RE (scala-1) or its PE --
+ * never to an engine type or an image, and no two participants may share one.
+ * CI allocates it (INSTANCE_UUID for an RE, PE_INSTANCE_UUID for a PE); a
+ * participant launched without one mints a version-7 UUID at boot.
  *
- * `lamport` ticks once per committed step and is never reset, so
- * (instance, lamport) names one step uniquely. For an allocated instance that
- * holds across restarts too: INSTANCE_CLOCK_DIR (default ~/.reality-engine/clock/)
- * keeps <uuid>.lamport, a high-water mark reserved `Reservation` ticks ahead. A
- * boot resumes from the mark and reserves the next block before issuing any
- * tick, and a tick past the persisted mark is always preceded by the write of the
- * next block, never followed by it. The write is temp + atomic move, so a crash
- * leaves the old mark or the new one.
+ *  - `lamport` is the full Lamport clock: it ticks on every committed step,
+ *    every send and every receive, and a receive is max(local, received) + 1.
+ *  - `commit` counts committed steps: what `lamport` counted before #600.
+ * Neither ever resets, and lamport >= commit always holds. (`step` is the
+ * caller's: it restarts on reset.)
  *
- * The instance also holds an exclusive lock on <uuid>.lock for its whole life
+ * For an allocated participant both hold across restarts. INSTANCE_CLOCK_DIR
+ * (default ~/.reality-engine/clock/) keeps two high-water marks, <uuid>.lamport
+ * and <uuid>.commit, each reserved `Reservation` ticks ahead. A boot resumes
+ * from the marks and reserves the next blocks before issuing any tick; a tick
+ * past a persisted mark -- a receive that jumps past it included -- is always
+ * preceded by the write of the next mark, never followed by it. Writes are
+ * temp + atomic move. A directory written before #600 holds only
+ * <uuid>.lamport, which counted committed steps; the first boot under this rule
+ * seeds both marks from it.
+ *
+ * The participant holds an exclusive lock on <uuid>.lock for its whole life
  * (FileChannel.tryLock, fcntl-based, so it excludes the C++ and LSP runtimes'
  * lockf too), and a second live process presenting the same UUID refuses to
- * boot. The OS releases it when the process exits; a crash leaves no stale lock.
- * A separate file, because the clock file is replaced by a move and a lock on a
- * replaced inode guards nothing.
+ * boot.
  *
- * Not thread-safe on its own: PerceptualSpaceRuntime ticks it under stepLock.
+ * Thread-safe: receives and sends arrive on every request thread.
  */
 final class InstanceClock private (val instance: String,
-                                   file: Option[Path],
+                                   lamportFile: Option[Path],
                                    private var lock: Option[(FileChannel, FileLock)],
-                                   start: Long) {
-  private var current  = start
-  private var reserved = start
+                                   startLamport: Long,
+                                   startCommit: Long) {
+  private val commitFile      = lamportFile.map(InstanceClock.commitFileFor)
+  private var currentLamport  = math.max(startLamport, startCommit)
+  private var currentCommit   = startCommit
+  private var lamportReserved = currentLamport
+  private var commitReserved  = currentCommit
 
-  file.foreach(_ => reserve(start))
+  commitFile.foreach(_ => reserveCommit(currentCommit))
+  lamportFile.foreach(_ => reserveLamport(currentLamport))
 
-  def lamport: Long = current
+  def lamport: Long = synchronized(currentLamport)
+  def commit: Long  = synchronized(currentCommit)
 
-  /** Advance for a committed step; returns the new value. */
-  def tick(): Long = {
-    val next = current + 1
-    if (file.isDefined && next > reserved) reserve(next) // persist first, then issue
-    current = next
-    current
+  /** A committed step: ticks commit and lamport together; returns (lamport, commit). */
+  def commitStep(): (Long, Long) = synchronized {
+    val nextCommit  = currentCommit + 1
+    val nextLamport = currentLamport + 1
+    // Persist first, then issue: a mark is never behind what was handed out.
+    if (commitFile.isDefined && nextCommit > commitReserved) reserveCommit(nextCommit)
+    if (lamportFile.isDefined && nextLamport > lamportReserved) reserveLamport(nextLamport)
+    currentCommit = nextCommit
+    currentLamport = nextLamport
+    (currentLamport, currentCommit)
   }
 
+  /** A send -- a response or an outbound call: ticks lamport; returns it. */
+  def send(): Long = synchronized(advance(currentLamport + 1))
+
+  /** A receive, applied before the request is handled: max(local, received) + 1,
+    * or local + 1 when no header was presented; returns the new lamport. */
+  def receive(received: Option[Long]): Long =
+    synchronized(advance(math.max(currentLamport, received.getOrElse(0L)) + 1))
+
+  // The inbound RE-Clock headers since boot: well-formed, absent, refused.
+  private var headersReceived = 0L
+  private var headersMissing  = 0L
+  private var headersRejected = 0L
+
+  /** Count an inbound request's RE-Clock header. */
+  def countHeader(kind: InstanceClock.HeaderKind): Unit = synchronized {
+    kind match {
+      case InstanceClock.HeaderReceived => headersReceived += 1
+      case InstanceClock.HeaderMissing  => headersMissing += 1
+      case InstanceClock.HeaderRejected => headersRejected += 1
+    }
+  }
+
+  /** (received, missing, rejected) since boot: `headers` on a clock route. */
+  def headerCounts: (Long, Long, Long) = synchronized((headersReceived, headersMissing, headersRejected))
+
+  /** The RE-Clock header value for `lamport`. */
+  def header(lamport: Long): String = s"instance=$instance; lamport=$lamport"
+
   /** Release the instance lock (a restart in tests; the OS does it at exit). */
-  def close(): Unit = {
+  def close(): Unit = synchronized {
     lock.foreach { case (channel, held) => held.release(); channel.close() }
     lock = None
   }
 
-  private def reserve(through: Long): Unit = {
+  // A jump past the reserved mark is made durable before it is used: one jump
+  // can exceed the reservation, and adopting it first could reissue a tick
+  // after a crash. Caller holds the monitor.
+  private def advance(next: Long): Long = {
+    if (lamportFile.isDefined && next > lamportReserved) reserveLamport(next)
+    currentLamport = next
+    currentLamport
+  }
+
+  private def reserveLamport(through: Long): Unit = {
     val next = through + InstanceClock.Reservation
-    InstanceClock.writeReservation(file.get, next)
-    reserved = next
+    InstanceClock.writeReservation(lamportFile.get, next)
+    lamportReserved = next
+  }
+
+  private def reserveCommit(through: Long): Unit = {
+    val next = through + InstanceClock.Reservation
+    InstanceClock.writeReservation(commitFile.get, next)
+    commitReserved = next
   }
 }
 
 object InstanceClock {
+  sealed trait HeaderKind
+  case object HeaderReceived extends HeaderKind
+  case object HeaderMissing  extends HeaderKind
+  case object HeaderRejected extends HeaderKind
+
   val Reservation: Long = 1024L
+  /** The largest lamport an RE-Clock header may carry: 2^53 - 1. */
+  val MaxLamport: Long = 9007199254740991L
 
   private val Canonical = "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$".r
+  private val Lower     = "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$".r
+  private val Number    = "^(0|[1-9][0-9]{0,15})$".r
 
   def canonicalUuid(s: String): Boolean = s != null && Canonical.matches(s)
 
-  /** A minted, unpersisted clock -- what an instance without an allocation runs. */
-  def minted(): InstanceClock = new InstanceClock(MintedIds.uuidV7(), None, None, 0L)
+  /** An RE-Clock value, parsed: the sender's lamport, or None when malformed
+    * (SURFACE_SPEC "The header": `instance=<lower-case uuid>; lamport=<n>`,
+    * both once and in that order, n in [0, 2^53 - 1] with no sign or leading
+    * zeros). */
+  def parseHeader(value: String): Option[Long] = {
+    val parts = value.split(";", -1)
+    if (parts.length != 2) None
+    else {
+      val first  = parts(0).trim
+      val second = parts(1).trim
+      if (!first.startsWith("instance=") || !second.startsWith("lamport=")) None
+      else {
+        val uuid   = first.stripPrefix("instance=")
+        val digits = second.stripPrefix("lamport=")
+        if (!Lower.matches(uuid) || !Number.matches(digits)) None
+        else Some(digits.toLong).filter(_ <= MaxLamport)
+      }
+    }
+  }
 
-  /** The clock for this boot, from INSTANCE_UUID / INSTANCE_CLOCK_DIR. Throws
-    * when an allocated instance cannot keep its clock or another live process
+  /** A minted, unpersisted clock -- what a participant without an allocation runs. */
+  def minted(): InstanceClock = new InstanceClock(MintedIds.uuidV7(), None, None, 0L, 0L)
+
+  /** The participant's clock for this boot, from `uuidVariable` (INSTANCE_UUID
+    * for an RE, PE_INSTANCE_UUID for a PE) and INSTANCE_CLOCK_DIR. Throws when
+    * an allocated participant cannot keep its clock or another live process
     * holds its UUID: either way ticks could be issued twice. */
-  def boot(env: Map[String, String] = sys.env): InstanceClock = {
-    val allocated = env.getOrElse("INSTANCE_UUID", "")
+  def boot(env: Map[String, String] = sys.env, uuidVariable: String = "INSTANCE_UUID"): InstanceClock = {
+    val allocated = env.getOrElse(uuidVariable, "")
     if (!canonicalUuid(allocated)) {
       if (allocated.nonEmpty)
-        System.err.println(s"""INSTANCE_UUID "$allocated" is not a canonical UUID; minting one""")
+        System.err.println(s"""$uuidVariable "$allocated" is not a canonical UUID; minting one""")
       minted()
     } else {
       val uuid = allocated.toLowerCase
@@ -91,18 +180,29 @@ object InstanceClock {
     }
   }
 
-  /** An allocated clock kept in `file`. */
+  /** An allocated clock whose lamport mark is `file` (<uuid>.lamport) and
+    * commit mark <uuid>.commit beside it. */
   def persisted(uuid: String, file: Path): InstanceClock = {
     val held = lockInstance(uuid, file) // before anything is read or written
-    try new InstanceClock(uuid, Some(file), Some(held), readReservation(file))
-    catch {
+    try {
+      val commitFile = commitFileFor(file)
+      val migrating  = !Files.exists(commitFile)
+      val lamport    = readReservation(file)
+      // A directory from before #600 holds only <uuid>.lamport, which counted
+      // committed steps: it seeds both marks.
+      val commit     = if (migrating) lamport else readReservation(commitFile)
+      new InstanceClock(uuid, Some(file), Some(held), lamport, commit)
+    } catch {
       case e: Throwable =>
         held._2.release(); held._1.close()
         throw e
     }
   }
 
-  /** The high-water mark persisted in `file`; 0 when the instance has never run. */
+  private def commitFileFor(file: Path): Path =
+    file.resolveSibling(file.getFileName.toString.stripSuffix(".lamport") + ".commit")
+
+  /** The high-water mark persisted in `file`; 0 when the participant has never run. */
   def readReservation(file: Path): Long =
     if (!Files.exists(file)) 0L
     else {
@@ -113,7 +213,7 @@ object InstanceClock {
 
   private def writeReservation(file: Path, value: Long): Unit = {
     Files.createDirectories(file.getParent)
-    val tmp = file.resolveSibling(file.getFileName.toString.stripSuffix(".lamport") + ".lamport-tmp")
+    val tmp = file.resolveSibling(file.getFileName.toString + ".tmp")
     Files.write(tmp, s"$value\n".getBytes(StandardCharsets.UTF_8))
     Files.move(tmp, file, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE)
   }
@@ -131,7 +231,7 @@ object InstanceClock {
         channel.close()
         throw new IllegalStateException(
           s"Instance $uuid is already live: another process holds $lockFile. " +
-            "Two instances may not share a UUID (RealityEngine_CI#296).")
+            "Two participants may not share a UUID (RealityEngine_CI#296).")
     }
   }
 }

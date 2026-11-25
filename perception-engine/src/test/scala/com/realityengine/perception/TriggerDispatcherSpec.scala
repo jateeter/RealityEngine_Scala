@@ -41,7 +41,7 @@ class TriggerDispatcherSpec extends AnyWordSpec with Matchers {
       recs.head.asObject.get.keys.toSet shouldBe Set(
         "id", "envelopeId", "correlationId", "status", "mode", "target", "machineId", "sequenceIds",
         "ragStatusCode", "processStatus", "attempts", "createdAt", "updatedAt", "providerReceipt",
-        "envelope", "error", "semantics", "replayOf")
+        "envelope", "error", "semantics", "replayOf", "clock")
       val r = recs.head.hcursor
       r.get[String]("target").toOption shouldBe Some("agent_a")
       r.get[Vector[String]]("sequenceIds").toOption shouldBe Some(Vector("seq-x"))
@@ -117,7 +117,8 @@ class TriggerDispatcherReplaySpec extends AnyWordSpec with Matchers {
       |"target":"a","machineId":"m","sequenceIds":["s"],"ragStatusCode":"RED","processStatus":"error",
       |"attempts":3,"createdAt":1,"updatedAt":2,"providerReceipt":{"adapter":"acp"},"error":"x",
       |"envelope":{"envelopeId":"e1","correlationId":"c1","emittedAtMs":1},
-      |"semantics":{"machineIri":null,"sequenceIri":null,"actionCode":null},"replayOf":null}""".stripMargin).toOption.get
+      |"semantics":{"machineIri":null,"sequenceIri":null,"actionCode":null},"replayOf":null,
+      |"clock":{"instance":"0192f3a0-0000-7000-8000-0000000000c2","lamport":1}}""".stripMargin).toOption.get
 
   "replayRecord" should {
     "reset delivery state, mark the replay, and keep the causal chain by default" in {
@@ -133,6 +134,8 @@ class TriggerDispatcherReplaySpec extends AnyWordSpec with Matchers {
       r.get[String]("correlationId").toOption shouldBe Some("c1")
       r.get[String]("target").toOption shouldBe Some("a")
       r.focus.get.asObject.get.keys.toSet shouldBe original.asObject.get.keys.toSet
+      // A replay is a new stored message: the PE's clock at the replay (#600).
+      r.downField("clock").focus should not be original.hcursor.downField("clock").focus
     }
     "re-mint the ids, in the envelope too, with freshIds" in {
       val r = TriggerDispatcher.replayRecord(original, freshIds = true, now = 9L, newId = k => s"$k-new").hcursor

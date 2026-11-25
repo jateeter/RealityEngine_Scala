@@ -212,7 +212,21 @@ class PerceptualSpaceRuntime(dimension: Int = sys.env.getOrElse("VECTOR_DIMENSIO
   // INSTANCE_UUID before the corpus loads; a runtime built without one (tests)
   // runs a minted clock. Ticked under stepLock.
   @volatile private var clock: InstanceClock = InstanceClock.minted()
-  def useInstanceClock(booted: InstanceClock): Unit = stepLock.synchronized { clock = booted }
+  def useInstanceClock(booted: InstanceClock): Unit = stepLock.synchronized {
+    clock = booted
+    lastCommit = (booted.lamport, booted.commit)
+  }
+  /** The participant clock itself: the routes apply the receive and send rules
+    * to it on every request (RealityEngine_CI#600). */
+  def participantClock: InstanceClock = clock
+  // (lamport, commit) of the newest committed step since boot -- the clock as
+  // booted before the first -- and of each recent step, so a step's reply
+  // reports the clock it committed at even when another push commits right
+  // after it. Guarded by stepLock; a reset clears the per-step map.
+  private var lastCommit: (Long, Long) = (0L, 0L)
+  private var commitClocks = scala.collection.immutable.TreeMap.empty[Long, (Long, Long)]
+  /** The clock step `step` committed at, while it is recent. */
+  def clockForStep(step: Long): Option[(Long, Long)] = stepLock.synchronized(commitClocks.get(step))
 
   // Retention keyed by step. Off by default: GET /api/arbitration answers in
   // its legacy shape and nothing is kept per step. On, each committed step's
@@ -223,7 +237,7 @@ class PerceptualSpaceRuntime(dimension: Int = sys.env.getOrElse("VECTOR_DIMENSIO
   private var arbitrationRetention = false
   private var arbitrationWindow    = PerceptualSpaceRuntime.ArbitrationWindowDefault
   private var arbitrationSteps     =
-    scala.collection.immutable.TreeMap.empty[Long, (Long, List[Arbiter.ArbitrationRecord])]
+    scala.collection.immutable.TreeMap.empty[Long, ((Long, Long), List[Arbiter.ArbitrationRecord])]
 
   // Step phase timing (SURFACE_SPEC.md, "phaseDetail"): the five universal step
   // phases, each the span between two declared boundaries (B0 step start, B1
@@ -268,20 +282,22 @@ class PerceptualSpaceRuntime(dimension: Int = sys.env.getOrElse("VECTOR_DIMENSIO
   private def pruneArbitrationSteps(latest: Long): Unit =
     arbitrationSteps = arbitrationSteps.rangeFrom(latest - arbitrationWindow + 1)
 
-  /** {instance, lamport, step}: the Lamport value of the newest committed step
-    * and that step's number (-1 before the first since boot or reset). */
-  def clockNow: (String, Long, Long) = stepLock.synchronized((clock.instance, clock.lamport, completedStep))
+  /** {instance, lamport, commit, step}: the newest committed step's lamport and
+    * commit (the clock as booted before the first) and its number (-1 before
+    * the first since boot or reset). */
+  def clockNow: (String, Long, Long, Long) =
+    stepLock.synchronized((clock.instance, lastCommit._1, lastCommit._2, completedStep))
 
   /** The retained steps in the window ending at the latest, oldest first, each
     * as (step, lamport, records). Fewer than the window when fewer exist. */
-  def retainedArbitration: List[(Long, Long, List[Arbiter.ArbitrationRecord])] = stepLock.synchronized {
+  def retainedArbitration: List[(Long, (Long, Long), List[Arbiter.ArbitrationRecord])] = stepLock.synchronized {
     arbitrationSteps.range(math.max(0L, completedStep - arbitrationWindow + 1), completedStep + 1)
-      .toList.map { case (step, (lamport, records)) => (step, lamport, records) }
+      .toList.map { case (step, (clockAt, records)) => (step, clockAt, records) }
   }
 
   /** One retained step. Left(409) with retention off, Left(404) for a step that
     * has not resolved, Left(410) for one no longer retained. */
-  def arbitrationAt(step: Long): Either[Int, (Long, List[Arbiter.ArbitrationRecord])] = stepLock.synchronized {
+  def arbitrationAt(step: Long): Either[Int, ((Long, Long), List[Arbiter.ArbitrationRecord])] = stepLock.synchronized {
     if (!arbitrationRetention) Left(409)
     else if (step > completedStep) Left(404)
     else arbitrationSteps.get(step).toRight(410)
@@ -326,6 +342,7 @@ class PerceptualSpaceRuntime(dimension: Int = sys.env.getOrElse("VECTOR_DIMENSIO
     // retained steps go too; the clock keeps its value.
     lastArbitration = Nil
     arbitrationSteps = arbitrationSteps.empty
+    commitClocks = commitClocks.empty
     stop()
     perceptualSpace.reset()
     history = Nil
@@ -759,7 +776,11 @@ class PerceptualSpaceRuntime(dimension: Int = sys.env.getOrElse("VECTOR_DIMENSIO
     // completion is published, so an observer woken for step n finds n's
     // arbitration records already there (#296).
     val step = isre.stepNumber.toLong
-    val tick = clock.tick()
+    // A committed step ticks commit and lamport together (#600).
+    val tick = clock.commitStep()
+    lastCommit = tick
+    commitClocks = commitClocks.updated(step, tick)
+    if (commitClocks.size > PerceptualSpaceRuntime.CommitClocksKept) commitClocks = commitClocks.drop(1)
     if (arbitrationRetention && arbitrationWindow > 0) {
       arbitrationSteps = arbitrationSteps.updated(step, (tick, lastArbitration))
       pruneArbitrationSteps(step)
@@ -856,5 +877,7 @@ object PerceptualSpaceRuntime {
     * and ceiling, from SURFACE_SPEC.md. The ceiling matches the trajectory
     * capacity, the memory envelope every runtime already carries per step. */
   val ArbitrationWindowDefault: Int = 1
+  /** Recent steps whose commit clock a reply can still look up (#600). */
+  val CommitClocksKept: Int = 256
   val ArbitrationWindowMax: Int     = 1024
 }

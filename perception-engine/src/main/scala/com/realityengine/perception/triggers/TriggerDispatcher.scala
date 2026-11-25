@@ -1,5 +1,6 @@
 package com.realityengine.perception.triggers
 
+import com.realityengine.perception.clock.ParticipantClock
 import io.circe.Json
 import io.circe.syntax._
 
@@ -106,7 +107,10 @@ final class TriggerDispatcher(
           "envelope"        -> envelope,
           "error"           -> Json.Null,
           "semantics"       -> semantics,
-          "replayOf"        -> Json.Null
+          "replayOf"        -> Json.Null,
+          // The PE's clock when it stored the record (RealityEngine_CI#600);
+          // a completion names it as causedBy.
+          "clock"           -> ParticipantClock.event()
         ))
     }
   }
@@ -203,6 +207,7 @@ object TriggerDispatcher {
       .add("providerReceipt", Json.Null)
       .add("error", Json.Null)
       .add("replayOf", o.downField("id").focus.getOrElse(Json.Null))
+      .add("clock", ParticipantClock.event())
       .add("envelope", envelope))
   }
 

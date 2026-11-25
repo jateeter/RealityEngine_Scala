@@ -81,7 +81,10 @@ class PerceptionRoutes(
 
   // Lane TLS (#210): an https call to an internal peer uses the lane CA and
   // this instance's certificate; nothing changes with the lane off.
-  private val sttpBackend = HttpURLConnectionBackend(customizeConnection = com.realityengine.tls.LaneTls.customizeConnection)
+  // Every outbound call to an internal peer carries the participant clock (#600).
+  private val sttpBackend = com.realityengine.perception.clock.ParticipantClock.backend(
+    HttpURLConnectionBackend(customizeConnection = com.realityengine.tls.LaneTls.customizeConnection),
+    com.realityengine.tls.LaneTls.isInternalHost)
 
   // RC-5: thread-safe timer and state refs
   // Machine facts the PE resolves the merge mapping against — provenance and
@@ -502,7 +505,8 @@ class PerceptionRoutes(
   private def ingestCompletion(body: Json): Json =
     resolveCompletion(body).fold(err => Json.obj("error" -> err.asJson), ingestResolved(body, _))
 
-  private def ingestResolved(body: Json, t: CompletionResolution.Target): Json = {
+  private def ingestResolved(body: Json, t: CompletionResolution.Target,
+                             clocks: Option[(Json, Json)] = None): Json = {
     val CompletionResolution.Target(smId, provider, _, sensorId, name, region, values, ttl) = t
 
     // Declare the sensor source at the resolved region. Idempotent, and
@@ -537,7 +541,8 @@ class PerceptionRoutes(
     // Completions are not dispatch records and do not go in the dispatch
     // ledger: C++ and LSP keep it to records built from envelopes, and the
     // record key set is 3-of-3 (SURFACE_SPEC.md, Dispatch surface shapes).
-    broadcast(Json.obj("type" -> "agent.completion.received".asJson, "record" -> record))
+    val event = Json.obj("type" -> "agent.completion.received".asJson, "record" -> record)
+    broadcast(clocks.fold(event) { case (clock, causedBy) => event.mapObject(_.add("clock", clock).add("causedBy", causedBy)) })
     record
   }
 
@@ -794,6 +799,7 @@ class PerceptionRoutes(
     request.send(sttpBackend) match {
       case resp if resp.isSuccess =>
         engine.advance()
+        com.realityengine.perception.clock.ParticipantClock.commitPush() // a completed push is the PE's commit (#600)
         val ts = System.currentTimeMillis()
         // `lastPush` is set below, once `parsed` holds the step — it is the
         // step object now, not this timestamp (SURFACE_SPEC.md, #407).
@@ -960,6 +966,13 @@ class PerceptionRoutes(
   // ── Routes ────────────────────────────────────────────────────────────────
 
   val routes: Route = AuditLogger.directive(auditCfg) { concat(
+
+    // ── The PE's participant clock (RealityEngine_CI#600) ───────────────────
+    // {instance, lamport, commit, step} at the newest completed push: commit
+    // counts completed pushes and step is the globalStep.
+    path("api" / "clock") {
+      get { complete(com.realityengine.perception.clock.ParticipantClock.json(engine.globalStep)) }
+    },
 
     // ── Health ──────────────────────────────────────────────────────────────
     path("api" / "health") {
@@ -1329,10 +1342,22 @@ class PerceptionRoutes(
             // The record ingestResolved returns is what the Ollama and OpenAI
             // dispatch routes embed; this route answers with the completion
             // envelope C++ and LSP return (RealityEngine_Scala#162).
-            ingestResolved(body, target)
+            // The completion's clock and causedBy (RealityEngine_CI#600): the
+            // dispatch's clock when its record is still in the ledger, else
+            // the sender's well-formed echo, else null.
+            val own = body.hcursor.get[String]("dispatchId").toOption.flatMap { id =>
+              dispatchLedger.get().find(_.hcursor.get[String]("id").toOption.contains(id))
+                .flatMap(_.hcursor.downField("clock").focus)
+            }
+            val causedBy        = com.realityengine.perception.clock.ParticipantClock.causedBy(own, body.hcursor.downField("causedBy").focus)
+            val completionClock = com.realityengine.perception.clock.ParticipantClock.event()
+            ingestResolved(body, target, Some(completionClock -> causedBy))
             val source = engine.getSource(target.sensorId)
               .map(s => engine.reported(s).asJson).getOrElse(Json.Null)
             val reply = CompletionResolution.envelope(body, target, source, System.currentTimeMillis())
+              .hcursor.downField("completion")
+              .withFocus(_.mapObject(_.add("clock", completionClock).add("causedBy", causedBy)))
+              .top.getOrElse(Json.Null)
             onComplete(saveAndBroadcast()) { _ =>
               complete(reply)
             }
