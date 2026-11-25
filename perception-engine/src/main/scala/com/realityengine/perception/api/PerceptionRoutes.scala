@@ -81,7 +81,10 @@ class PerceptionRoutes(
 
   // Lane TLS (#210): an https call to an internal peer uses the lane CA and
   // this instance's certificate; nothing changes with the lane off.
-  private val sttpBackend = HttpURLConnectionBackend(customizeConnection = com.realityengine.tls.LaneTls.customizeConnection)
+  // Every outbound call to an internal peer carries the participant clock (#600).
+  private val sttpBackend = com.realityengine.perception.clock.ParticipantClock.backend(
+    HttpURLConnectionBackend(customizeConnection = com.realityengine.tls.LaneTls.customizeConnection),
+    com.realityengine.tls.LaneTls.isInternalHost)
 
   // RC-5: thread-safe timer and state refs
   // Machine facts the PE resolves the merge mapping against — provenance and
@@ -794,6 +797,7 @@ class PerceptionRoutes(
     request.send(sttpBackend) match {
       case resp if resp.isSuccess =>
         engine.advance()
+        com.realityengine.perception.clock.ParticipantClock.commitPush() // a completed push is the PE's commit (#600)
         val ts = System.currentTimeMillis()
         // `lastPush` is set below, once `parsed` holds the step — it is the
         // step object now, not this timestamp (SURFACE_SPEC.md, #407).
@@ -960,6 +964,13 @@ class PerceptionRoutes(
   // ── Routes ────────────────────────────────────────────────────────────────
 
   val routes: Route = AuditLogger.directive(auditCfg) { concat(
+
+    // ── The PE's participant clock (RealityEngine_CI#600) ───────────────────
+    // {instance, lamport, commit, step} at the newest completed push: commit
+    // counts completed pushes and step is the globalStep.
+    path("api" / "clock") {
+      get { complete(com.realityengine.perception.clock.ParticipantClock.json(engine.globalStep)) }
+    },
 
     // ── Health ──────────────────────────────────────────────────────────────
     path("api" / "health") {

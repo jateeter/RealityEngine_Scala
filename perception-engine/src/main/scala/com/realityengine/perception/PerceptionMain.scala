@@ -59,6 +59,11 @@ object PerceptionMain extends App {
                              .contains(sys.env.getOrElse("PE_SOURCE_BOOTSTRAP", "auto"))
 
   val auditCfg = AuditConfig.fromEnv("perception-engine")
+  // The PE is a clock participant of its own (RealityEngine_CI#600): its own
+  // UUID (PE_INSTANCE_UUID), lock and marks, booted before it calls anyone. An
+  // allocated participant that cannot keep its clock refuses to boot.
+  com.realityengine.perception.clock.ParticipantClock.use(
+    com.realityengine.perception.clock.InstanceClock.boot(sys.env, "PE_INSTANCE_UUID"))
 
   println("Starting Perception Engine (Scala/Akka)...")
   AuditLogger.logEvent(auditCfg, "startup", Map(
@@ -104,6 +109,8 @@ object PerceptionMain extends App {
 
   val broadcastActor = system.actorOf(WsBroadcastActor.props(), "ws-broadcast")
 
+  // The participant clock around every route (#600).
+  lazy val clocked = com.realityengine.perception.clock.ParticipantClock.directive(routes.routes)
   val routes = new PerceptionRoutes(
     engine           = engine,
     store            = store,
@@ -132,13 +139,13 @@ object PerceptionMain extends App {
       val ctx = com.realityengine.tls.LaneTls.serverContext(s)
       println(com.realityengine.tls.LaneTls.startupLine(port, deviceRoutes = true))
       serverAt.enableHttps(ConnectionContext.httpsServer(() =>
-        com.realityengine.tls.LaneTls.serverEngine(ctx, requireAtHandshake = false))).bind(PerceptionRoutes.laneGuard(routes.routes))
+        com.realityengine.tls.LaneTls.serverEngine(ctx, requireAtHandshake = false))).bind(PerceptionRoutes.laneGuard(clocked))
     case (None, Some(ctx)) =>
       println(s"✓ TLS enabled (keystore: $keystorePath)")
-      serverAt.enableHttps(ConnectionContext.httpsServer(ctx)).bind(routes.routes)
+      serverAt.enableHttps(ConnectionContext.httpsServer(ctx)).bind(clocked)
     case (None, None) =>
       println("  TLS not configured — binding plain HTTP")
-      serverAt.bind(routes.routes)
+      serverAt.bind(clocked)
   }
 
   binding.onComplete {
@@ -176,7 +183,9 @@ object PerceptionMain extends App {
                   pruneCorpus: Boolean = false,
                   activateOnLoad: Boolean = false): Unit = {
     Future {
-      val backend = HttpURLConnectionBackend(customizeConnection = com.realityengine.tls.LaneTls.customizeConnection)
+      val backend = com.realityengine.perception.clock.ParticipantClock.backend(
+        HttpURLConnectionBackend(customizeConnection = com.realityengine.tls.LaneTls.customizeConnection),
+        com.realityengine.tls.LaneTls.isInternalHost)
       var machinesJson: io.circe.Json = io.circe.Json.Null
       var success = false
       var attempt = 0
