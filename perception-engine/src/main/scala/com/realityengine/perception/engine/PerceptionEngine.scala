@@ -30,6 +30,14 @@ class PerceptionEngine(initialDimension: Int = sys.env.getOrElse("VECTOR_DIMENSI
   private var osreFold: Map[Int, (String, String)]      = Map.empty
   // Source-vs-OSRE folds of the last push assembly (§4.4b, CI#525).
   private var lastFolds: Vector[Json]                   = Vector.empty
+  // The RE-Clock {instance, lamport} of the request that last wrote each
+  // source's value: the composition record's causedBy (CI#603). Beside the
+  // source, as activatedAt is, so GET /api/sources is unchanged.
+  private var causedByOf: Map[String, Json]             = Map.empty
+  // Each input cell's winner at the last push assembly (CI#603).
+  private var lastComposition: Vector[com.realityengine.perception.isre.Isre.Winner] = Vector.empty
+  def foldsJson: Vector[Json] = synchronized { lastFolds }
+  def composition: Vector[com.realityengine.perception.isre.Isre.Winner] = synchronized { lastComposition }
 
   /** Set from each push's mergeBatch; see OsreFold. */
   def setOsreFoldCells(cells: Map[Int, (String, String)]): Unit = synchronized { osreFold = cells }
@@ -179,8 +187,10 @@ class PerceptionEngine(initialDimension: Int = sys.env.getOrElse("VECTOR_DIMENSI
     case other                    => other
   }
 
-  def addSource(config: SourceConfig): SourceConfig = synchronized {
+  def addSource(config: SourceConfig): SourceConfig = addSource(config, Json.Null)
+  def addSource(config: SourceConfig, causedBy: Json): SourceConfig = synchronized {
     val id  = if (config.id.nonEmpty) config.id else mintSourceId()
+    causedByOf = causedByOf + (id -> causedBy)
     val src = deriveRegistrationActivity(applyId(config, id))
     ensureCapacity(src.region.offset + src.region.length)
     val withCached = inheritCached(src)
@@ -440,7 +450,8 @@ class PerceptionEngine(initialDimension: Int = sys.env.getOrElse("VECTOR_DIMENSI
     * while holding a fresh value — a worse defect than the stale `active: true`
     * the validation is there to fix.
     */
-  def updateSensorValue(sensorId: String, values: Vector[Double]): Boolean = synchronized {
+  def updateSensorValue(sensorId: String, values: Vector[Double]): Boolean = updateSensorValue(sensorId, values, Json.Null)
+  def updateSensorValue(sensorId: String, values: Vector[Double], causedBy: Json): Boolean = synchronized {
     sources.values.find {
       case s: SensorSourceConfig if s.sensorId == sensorId => true
       case _ => false
@@ -452,6 +463,7 @@ class PerceptionEngine(initialDimension: Int = sys.env.getOrElse("VECTOR_DIMENSI
           lastUpdated = Some(System.currentTimeMillis()),
         )
         store(s.id, updated)  // earning activity is an activation (§4.4b)
+        causedByOf = causedByOf + (s.id -> causedBy)
         true
       case _ => false
     }
@@ -467,7 +479,10 @@ class PerceptionEngine(initialDimension: Int = sys.env.getOrElse("VECTOR_DIMENSI
 
   /** The assembled vector and every Source-vs-OSRE fold it made, ascending by
     * cell. Only the push records the folds (recordContention). */
-  def assembleWithFolds(): (Vector[Double], Vector[Json]) = synchronized {
+  def assembleWithFolds(): (Vector[Double], Vector[Json]) = synchronized { val (v, f, _) = assembleFull(); (v, f) }
+
+  /** As assembleWithFolds, with the source whose value landed in each cell. */
+  private def assembleFull(): (Vector[Double], Vector[Json], Array[(String, SourceConfig)]) = synchronized {
     val out    = persistentVector.clone()
     val outLen = out.length
     // Which cells a source wrote this instant: only those are folded with the
@@ -578,7 +593,29 @@ class PerceptionEngine(initialDimension: Int = sys.env.getOrElse("VECTOR_DIMENSI
         "resolved" -> Json.fromDoubleOrNull(resolved),
         "kept" -> Json.fromString(kept)))
     }
-    (out.toVector, folds.result())
+    (out.toVector, folds.result(), writer)
+  }
+
+  /** Each input cell's winner, as RealityEngine_CPP PerceptionEngine::composition:
+    * a source wins the cells it wrote unless the fold kept OSRE; OSRE cells no
+    * source wrote are the feedback term. */
+  private def compositionOf(writer: Array[(String, SourceConfig)], folds: Vector[Json]) = {
+    import com.realityengine.perception.isre.Isre.Winner
+    val keptOsre = folds.filter(_.hcursor.get[String]("kept").contains("osre"))
+      .flatMap(_.hcursor.get[Int]("cell").toOption).toSet
+    val out = Vector.newBuilder[Winner]
+    var cell = 0
+    while (cell < writer.length) {
+      val w = writer(cell)
+      val osre = osreFold.contains(cell)
+      if (w != null && !(osre && keptOsre(cell))) {
+        val (id, src) = w
+        val origin = src match { case x: SensorSourceConfig => x.origin.getOrElse(""); case _ => "" }
+        out += Winner(cell, feedback = false, id, sourceRef(id, src).kind, origin, causedByOf.getOrElse(id, Json.Null))
+      } else if (w != null || osre) out += Winner(cell, feedback = true)
+      cell += 1
+    }
+    out.result()
   }
 
   /** Sync the persistent base vector from the RE post-merge state.  RE may
@@ -794,7 +831,9 @@ class PerceptionEngine(initialDimension: Int = sys.env.getOrElse("VECTOR_DIMENSI
   /** Record the contention of the assembly a push sends, and count it. Push path only. */
   def recordContention(): Unit = synchronized {
     lastContention       = sourceContention()
-    lastFolds            = assembleWithFolds()._2
+    val (_, folds, writer) = assembleFull()
+    lastFolds            = folds
+    lastComposition      = compositionOf(writer, folds)
     contentionTransition = globalStep
     // A fold counts toward its source's `contended`, and toward `suppressed`
     // when the OSRE side was kept (§4.4b, CI#525).

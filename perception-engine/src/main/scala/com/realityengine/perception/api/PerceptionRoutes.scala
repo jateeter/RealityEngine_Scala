@@ -772,13 +772,27 @@ class PerceptionRoutes(
     *   which did forward it: 408 machines fed the aggregator unfiltered and 0
     *   fed it with a selector present.
     */
+  /** The request's well-formed RE-Clock as {instance, lamport}, else null: the
+    * causedBy a source write records (RealityEngine_CI#603). */
+  private def presentedClock: akka.http.scaladsl.server.Directive1[Json] =
+    optionalHeaderValueByName("RE-Clock").map { v =>
+      v.flatMap { h =>
+        com.realityengine.perception.clock.InstanceClock.parseHeader(h).map { lamport =>
+          val inst = h.split(";", -1)(0).trim.stripPrefix("instance=")
+          Json.obj("instance" -> Json.fromString(inst), "lamport" -> Json.fromLong(lamport))
+        }
+      }.getOrElse(Json.Null)
+    }
+
   def doPush(compact: Boolean = false, only: Option[Json] = None): Future[PushResult] = Future {
-    val vector  = engine.synchronized {
+    val isre = com.realityengine.perception.isre.IsreRecorder.current
+    val (vector, isreCells, isreFolds) = engine.synchronized {
       // The push is the transition: record what this assembly resolved. A read
       // of /api/state assembles too, and must not count (§4.4b).
       val v = engine.assembleVector()
       engine.recordContention()
-      v
+      // The step's ISRE composition, recorded once the RE answers (CI#603).
+      if (isre.capture) (v, engine.composition, engine.foldsJson) else (v, Vector.empty, Vector.empty[Json])
     }
     val algoStr = MatchAlgorithm.asString(engine.matchAlgorithm)
 
@@ -838,6 +852,14 @@ class PerceptionRoutes(
         // The step itself, which carries its own `timestamp`, so the "when"
         // this field used to hold is still readable as `lastPush.timestamp`.
         lastPush.set(parsed)
+        // The composition record: a stored message, a tick of its own, flushed
+        // before the push is answered (CI#603).
+        parsed.hcursor.downField("clock").focus.filter(_.isObject).foreach { reClock =>
+          if (isre.capture)
+            try engine.synchronized(isre.record(reClock, com.realityengine.perception.clock.ParticipantClock.event(), isreCells, isreFolds))
+            catch { case e: Throwable =>
+              System.err.println(s"ISRE composition capture stopped: ${e.getMessage}"); isre.capture = false }
+        }
 
         // RE returns SimulationStep directly (perceptualSpace at top level).
         // Aggregate gated machine CES output vectors from machineResults into
@@ -1071,19 +1093,69 @@ class PerceptionRoutes(
     // ── Config ──────────────────────────────────────────────────────────────
     path("api" / "config") {
       patch { entity(as[Json]) { body =>
-        body.hcursor.get[String]("matchAlgorithm") match {
-          case Right(s) if s == "gte" || s == "equals" =>
+        // The ISRE composition controls (RealityEngine_CI#603): validated
+        // before anything changes, so a refused request changes nothing.
+        val isre     = com.realityengine.perception.isre.IsreRecorder.current
+        val capture  = body.hcursor.downField("isreCapture").focus.filterNot(_.isNull)
+        val maxBytes = body.hcursor.downField("isreStoreMaxBytes").focus.filterNot(_.isNull)
+        def whole(j: Json) = j.asNumber.map(_.toDouble).exists(d => d >= 0 && d <= 9007199254740991.0 && d == math.floor(d))
+        def ok = Json.obj("success" -> true.asJson,
+          "matchAlgorithm" -> MatchAlgorithm.asString(engine.matchAlgorithm).asJson,
+          "isreCapture" -> isre.capture.asJson, "isreStoreMaxBytes" -> isre.storeMaxBytes.asJson)
+        def applyIsre(): Unit = {
+          capture.flatMap(_.asBoolean).foreach(isre.capture = _)
+          maxBytes.flatMap(_.asNumber).foreach(n => isre.storeMaxBytes = n.toDouble.toLong)
+        }
+        val algo = body.hcursor.get[String]("matchAlgorithm")
+        if (capture.exists(!_.isBoolean))
+          complete(StatusCodes.BadRequest -> Json.obj("error" -> "isreCapture requires a boolean".asJson))
+        else if (maxBytes.exists(j => !whole(j)))
+          complete(StatusCodes.BadRequest ->
+            Json.obj("error" -> "isreStoreMaxBytes requires a whole number in [0, 9007199254740991]".asJson))
+        else if (algo.exists(s => s != "gte" && s != "equals"))
+          complete(StatusCodes.BadRequest ->
+            Json.obj("error" -> s"""matchAlgorithm must be "gte" or "equals"""".asJson))
+        else if (capture.contains(Json.True) && isre.taxonomy.isEmpty)
+          complete(StatusCodes.Conflict -> Json.obj("error" ->
+            s"isreCapture requires re-source-kinds/${com.realityengine.perception.isre.Isre.TaxonomyVersion} in the corpus".asJson))
+        else algo match {
+          case Right(s) =>
             engine.setMatchAlgorithm(MatchAlgorithm.fromString(s))
-            onComplete(saveAndBroadcast()) { _ =>
-              complete(Json.obj("success" -> true.asJson,
-                "matchAlgorithm" -> MatchAlgorithm.asString(engine.matchAlgorithm).asJson))
-            }
-          case Right(other) =>
-            complete(StatusCodes.BadRequest ->
-              Json.obj("error" -> s"""matchAlgorithm must be "gte" or "equals"""".asJson))
+            applyIsre()
+            onComplete(saveAndBroadcast()) { _ => complete(ok) }
           case Left(_) =>
-            complete(Json.obj("success" -> true.asJson,
-              "matchAlgorithm" -> MatchAlgorithm.asString(engine.matchAlgorithm).asJson))
+            applyIsre()
+            complete(ok)
+        }
+      }}
+    },
+
+    // ── The PE half of K-lines (CI#603; SURFACE_SPEC "Routes (PE)") ─────────
+    path("api" / "isre-composition" / "stats") {
+      get { complete(com.realityengine.perception.isre.IsreRecorder.current.stats) }
+    },
+    path("api" / "isre-composition" / "export") {
+      post { entity(as[Json]) { body =>
+        val from = body.hcursor.get[Double]("from").map(_.toLong).getOrElse(0L)
+        val to   = body.hcursor.get[Double]("to").map(_.toLong).getOrElse(-1L)
+        val bundle = engine.synchronized(com.realityengine.perception.isre.IsreRecorder.current.exportBundle(from, to))
+        complete(HttpResponse(entity = HttpEntity(
+          akka.http.scaladsl.model.MediaType.applicationWithFixedCharset("x-ndjson", akka.http.scaladsl.model.HttpCharsets.`UTF-8`).toContentType,
+          bundle)))
+      }}
+    },
+    path("api" / "isre-composition") {
+      get { parameters("from".optional, "to".optional, "limit".optional) { (f, t, l) =>
+        def whole(v: Option[String], d: Long): Option[Long] = v.filter(_.nonEmpty) match {
+          case None => Some(d)
+          case Some(x) if x.forall(_.isDigit) && x.length <= 18 => Some(x.toLong)
+          case _ => None
+        }
+        (whole(f, 0L), whole(t, -1L), whole(l, 100L)) match {
+          case (Some(from), Some(to), Some(limit)) =>
+            complete(engine.synchronized(com.realityengine.perception.isre.IsreRecorder.current.list(from, to, limit.toInt)))
+          case _ =>
+            complete(StatusCodes.BadRequest -> Json.obj("error" -> "from, to and limit are non-negative integers".asJson))
         }
       }}
     },
@@ -1207,12 +1279,12 @@ class PerceptionRoutes(
 
     // ── Sensor push ──────────────────────────────────────────────────────────
     path("api" / "sensors" / Segment) { sensorId =>
-      post { entity(as[Json]) { body =>
+      post { presentedClock { causedBy => entity(as[Json]) { body =>
         body.hcursor.get[Vector[Double]]("values") match {
           case Left(_) =>
             complete(StatusCodes.BadRequest -> Json.obj("error" -> "values must be an array".asJson))
           case Right(values) =>
-            if (engine.updateSensorValue(sensorId, values)) {
+            if (engine.updateSensorValue(sensorId, values, causedBy)) {
               broadcastState()
               complete(Json.obj("success" -> true.asJson,
                 "sensorId"  -> sensorId.asJson,
@@ -1222,7 +1294,7 @@ class PerceptionRoutes(
                 Json.obj("error" -> s"""No sensor source with sensorId "$sensorId"""".asJson))
             }
         }
-      }}
+      }}}
     },
 
     // ── Machine proxy ────────────────────────────────────────────────────────
@@ -1670,7 +1742,7 @@ class PerceptionRoutes(
         }
       } } }
     },
-    path("api" / "integrations" / "healthkit" / "ingest") {
+    path("api" / "integrations" / "healthkit" / "ingest") { presentedClock { causedBy =>
       post {
         optionalHeaderValueByName("Authorization") { authHeader =>
         entity(as[Json]) { body => deviceCertificate(body.hcursor.get[String]("bridgeId").toOption) {
@@ -1767,7 +1839,7 @@ class PerceptionRoutes(
                       ttlMs       = ttlMs,
                       origin      = Some("healthkit"),
                     ))
-                    engine.updateSensorValue(sensorId, values)
+                    engine.updateSensorValue(sensorId, values, causedBy)
                     hkScope.noteSensor(hkIngestBridge(body), tpe, sensorId)
                     val source = engine.findSensorBySensorId(sensorId)
                     val r = Json.obj(
@@ -1805,7 +1877,7 @@ class PerceptionRoutes(
         }
         }
       }
-    },
+    }},
 
     // ── CareKit ──────────────────────────────────────────────────────────────
     path("api" / "integrations" / "carekit" / "status") {
@@ -1827,7 +1899,7 @@ class PerceptionRoutes(
         )
       )) }
     },
-    path("api" / "integrations" / "carekit" / "ingest") {
+    path("api" / "integrations" / "carekit" / "ingest") { presentedClock { causedBy =>
       post {
         entity(as[Json]) { body =>
           val tokenOk = ckBridgeToken.forall { expected =>
@@ -1872,7 +1944,7 @@ class PerceptionRoutes(
                                    "type"       -> sampleType,
                                    "taskId"     -> sample.hcursor.get[String]("taskId").getOrElse(sampleType),
                                    "carePlanId" -> sample.hcursor.get[String]("carePlanId").getOrElse("care-plan"))))
-              engine.updateSensorValue(sensorId, values)
+              engine.updateSensorValue(sensorId, values, causedBy)
               Json.obj(
                 "success"         -> true.asJson,
                 "sampleType"      -> sampleType.asJson,
@@ -1892,7 +1964,7 @@ class PerceptionRoutes(
           }
         }
       }
-    },
+    }},
 
     // ── LocalAI ──────────────────────────────────────────────────────────────
     path("api" / "integrations" / "localai" / "status") {
@@ -2106,12 +2178,12 @@ class PerceptionRoutes(
     },
 
     // ── Signals ───────────────────────────────────────────────────────────────
-    path("api" / "signals") {
+    path("api" / "signals") { presentedClock { causedBy =>
       post { entity(as[Json]) { body =>
         val sensorId = body.hcursor.get[String]("sensorId").getOrElse("localai_agent_activity")
         val values   = body.hcursor.downField("values").as[Vector[Double]].getOrElse(Vector.empty)
         val ttlMs    = body.hcursor.get[Long]("ttlMs").getOrElse(30000L)
-        val updated  = engine.updateSensorValue(sensorId, values)
+        val updated  = engine.updateSensorValue(sensorId, values, causedBy)
         val ts       = System.currentTimeMillis()
         broadcastState()
         complete(Json.obj(
@@ -2121,7 +2193,7 @@ class PerceptionRoutes(
           "ttlMs"     -> ttlMs.asJson
         ))
       } }
-    },
+    }},
 
     // ── Triggers status ───────────────────────────────────────────────────────
     // Shape settled 3-of-3 (SURFACE_SPEC.md, Dispatch surface shapes).

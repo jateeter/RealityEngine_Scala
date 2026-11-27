@@ -138,6 +138,20 @@ initial value. Off leaves the store untouched; on closes what the checkpoint
 holds first (`startCapture`). `KlineSpec` covers the
 boundaries and the store.
 
+The PE half (`perception-engine/.../isre/Isre.scala`, CI#603) records one
+`re-isre-composition/1` per completed push into `<INSTANCE_ISRE_DIR>/<pe_uuid>/`
+(the K-line store's format, keyed by the RE's commit; the store and JCS are
+copied from `engine/Kline.scala` because the PE is its own sbt build), by the
+same rules as RealityEngine_CPP `src/isre.cpp`: each cell's winner from the
+push's own assembly (`PerceptionEngine.composition`, computed in
+`recordContention`), named under `re-source-kinds/2` from
+`<MACHINES_DIR>/../schemas/source-kinds/`. A source's causedBy is the writing
+request's `RE-Clock` (`presentedClock`), kept beside the source so
+`GET /api/sources` is unchanged. `isreCapture` (default `false`) and
+`isreStoreMaxBytes` are on `PATCH /api/config`; `RE_ISRE_CAPTURE=1` sets the
+initial value. Routes: `GET /api/isre-composition`, `/stats`, `POST /export`;
+`IsreSpec`.
+
 ## Lane TLS
 
 With `RE_TLS_CERT` set (RealityEngine_CI#668, this repo's #210), the RE and PE

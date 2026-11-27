@@ -64,6 +64,9 @@ object PerceptionMain extends App {
   // allocated participant that cannot keep its clock refuses to boot.
   com.realityengine.perception.clock.ParticipantClock.use(
     com.realityengine.perception.clock.InstanceClock.boot(sys.env, "PE_INSTANCE_UUID"))
+  // The PE half of K-lines (RealityEngine_CI#603): its composition recorder.
+  com.realityengine.perception.isre.IsreRecorder.current =
+    com.realityengine.perception.isre.IsreRecorder.forEngine(com.realityengine.perception.clock.ParticipantClock.clock.instance)
 
   println("Starting Perception Engine (Scala/Akka)...")
   AuditLogger.logEvent(auditCfg, "startup", Map(
