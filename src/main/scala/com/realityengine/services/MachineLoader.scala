@@ -113,6 +113,8 @@ object MachineLoader {
     m.downField("sequences").as[Vector[Json]].getOrElse(Vector.empty).foreach { sj =>
       machine.addSequence(loadSequenceFromJson(sj, matchAlgo))
     }
+    // The declared form, for the corpus fingerprint (#603).
+    machine.declared = m.focus.map(_.mapObject(_.remove("id"))).getOrElse(Json.Null)
 
     machine
   }

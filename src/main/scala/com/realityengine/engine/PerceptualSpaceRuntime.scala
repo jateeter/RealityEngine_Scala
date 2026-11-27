@@ -130,7 +130,16 @@ class PerceptualSpaceRuntime(dimension: Int = sys.env.getOrElse("VECTOR_DIMENSIO
     rebuildEdgeCache()
   }
 
-  def removeMachine(machineId: String): Unit = machinesLock.synchronized {
+  def removeMachine(machineId: String): Unit = {
+    // Its open K-lines close `interrupted` (machine-removed) first (#603).
+    stepLock.synchronized {
+      machines.get(machineId).foreach { m =>
+        try klines.onMachineRemoved(m.name) catch { case e: Throwable => klineFailed(e) }
+      }
+    }
+    removeMachineFromRegistry(machineId)
+  }
+  private def removeMachineFromRegistry(machineId: String): Unit = machinesLock.synchronized {
     unregisterComposeSubscriptions(machineId)
     machines = machines - machineId
     rebuildEdgeCache()
@@ -215,7 +224,44 @@ class PerceptualSpaceRuntime(dimension: Int = sys.env.getOrElse("VECTOR_DIMENSIO
   def useInstanceClock(booted: InstanceClock): Unit = stepLock.synchronized {
     clock = booted
     lastCommit = (booted.lamport, booted.commit)
+    klines = KlineTracker.forEngine(booted.instance, () => clock.send())
   }
+
+  // ── K-lines (RealityEngine_CI#603) ─────────────────────────────────────────
+  // Captured at the step completion point, beside arbitration retention.
+  // Capture is RE_KLINE_CAPTURE=1 until the three voters serve K-lines; its
+  // controls are not on /api/engine/config, which is compared. Guarded by
+  // stepLock.
+  private var klines: KlineTracker = new KlineTracker(clock.instance, new KlineStore(None), () => clock.send())
+  private var fingerprintFor: Map[String, Machine] = null
+  private var corpusFingerprint = ""
+  private def refreshCorpusFacts(): Unit = if (!(fingerprintFor eq machines)) {
+    val now = machines
+    corpusFingerprint = Kline.corpusFingerprint(now.values.toSeq.map(m =>
+      m.name -> (if (m.declared.isObject) m.declared else io.circe.Json.obj("name" -> io.circe.Json.fromString(m.name)))))
+    klines.longestPath = KlineTracker.longestPath(now.values)
+    fingerprintFor = now
+  }
+  private def captureKlines(step: Long, commit: Long, sim: SimulationStep, isre: TrajectoryEntry, osre: TrajectoryEntry): Unit =
+    if (klines.capture) {
+      try {
+        refreshCorpusFacts()
+        klines.onStep(step, commit, sim, machines.values, isre, osre, corpusFingerprint)
+      } catch { case e: Throwable => klineFailed(e) }
+    }
+  private def klineFailed(e: Throwable): Unit = {
+    System.err.println(s"K-line capture stopped: $e")
+    klines.capture = false
+  }
+  /** Replaces the tracker (tests; a store and capture set by the caller). */
+  def useKlineTracker(t: KlineTracker): Unit = stepLock.synchronized { klines = t; fingerprintFor = null }
+  def klineOpen: io.circe.Json = stepLock.synchronized(klines.openJson)
+  def klineStats: io.circe.Json = stepLock.synchronized(klines.stats)
+  def klineGet(id: String): Option[io.circe.Json] = stepLock.synchronized(klines.get(id))
+  def klineList(outcome: Option[String], machine: Option[String], sequence: Option[String], since: Long, limit: Int): io.circe.Json =
+    stepLock.synchronized(klines.list(outcome, machine, sequence, since, limit))
+  def klineExport(outcomes: Set[String], since: Long, machinesSel: Set[String]): String =
+    stepLock.synchronized(klines.exportBundle(outcomes, since, machinesSel))
   /** The participant clock itself: the routes apply the receive and send rules
     * to it on every request (RealityEngine_CI#600). */
   def participantClock: InstanceClock = clock
@@ -333,6 +379,8 @@ class PerceptualSpaceRuntime(dimension: Int = sys.env.getOrElse("VECTOR_DIMENSIO
   }
 
   def reset(): Unit = stepLock.synchronized {
+    // Open K-lines close `interrupted` (reset) at the last committed step (#603).
+    try klines.onReset() catch { case e: Throwable => klineFailed(e) }
     // Step numbers restart, so the completion point does too (#375).
     completedStep = -1L
     stepLock.notifyAll()
@@ -728,9 +776,7 @@ class PerceptualSpaceRuntime(dimension: Int = sys.env.getOrElse("VECTOR_DIMENSIO
       }
     }.toList.sortBy(r => (r.offset, r.length, r.machineId, r.`type`))
 
-    recordTrajectory(isre, osre)
-
-    SimulationStep(
+    val simulationStep = SimulationStep(
       stepNumber      = stepNum,
       timestamp       = System.currentTimeMillis(),
       perceptualSpace = perceptualSpace.getPerceptualVector,
@@ -751,6 +797,8 @@ class PerceptualSpaceRuntime(dimension: Int = sys.env.getOrElse("VECTOR_DIMENSIO
       mergeBatch      = mergeOps.toList.sortBy(op => (op.machineName, op.region.offset)),
       eventBus        = eventBusWrites
     )
+    recordTrajectory(isre, osre, simulationStep)
+    simulationStep
   }
 
   /** Dense vector -> sparse trajectory entry. A cell absent from the result is
@@ -769,7 +817,7 @@ class PerceptualSpaceRuntime(dimension: Int = sys.env.getOrElse("VECTOR_DIMENSIO
     * because it is read as "what just happened"; these are read as sequences to
     * be compared element by element, and the index of the first disagreement is
     * the answer they exist to give. */
-  private def recordTrajectory(isre: TrajectoryEntry, osre: TrajectoryEntry): Unit = stepLock.synchronized {
+  private def recordTrajectory(isre: TrajectoryEntry, osre: TrajectoryEntry, sim: SimulationStep): Unit = stepLock.synchronized {
     isreHistory = (isreHistory :+ isre).takeRight(maxTrajectory)
     osreHistory = (osreHistory :+ osre).takeRight(maxTrajectory)
     // A committed step ticks the instance clock and is retained before the
@@ -785,6 +833,9 @@ class PerceptualSpaceRuntime(dimension: Int = sys.env.getOrElse("VECTOR_DIMENSIO
       arbitrationSteps = arbitrationSteps.updated(step, (tick, lastArbitration))
       pruneArbitrationSteps(step)
     }
+    // K-lines that closed at this step are stored before its completion is
+    // published (#603), the same place arbitration retention commits.
+    captureKlines(step, tick._2, sim, isre, osre)
     tickStepPhase(3)                                    // B4: pair committed
     // The pair is committed: the step's completion point (#375).
     completedStep = step

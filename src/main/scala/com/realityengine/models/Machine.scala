@@ -25,6 +25,10 @@ class Machine(
   val id:               String                    = MintedIds.mint("machine")
 ) {
   var matchAlgorithm: ComparatorType = ComparatorType.GTE
+  /** The machine object as its file or request body declared it, without what
+    * ingestion assigns (no `id`): the corpus fingerprint's input
+    * (RealityEngine_CI#603). Json.Null for a machine built in code. */
+  var declared: Json = Json.Null
   // How this machine folds its collection of potential outputs into the one
   // output the Reality Engine presents to the PE. Declared per machine
   // (`outputMergeTransformation`, default "or"), read when the machine is
