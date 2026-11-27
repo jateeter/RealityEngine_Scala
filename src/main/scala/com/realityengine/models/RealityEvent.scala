@@ -168,10 +168,12 @@ class RealityEvent(
   def toJson: Json = Json.obj(
     "id"               -> Json.fromString(id),
     "matchAlgorithm"   -> Json.fromString(ComparatorType.serialize(matchAlgorithm)),
-    "elements"         -> Json.arr(elements.map(e => Json.obj(
-                            "value"          -> Json.fromDoubleOrNull(e.value),
-                            "comparatorType" -> e.comparatorType.map(ct => Json.fromString(ComparatorType.serialize(ct))).getOrElse(Json.Null),
-                            "threshold"      -> e.threshold.map(Json.fromDoubleOrNull).getOrElse(Json.Null)
+    // An element's comparatorType and threshold are omitted when it declares
+    // none, as C++ and LSP serialize it, not written null (CI#886).
+    "elements"         -> Json.arr(elements.map(e => Json.fromFields(
+                            List("value" -> Json.fromDoubleOrNull(e.value)) ++
+                            e.comparatorType.map(ct => "comparatorType" -> Json.fromString(ComparatorType.serialize(ct))).toList ++
+                            e.threshold.map(t => "threshold" -> Json.fromDoubleOrNull(t)).toList
                           )): _*),
     "state"            -> Json.fromString(if (state == VectorState.Active) "active" else "inactive"),
     "isActive"         -> Json.fromBoolean(isActive),
@@ -186,7 +188,10 @@ class RealityEvent(
     "id"        -> Json.fromString(ov.id),
     "vector"    -> Json.arr(ov.vector.map(Json.fromDoubleOrNull): _*),
     "metadata"  -> Json.fromFields(ov.metadata.toSeq),
-    "timestamp" -> Json.fromLong(ov.timestamp)
+    "timestamp" -> Json.fromLong(ov.timestamp),
+    // The input event ids behind this output, as C++ and LSP serialize it,
+    // empty until a transition stamps them (CI#886).
+    "provenance" -> Json.arr(ov.provenance.map(Json.fromString): _*)
   )
 }
 

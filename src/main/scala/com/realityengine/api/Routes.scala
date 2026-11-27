@@ -186,6 +186,8 @@ class Routes(
   // keep comparing identical key sets until a caller opts out (SURFACE_SPEC.md,
   // "Requesting less than the full step").
   private val includeActiveRegionsRef   = new AtomicReference[Boolean](true)
+  // GET /api/machines/json/:name in the list form (RealityEngine_CI#886).
+  private val machineJsonSummaryRef     = new AtomicReference[Boolean](false)
 
   // Drop the observation surfaces the caller did not ask for.
   //
@@ -787,6 +789,8 @@ class Routes(
           spaceRuntime.setKlineStoreMaxBytes(2147483648L)
           controlJson("klineStoreMaxBytes", "engine", Json.fromLong(2147483648L), Json.fromLong(2147483648L))
         }),
+      // GET /api/machines/json/:name in the list form (RealityEngine_CI#886).
+      booleanControl("machineJsonSummary", machineJsonSummaryRef, false),
       EngineControl("transitionsInhibited", "machine", () => transitionsInhibitedControl(),
         body => {
           val c = body.hcursor
@@ -1787,7 +1791,13 @@ class Routes(
                   machine
                 } match {
                   case Failure(e)       => complete(StatusCodes.InternalServerError -> Json.obj("error" -> Json.fromString(e.getMessage)))
-                  case Success(machine) => complete(Json.obj("success" -> Json.fromBoolean(true), "machine" -> machine.toJson, "message" -> Json.fromString(s"Machine ${machine.name} loaded successfully")))
+                  // The full form, as GET /api/machines/:id serves it; with
+                  // machineJsonSummary on, the list form, as GET /api/machines
+                  // lists it (RealityEngine_CI#886). It served the list form
+                  // only, and named the machine in its message.
+                  case Success(machine) => complete(Json.obj("success" -> Json.fromBoolean(true),
+                    "machine" -> (if (machineJsonSummaryRef.get) machine.toJson else machine.toFullJson),
+                    "message" -> Json.fromString("Machine loaded successfully")))
                 }
               }
             },
