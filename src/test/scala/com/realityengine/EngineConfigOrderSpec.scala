@@ -28,7 +28,7 @@ class EngineConfigOrderSpec extends AnyFlatSpec with Matchers with ScalatestRout
         .map(_.hcursor.get[String]("name").toOption.get).toList
       names shouldBe List("arbitrationRetention", "arbitrationWindow", "clone.maxActive", "historyLimit",
         "includeActiveRegions", "includeMachineResults", "includePerceptualSpace",
-        "klineCapture", "klineFeedbackHops", "klineStoreMaxBytes", "phaseDetail",
+        "klineCapture", "klineFeedbackHops", "klineStoreMaxBytes", "machineJsonSummary", "phaseDetail",
         "transitionsInhibited")
     }
   }
