@@ -749,6 +749,44 @@ class Routes(
       booleanControl("includeActiveRegions", includeActiveRegionsRef, true),
       booleanControl("includeMachineResults", includeMachineResultsRef, true),
       booleanControl("includePerceptualSpace", includePerceptualSpaceRef, true),
+      // K-lines (RealityEngine_CI#603; SURFACE_SPEC "Controls").
+      EngineControl("klineCapture", "engine",
+        () => controlJson("klineCapture", "engine", Json.fromBoolean(spaceRuntime.klineCapture), Json.False),
+        body => body.hcursor.get[Boolean]("value").toOption match {
+          case None => Left(ControlRefusal("klineCapture requires a boolean `value`", StatusCodes.BadRequest))
+          case Some(on) =>
+            spaceRuntime.setKlineCapture(on)
+            Right(controlJson("klineCapture", "engine", Json.fromBoolean(spaceRuntime.klineCapture), Json.False))
+        },
+        () => {
+          spaceRuntime.setKlineCapture(false)
+          controlJson("klineCapture", "engine", Json.fromBoolean(spaceRuntime.klineCapture), Json.False)
+        }),
+      EngineControl("klineFeedbackHops", "engine",
+        () => controlJson("klineFeedbackHops", "engine", Json.fromInt(spaceRuntime.klineFeedbackHops), Json.fromInt(3)),
+        body => body.hcursor.get[Int]("value").toOption match {
+          case Some(v) if v >= 0 && v <= 16 =>
+            spaceRuntime.setKlineFeedbackHops(v)
+            Right(controlJson("klineFeedbackHops", "engine", Json.fromInt(v), Json.fromInt(3)))
+          case _ => Left(ControlRefusal("klineFeedbackHops requires a whole-number `value` in [0, 16]", StatusCodes.BadRequest))
+        },
+        () => {
+          spaceRuntime.setKlineFeedbackHops(3)
+          controlJson("klineFeedbackHops", "engine", Json.fromInt(3), Json.fromInt(3))
+        }),
+      EngineControl("klineStoreMaxBytes", "engine",
+        () => controlJson("klineStoreMaxBytes", "engine", Json.fromLong(spaceRuntime.klineStoreMaxBytes), Json.fromLong(2147483648L)),
+        body => body.hcursor.get[Long]("value").toOption match {
+          case Some(v) if v >= 0 && v <= 9007199254740991L =>
+            spaceRuntime.setKlineStoreMaxBytes(v)
+            Right(controlJson("klineStoreMaxBytes", "engine", Json.fromLong(v), Json.fromLong(2147483648L)))
+          case _ => Left(ControlRefusal("klineStoreMaxBytes requires a whole-number `value` in [0, 9007199254740991]",
+                                        StatusCodes.BadRequest))
+        },
+        () => {
+          spaceRuntime.setKlineStoreMaxBytes(2147483648L)
+          controlJson("klineStoreMaxBytes", "engine", Json.fromLong(2147483648L), Json.fromLong(2147483648L))
+        }),
       EngineControl("transitionsInhibited", "machine", () => transitionsInhibitedControl(),
         body => {
           val c = body.hcursor

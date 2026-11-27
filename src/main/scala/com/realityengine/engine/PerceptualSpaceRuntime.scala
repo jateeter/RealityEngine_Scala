@@ -255,6 +255,17 @@ class PerceptualSpaceRuntime(dimension: Int = sys.env.getOrElse("VECTOR_DIMENSIO
   }
   /** Replaces the tracker (tests; a store and capture set by the caller). */
   def useKlineTracker(t: KlineTracker): Unit = stepLock.synchronized { klines = t; fingerprintFor = null }
+  // The controls (SURFACE_SPEC "Controls"): off leaves the store untouched;
+  // on starts afresh, closing what the checkpoint holds.
+  def klineCapture: Boolean = stepLock.synchronized(klines.capture)
+  def setKlineCapture(on: Boolean): Unit = stepLock.synchronized {
+    if (on && !klines.capture) { try klines.startCapture() catch { case e: Throwable => klineFailed(e) } }
+    else if (!on) klines.capture = false
+  }
+  def klineFeedbackHops: Int = stepLock.synchronized(klines.feedbackHops)
+  def setKlineFeedbackHops(v: Int): Unit = stepLock.synchronized { klines.feedbackHops = v }
+  def klineStoreMaxBytes: Long = stepLock.synchronized(klines.storeMaxBytes)
+  def setKlineStoreMaxBytes(v: Long): Unit = stepLock.synchronized { klines.storeMaxBytes = v }
   def klineOpen: io.circe.Json = stepLock.synchronized(klines.openJson)
   def klineStats: io.circe.Json = stepLock.synchronized(klines.stats)
   def klineGet(id: String): Option[io.circe.Json] = stepLock.synchronized(klines.get(id))

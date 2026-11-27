@@ -130,10 +130,12 @@ re-deriving the transition rule, and appends closed K-lines (`re-kline/1`) and
 `sustain-end` events to `<INSTANCE_KLINE_DIR>/<uuid>/` (default the clock dir's
 sibling `klines/`), forced to disk before the completion is published, with
 `open.json` checkpointed. The fingerprint hashes each machine's `declared` form
-(JCS with `CanonicalJson.formatDouble`, `MessageDigest` SHA-256). Until all
-three voters ship it, capture is off by default and `RE_KLINE_CAPTURE=1` turns
-it on; the controls are not on `/api/engine/config` and the routes are not in
-the OpenAPI document, both compared across the voters. `KlineSpec` covers the
+(JCS with `CanonicalJson.formatDouble`, `MessageDigest` SHA-256). The
+controls `klineCapture` (default `false` until the PE half lands; owner,
+2026-11-26), `klineFeedbackHops` and `klineStoreMaxBytes` are on
+`/api/engine/config`, as on C++ and LSP; `RE_KLINE_CAPTURE=1` sets capture's
+initial value. Off leaves the store untouched; on closes what the checkpoint
+holds first (`startCapture`). `KlineSpec` covers the
 boundaries and the store.
 
 ## Lane TLS
