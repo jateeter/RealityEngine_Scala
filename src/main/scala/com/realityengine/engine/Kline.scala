@@ -790,6 +790,17 @@ final class KlineTracker(val instance: String, val store: KlineStore, tick: () =
     lastStep = -1L
   }
 
+  /** klineCapture turned on (at boot or at runtime): capture starts afresh,
+    * first closing what the checkpoint holds, as at boot. Turning it off is
+    * `capture = false`, which leaves the store and its checkpoint untouched. */
+  def startCapture(): Unit = {
+    open = Vector.empty; sustain = Vector.empty
+    closed.clear(); ring.clear(); baseline.clear(); current.clear()
+    lastStep = -1L
+    capture = true
+    recover()
+  }
+
   private def trimRing(): Unit = {
     var keepFrom = lastStep - math.max(1, longestPath * (feedbackHops + 1))
     open.foreach(k => keepFrom = math.min(keepFrom, k.openStep - 1))
@@ -858,12 +869,13 @@ final class KlineTracker(val instance: String, val store: KlineStore, tick: () =
 object KlineTracker {
   /** The engine's tracker: an allocated instance's store under
     * <INSTANCE_KLINE_DIR>/<uuid>/ (the parent defaulting to the clock
-    * directory's sibling), in memory for a minted one. Capture is
-    * RE_KLINE_CAPTURE=1 until the three voters serve K-lines. */
+    * directory's sibling), in memory for a minted one. The store opens
+    * whatever the klineCapture control says; RE_KLINE_CAPTURE=1 sets capture's
+    * initial value (the control's default is false until the PE half lands). */
   def forEngine(instance: String, tick: () => Long, env: Map[String, String] = sys.env): KlineTracker = {
     val capture = env.get("RE_KLINE_CAPTURE").exists(v => v == "1" || v == "true")
     val allocated = env.getOrElse("INSTANCE_UUID", "").toLowerCase
-    val dir = if (capture && allocated == instance) {
+    val dir = if (allocated == instance) {
       val parent = env.get("INSTANCE_KLINE_DIR").filter(_.nonEmpty).map(Paths.get(_)).getOrElse {
         val clockDir = env.get("INSTANCE_CLOCK_DIR").filter(_.nonEmpty).map(Paths.get(_))
           .getOrElse(Paths.get(sys.props("user.home"), ".reality-engine", "clock"))
@@ -872,10 +884,9 @@ object KlineTracker {
       Some(parent.resolve(instance))
     } else None
     val t = new KlineTracker(instance, new KlineStore(dir), tick)
-    t.capture = capture
     if (capture) {
       System.err.println(s"K-line capture on — store ${dir.map(_.toString).getOrElse("in memory")}")
-      t.recover()
+      t.startCapture()
     }
     t
   }
