@@ -1988,6 +1988,43 @@ class Routes(
           )
         },
 
+        // K-lines (RealityEngine_CI#603; SURFACE_SPEC "Routes").
+        pathPrefix("klines") {
+          concat(
+            pathEndOrSingleSlash { get { parameters("outcome".?, "machine".?, "sequence".?, "since".?, "limit".?) {
+              (outcome, machine, sequence, since, limit) =>
+                def nonNegative(raw: Option[String], default: Long): Option[Long] = raw match {
+                  case None | Some("") => Some(default)
+                  case Some(r) if r.forall(_.isDigit) => r.toLongOption
+                  case _ => None
+                }
+                (nonNegative(since, 0L), nonNegative(limit, 100L)) match {
+                  case (Some(s), Some(l)) =>
+                    complete(spaceRuntime.klineList(outcome.filter(_.nonEmpty), machine.filter(_.nonEmpty),
+                      sequence.filter(_.nonEmpty), s, l.toInt))
+                  case _ => complete(StatusCodes.BadRequest ->
+                    Json.obj("error" -> Json.fromString("since and limit are non-negative integers")))
+                }
+            } } },
+            path("open") { get { complete(spaceRuntime.klineOpen) } },
+            path("stats") { get { complete(spaceRuntime.klineStats) } },
+            path("export") { post { entity(as[Json]) { body =>
+              val c = body.hcursor
+              val outcomes = c.get[List[String]]("outcome").getOrElse(Nil).toSet
+              val machinesSel = c.get[List[String]]("machines").getOrElse(Nil).toSet
+              val since = c.get[Double]("since").map(_.toLong).getOrElse(0L)
+              complete(HttpEntity(ContentType(MediaType.applicationWithFixedCharset("x-ndjson", HttpCharsets.`UTF-8`)),
+                spaceRuntime.klineExport(outcomes, since, machinesSel)))
+            } } },
+            path(Segment) { id => get {
+              spaceRuntime.klineGet(id) match {
+                case Some(rec) => complete(rec)
+                case None => complete(StatusCodes.NotFound -> Json.obj("error" -> Json.fromString(s"no K-line $id")))
+              }
+            } }
+          )
+        },
+
         // Machine graph
         path("machine-graph") { get { complete(spaceRuntime.getMachineGraphData) } },
 

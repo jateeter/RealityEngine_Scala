@@ -121,6 +121,21 @@ tick past it — and holds `FileChannel.tryLock` on `<uuid>.lock` for its life.
 That lock is `fcntl`-based, so it excludes the C++ and LSP runtimes' `lockf` as
 well: no two live instances of any engine type can share a UUID.
 
+K-lines (RealityEngine_CI#603, #198) are captured in `engine/Kline.scala` at the
+step completion point (`recordTrajectory`, after the commit tick and
+arbitration retention) by the same algorithm as RealityEngine_CPP
+`src/kline.cpp` and RealityEngine_LSP `src/kline.lisp`: the tracker reads each
+committed step's sequence results and the machines' active events, never
+re-deriving the transition rule, and appends closed K-lines (`re-kline/1`) and
+`sustain-end` events to `<INSTANCE_KLINE_DIR>/<uuid>/` (default the clock dir's
+sibling `klines/`), forced to disk before the completion is published, with
+`open.json` checkpointed. The fingerprint hashes each machine's `declared` form
+(JCS with `CanonicalJson.formatDouble`, `MessageDigest` SHA-256). Until all
+three voters ship it, capture is off by default and `RE_KLINE_CAPTURE=1` turns
+it on; the controls are not on `/api/engine/config` and the routes are not in
+the OpenAPI document, both compared across the voters. `KlineSpec` covers the
+boundaries and the store.
+
 ## Lane TLS
 
 With `RE_TLS_CERT` set (RealityEngine_CI#668, this repo's #210), the RE and PE
