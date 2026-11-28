@@ -153,7 +153,14 @@ object Kline {
 }
 
 /** The append-only store under <INSTANCE_KLINE_DIR>/<uuid>/ (None: in memory). */
-final class KlineStore(val dir: Option[Path]) {
+final class KlineStore(val dir: Option[Path], val budgetName: String = "klineStoreMaxBytes") {
+  // The budget warnings as of the last budget check, export or control change,
+  // for /api/health: read from any thread without the step lock, so health
+  // never waits on a step (SURFACE_SPEC "The K-line store", budget).
+  @volatile private var cachedWarnings: Seq[String] = Nil
+  @volatile private var lastMaxBytes: Long = 2147483648L
+  def refreshWarnings(maxBytes: Long): Unit = { lastMaxBytes = maxBytes; cachedWarnings = warnings(maxBytes) }
+  def healthWarnings: Seq[String] = cachedWarnings
   import Kline._
   private val SealBytes = 64L * 1024 * 1024
 
@@ -333,7 +340,7 @@ final class KlineStore(val dir: Option[Path]) {
     val live = segments.filter(s => s.isSealed && !s.archived)
     val unexported = live.count(!_.exported)
     if (live.map(_.bytes).sum > maxBytes && unexported > 0)
-      Seq(s"klineStoreMaxBytes reached: $unexported unexported sealed segment(s) are kept; export them to free space")
+      Seq(s"$budgetName reached: $unexported unexported sealed segment(s) are kept; export them to free space")
     else Nil
   }
 
@@ -353,9 +360,13 @@ final class KlineStore(val dir: Option[Path]) {
       "budget" -> Json.fromLong(maxBytes), "warnings" -> Json.arr(warnings(maxBytes).map(Json.fromString): _*))
   }
 
-  def markExported(names: Set[String]): Unit = { segments.foreach(s => if (names(s.name)) s.exported = true); writeManifest() }
+  def markExported(names: Set[String]): Unit = {
+    segments.foreach(s => if (names(s.name)) s.exported = true); writeManifest(); refreshWarnings(lastMaxBytes)
+  }
 
-  def enforceBudget(maxBytes: Long): Unit = {
+  def enforceBudget(maxBytes: Long): Unit = { enforceBudgetNow(maxBytes); refreshWarnings(maxBytes) }
+
+  private def enforceBudgetNow(maxBytes: Long): Unit = {
     var moved = false
     def sealedBytes = segments.filter(s => s.isSealed && !s.archived).map(_.bytes).sum
     var go = true
@@ -387,6 +398,7 @@ final class KlineTracker(val instance: String, val store: KlineStore, tick: () =
   @volatile var capture: Boolean = false
   var feedbackHops: Int = 3
   var storeMaxBytes: Long = 2L * 1024 * 1024 * 1024
+  store.refreshWarnings(storeMaxBytes)  // an over-budget population from an earlier run warns from boot
   var longestPath: Int = 7
   private var fingerprint = ""
   private var lastStep = -1L

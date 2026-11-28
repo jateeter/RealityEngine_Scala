@@ -232,7 +232,7 @@ class PerceptualSpaceRuntime(dimension: Int = sys.env.getOrElse("VECTOR_DIMENSIO
   // Capture is RE_KLINE_CAPTURE=1 until the three voters serve K-lines; its
   // controls are not on /api/engine/config, which is compared. Guarded by
   // stepLock.
-  private var klines: KlineTracker = new KlineTracker(clock.instance, new KlineStore(None), () => clock.send())
+  @volatile private var klines: KlineTracker = new KlineTracker(clock.instance, new KlineStore(None), () => clock.send())
   private var fingerprintFor: Map[String, Machine] = null
   private var corpusFingerprint = ""
   private def refreshCorpusFacts(): Unit = if (!(fingerprintFor eq machines)) {
@@ -265,7 +265,9 @@ class PerceptualSpaceRuntime(dimension: Int = sys.env.getOrElse("VECTOR_DIMENSIO
   def klineFeedbackHops: Int = stepLock.synchronized(klines.feedbackHops)
   def setKlineFeedbackHops(v: Int): Unit = stepLock.synchronized { klines.feedbackHops = v }
   def klineStoreMaxBytes: Long = stepLock.synchronized(klines.storeMaxBytes)
-  def setKlineStoreMaxBytes(v: Long): Unit = stepLock.synchronized { klines.storeMaxBytes = v }
+  def setKlineStoreMaxBytes(v: Long): Unit = stepLock.synchronized { klines.storeMaxBytes = v; klines.store.refreshWarnings(v) }
+  /** The K-line store's budget warnings, for /api/health; never takes the step lock. */
+  def klineHealthWarnings: Seq[String] = klines.store.healthWarnings
   def klineOpen: io.circe.Json = stepLock.synchronized(klines.openJson)
   def klineStats: io.circe.Json = stepLock.synchronized(klines.stats)
   def klineGet(id: String): Option[io.circe.Json] = stepLock.synchronized(klines.get(id))

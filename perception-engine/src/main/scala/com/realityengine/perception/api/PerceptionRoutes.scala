@@ -998,7 +998,11 @@ class PerceptionRoutes(
 
     // ── Health ──────────────────────────────────────────────────────────────
     path("api" / "health") {
-      get { complete(Json.obj("status" -> "healthy".asJson)) }
+      // The ISRE composition store's budget warnings, when there are any.
+      get { complete {
+        val w = com.realityengine.perception.isre.IsreRecorder.current.store.healthWarnings
+        Json.fromFields(List("status" -> "healthy".asJson) ++ (if (w.nonEmpty) List("warnings" -> w.asJson) else Nil))
+      } }
     },
 
     // ── State ───────────────────────────────────────────────────────────────
@@ -1104,7 +1108,10 @@ class PerceptionRoutes(
           "isreCapture" -> isre.capture.asJson, "isreStoreMaxBytes" -> isre.storeMaxBytes.asJson)
         def applyIsre(): Unit = {
           capture.flatMap(_.asBoolean).foreach(isre.capture = _)
-          maxBytes.flatMap(_.asNumber).foreach(n => isre.storeMaxBytes = n.toDouble.toLong)
+          maxBytes.flatMap(_.asNumber).foreach { n =>
+            isre.storeMaxBytes = n.toDouble.toLong
+            isre.store.refreshWarnings(isre.storeMaxBytes)
+          }
         }
         val algo = body.hcursor.get[String]("matchAlgorithm")
         if (capture.exists(!_.isBoolean))
