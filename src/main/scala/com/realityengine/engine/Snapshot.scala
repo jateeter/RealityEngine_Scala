@@ -116,53 +116,220 @@ object Snapshot {
 
   def idOf(body: Json): String = body.hcursor.get[String]("digest").getOrElse("").stripPrefix("sha256:")
 
-  /** RE_SNAPSHOT_STORE: memory (default), file:<dir>, off. qdrant:<url> is phase 3
-    * and is off until then, never a boot failure. */
-  final class Store(val mode: String, dir: Option[Path]) {
+  // ── A snapshot's state, and nearest (SURFACE_SPEC "Nearest", #900) ──────────
+
+  /** Cell -> value. */
+  type State = Map[Long, Double]
+
+  /** A snapshot's state: the ISRE at span.to. */
+  def stateOf(body: Json): State = {
+    val k = body.hcursor.downField("kline")
+    val to = k.downField("span").get[Double]("to").getOrElse(-1.0)
+    k.downField("pairs").focus.flatMap(_.asArray).getOrElse(Vector.empty)
+      .filter(_.hcursor.get[Double]("stepNumber").toOption.contains(to))
+      .flatMap(_.hcursor.downField("isre").downField("nonZero").focus.flatMap(_.asArray).getOrElse(Vector.empty))
+      .flatMap(c => for {
+        i <- c.hcursor.get[Double]("index").toOption
+        v <- c.hcursor.get[Double]("value").toOption
+      } yield i.toLong -> v).toMap
+  }
+
+  /** {length, nonZero: [{index, value}]} as a state; None when malformed. */
+  def parseState(isre: Json): Option[State] =
+    isre.hcursor.downField("nonZero").focus.flatMap(_.asArray).filter(_ => isre.isObject).flatMap { cells =>
+      val parsed = cells.map(c => for {
+        i <- c.hcursor.downField("index").focus.flatMap(_.asNumber).map(_.toDouble) if i >= 0
+        v <- c.hcursor.downField("value").focus.flatMap(_.asNumber).map(_.toDouble)
+      } yield i.toLong -> v)
+      if (parsed.forall(_.isDefined)) Some(parsed.flatten.toMap) else None
+    }
+
+  /** The sparse dot product, summed in ascending cell order, as every runtime sums it. */
+  def score(query: State, state: State): Double =
+    query.keys.toVector.sorted.foldLeft(0.0)((acc, c) => state.get(c).fold(acc)(w => acc + query(c) * w))
+
+  private def summary(b: Json): Json = {
+    val k = b.hcursor.downField("kline")
+    Json.obj("id" -> Json.fromString(idOf(b)), "digest" -> b.hcursor.downField("digest").focus.getOrElse(Json.Null),
+      "scope" -> k.downField("scope").focus.getOrElse(Json.Null), "span" -> k.downField("span").focus.getOrElse(Json.Null),
+      "machines" -> b.hcursor.downField("corpus").downField("machines").focus.getOrElse(Json.Null))
+  }
+
+  private def lamportOf(b: Json): Double =
+    b.hcursor.downField("kline").downField("clocks").downField("to").get[Double]("lamport").getOrElse(0.0)
+
+  private def sparse(state: State): Json = {
+    val cells = state.toVector.sortBy(_._1)
+    Json.obj("indices" -> Json.arr(cells.map(c => Json.fromLong(c._1)): _*),
+      "values" -> Json.arr(cells.map(c => Json.fromDoubleOrNull(c._2)): _*))
+  }
+
+  /** A store that cannot answer: Qdrant unreachable or refusing (#900). The route answers 503. */
+  final class StoreUnavailable(reason: String) extends RuntimeException(reason)
+
+  /** qdrant:<url> (#900): one collection, points filtered by this instance. */
+  final case class QdrantTarget(url: String, collection: String, instance: String)
+
+  /** RE_SNAPSHOT_STORE: memory (default), file:<dir>, qdrant:<https url>, off. An
+    * unusable value is off, with the reason in offReason; never a boot failure. */
+  final class Store(val mode: String, dir: Option[Path], qdrant: Option[QdrantTarget] = None,
+                    val offReason: Option[String] = None) {
     private val memory = mutable.LinkedHashMap.empty[String, Json]
+    @volatile private var collectionReady = false
     dir.foreach(d => Files.createDirectories(d))
     def enabled: Boolean = mode != "off"
     private def valid(id: String) = id.nonEmpty && id.forall(c => "0123456789abcdef".indexOf(c) >= 0)
-    def put(id: String, body: Json): Unit = dir match {
-      case Some(d) =>
+
+    /** One Qdrant call: its `result`, or StoreUnavailable. The call carries no
+      * RE-Clock: Qdrant is not a clock participant, so the clock never moves. */
+    private def call(method: String, path: String, body: Option[Json] = None): Json = {
+      val t = qdrant.get
+      val text = try {
+        val conn = java.net.URI.create(t.url + path).toURL.openConnection().asInstanceOf[java.net.HttpURLConnection]
+        com.realityengine.tls.LaneTls.customizeConnection(conn)
+        conn.setRequestMethod(method)
+        conn.setConnectTimeout(5000)
+        conn.setReadTimeout(30000)
+        conn.setRequestProperty("Content-Type", "application/json")
+        body.foreach { b =>
+          conn.setDoOutput(true)
+          val os = conn.getOutputStream
+          try os.write(b.noSpaces.getBytes(UTF_8)) finally os.close()
+        }
+        val code = conn.getResponseCode
+        val in = if (code >= 400) conn.getErrorStream else conn.getInputStream
+        if (in == null) "" else try new String(in.readAllBytes(), UTF_8) finally in.close()
+      } catch { case e: Exception => throw new StoreUnavailable(s"Qdrant: ${e.getMessage}") }
+      val j = parse(text).getOrElse(throw new StoreUnavailable("Qdrant answered something that is not JSON"))
+      if (j.hcursor.get[String]("status").toOption.contains("ok")) j.hcursor.downField("result").focus.getOrElse(Json.Null)
+      else throw new StoreUnavailable("Qdrant: " + j.hcursor.downField("status").get[String]("error").getOrElse("an error"))
+    }
+
+    private def ready(): Unit = if (!collectionReady) {
+      val c = qdrant.get.collection
+      if (!call("GET", s"/collections/$c/exists").hcursor.get[Boolean]("exists").getOrElse(false)) {
+        call("PUT", s"/collections/$c", Some(Json.obj("sparse_vectors" -> Json.obj("isre" -> Json.obj()))))
+        call("PUT", s"/collections/$c/index?wait=true",
+          Some(Json.obj("field_name" -> Json.fromString("instance"), "field_schema" -> Json.fromString("keyword"))))
+      }
+      collectionReady = true
+    }
+
+    private def pointId(id: String): String = {
+      val h = sha256Hex(s"${qdrant.get.instance}:$id")
+      s"${h.substring(0, 8)}-${h.substring(8, 12)}-${h.substring(12, 16)}-${h.substring(16, 20)}-${h.substring(20, 32)}"
+    }
+
+    private def instanceFilter: Json = Json.obj("must" -> Json.arr(Json.obj("key" -> Json.fromString("instance"),
+      "match" -> Json.obj("value" -> Json.fromString(qdrant.get.instance)))))
+
+    private def coll = qdrant.get.collection
+
+    def put(id: String, body: Json): Unit = (dir, qdrant) match {
+      case (Some(d), _) =>
         val tmp = d.resolve(s"$id.json.tmp")
         Files.write(tmp, (jcs(body) + "\n").getBytes(UTF_8))
         Files.move(tmp, d.resolve(s"$id.json"), StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE)
-      case None => memory(id) = body
+      case (None, Some(t)) =>
+        ready()
+        val k = body.hcursor.downField("kline")
+        val payload = Json.obj("instance" -> Json.fromString(t.instance), "id" -> Json.fromString(id),
+          "digest" -> body.hcursor.downField("digest").focus.getOrElse(Json.Null),
+          "scope" -> k.downField("scope").focus.getOrElse(Json.Null), "span" -> k.downField("span").focus.getOrElse(Json.Null),
+          "machines" -> body.hcursor.downField("corpus").downField("machines").focus.getOrElse(Json.Null),
+          "lamport" -> k.downField("clocks").downField("to").downField("lamport").focus.getOrElse(Json.Null),
+          "body" -> Json.fromString(jcs(body)))
+        call("PUT", s"/collections/$coll/points?wait=true", Some(Json.obj("points" -> Json.arr(Json.obj(
+          "id" -> Json.fromString(pointId(id)), "vector" -> Json.obj("isre" -> sparse(stateOf(body))), "payload" -> payload)))))
+      case _ => memory(id) = body
     }
-    def get(id: String): Option[Json] = if (!valid(id)) None else dir match {
-      case Some(d) =>
+
+    def get(id: String): Option[Json] = if (!valid(id)) None else (dir, qdrant) match {
+      case (Some(d), _) =>
         val f = d.resolve(s"$id.json")
         if (Files.exists(f)) parse(new String(Files.readAllBytes(f), UTF_8)).toOption else None
-      case None => memory.get(id)
+      case (None, Some(t)) =>
+        ready()
+        call("POST", s"/collections/$coll/points",
+          Some(Json.obj("ids" -> Json.arr(Json.fromString(pointId(id))), "with_payload" -> Json.True)))
+          .asArray.getOrElse(Vector.empty).map(_.hcursor.downField("payload"))
+          .find(p => p.get[String]("instance").toOption.contains(t.instance) && p.get[String]("id").toOption.contains(id))
+          .flatMap(_.get[String]("body").toOption).flatMap(parse(_).toOption)
+      case _ => memory.get(id)
     }
-    def remove(id: String): Boolean = get(id).isDefined && (dir match {
-      case Some(d) => Files.deleteIfExists(d.resolve(s"$id.json"))
-      case None => memory.remove(id).isDefined
+
+    def remove(id: String): Boolean = get(id).isDefined && ((dir, qdrant) match {
+      case (Some(d), _) => Files.deleteIfExists(d.resolve(s"$id.json"))
+      case (None, Some(_)) =>
+        call("POST", s"/collections/$coll/points/delete?wait=true", Some(Json.obj("points" -> Json.arr(Json.fromString(pointId(id))))))
+        true
+      case _ => memory.remove(id).isDefined
     })
-    def list: Json = {
-      val bodies = dir match {
-        case Some(d) =>
-          import scala.jdk.CollectionConverters._
-          Files.list(d).iterator.asScala.toList.filter(_.toString.endsWith(".json"))
-            .flatMap(f => parse(new String(Files.readAllBytes(f), UTF_8)).toOption)
-        case None => memory.values.toList
-      }
-      val lamport = (b: Json) => b.hcursor.downField("kline").downField("clocks").downField("to").get[Double]("lamport").getOrElse(0.0)
-      Json.obj("snapshots" -> Json.arr(bodies.sortBy(lamport).map { b =>
-        val k = b.hcursor.downField("kline")
-        Json.obj("id" -> Json.fromString(idOf(b)), "digest" -> b.hcursor.downField("digest").focus.getOrElse(Json.Null),
-          "scope" -> k.downField("scope").focus.getOrElse(Json.Null), "span" -> k.downField("span").focus.getOrElse(Json.Null),
-          "machines" -> b.hcursor.downField("corpus").downField("machines").focus.getOrElse(Json.Null))
-      }: _*))
+
+    private def bodies: List[Json] = (dir, qdrant) match {
+      case (Some(d), _) =>
+        import scala.jdk.CollectionConverters._
+        Files.list(d).iterator.asScala.toList.filter(_.toString.endsWith(".json"))
+          .flatMap(f => parse(new String(Files.readAllBytes(f), UTF_8)).toOption)
+      case (None, Some(_)) =>
+        ready()
+        val out = mutable.ListBuffer.empty[Json]
+        var offset: Option[Json] = None
+        var more = true
+        while (more) {
+          val req = Json.obj("filter" -> instanceFilter, "limit" -> Json.fromInt(256), "with_payload" -> Json.True,
+            "with_vector" -> Json.False).deepMerge(offset.fold(Json.obj())(o => Json.obj("offset" -> o)))
+          val res = call("POST", s"/collections/$coll/points/scroll", Some(req))
+          res.hcursor.downField("points").focus.flatMap(_.asArray).getOrElse(Vector.empty)
+            .flatMap(_.hcursor.downField("payload").get[String]("body").toOption).flatMap(parse(_).toOption)
+            .foreach(out += _)
+          offset = res.hcursor.downField("next_page_offset").focus.filterNot(_.isNull)
+          more = offset.isDefined
+        }
+        out.toList
+      case _ => memory.values.toList
+    }
+
+    /** {snapshots: [summary]}, oldest first by clocks.to.lamport, then id: every store alike. */
+    def list: Json =
+      Json.obj("snapshots" -> Json.arr(bodies.sortBy(b => (lamportOf(b), idOf(b))).map(summary): _*))
+
+    /** {snapshots: [{id, score, scope, span, machines}]}: score > 0, highest first, then id. */
+    def nearest(query: State, limit: Int): Json = {
+      val candidates: List[Json] =
+        if (query.isEmpty) Nil
+        else if (qdrant.isDefined) {
+          // Qdrant's candidates, scored and ordered here (ties at the limit-th
+          // place are Qdrant's to break; SURFACE_SPEC "Nearest").
+          ready()
+          call("POST", s"/collections/$coll/points/query", Some(Json.obj("query" -> sparse(query),
+            "using" -> Json.fromString("isre"), "filter" -> instanceFilter, "limit" -> Json.fromInt(limit),
+            "with_payload" -> Json.True)))
+            .hcursor.downField("points").focus.flatMap(_.asArray).getOrElse(Vector.empty).toList
+            .flatMap(_.hcursor.downField("payload").get[String]("body").toOption).flatMap(parse(_).toOption)
+        } else bodies
+      val ranked = candidates.map(b => (score(query, stateOf(b)), b)).filter(_._1 > 0)
+        .sortBy { case (sc, b) => (-sc, idOf(b)) }.take(limit)
+      Json.obj("snapshots" -> Json.arr(ranked.map { case (sc, b) =>
+        summary(b).mapObject(_.add("score", Json.fromDoubleOrNull(sc))) }: _*))
     }
   }
 
   object Store {
     def fromEnvironment(env: Map[String, String] = sys.env): Store = env.getOrElse("RE_SNAPSHOT_STORE", "memory") match {
       case "" | "memory" => new Store("memory", None)
+      case "off" => new Store("off", None)
       case v if v.startsWith("file:") => new Store("file", Some(Paths.get(v.stripPrefix("file:"))))
-      case _ => new Store("off", None)
+      case v if v.startsWith("qdrant:") =>
+        val url = v.stripPrefix("qdrant:").reverse.dropWhile(_ == '/').reverse
+        if (!url.toLowerCase.startsWith("https://"))
+          // Never a plaintext link (ENGINEERING_CONTRACT, data in motion).
+          new Store("off", None, offReason = Some("RE_SNAPSHOT_STORE=qdrant: needs an https URL; the snapshot store is off"))
+        else new Store("qdrant", None, Some(QdrantTarget(url,
+          env.get("RE_SNAPSHOT_COLLECTION").filter(_.nonEmpty).getOrElse("re-snapshots"),
+          env.get("INSTANCE_UUID").filter(_.nonEmpty).getOrElse("unidentified"))))
+      case v => new Store("off", None,
+        offReason = Some(s"RE_SNAPSHOT_STORE=$v is not memory, file:<dir>, qdrant:<url> or off; the snapshot store is off"))
     }
   }
 }
