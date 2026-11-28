@@ -57,7 +57,7 @@ class SnapshotSpec extends AnyFlatSpec with Matchers {
   "The store" should "be off when asked, Qdrant for an https URL only (#900), and keep files by hex id" in {
     Snapshot.Store.fromEnvironment(Map("RE_SNAPSHOT_STORE" -> "off")).enabled shouldBe false
     Snapshot.Store.fromEnvironment(Map("RE_SNAPSHOT_STORE" -> "qdrant:https://example.invalid")).mode shouldBe "qdrant"
-    val plain = Snapshot.Store.fromEnvironment(Map("RE_SNAPSHOT_STORE" -> "qdrant:http://localhost:4333"))
+    val plain = Snapshot.Store.fromEnvironment(Map("RE_SNAPSHOT_STORE" -> "qdrant:http://qdrant.invalid:4333")) // insecure-transport: negative-test
     plain.enabled shouldBe false
     plain.offReason shouldBe defined
     Snapshot.Store.fromEnvironment(Map("RE_SNAPSHOT_STORE" -> "redis:x")).enabled shouldBe false
