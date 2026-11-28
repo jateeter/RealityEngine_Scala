@@ -111,4 +111,23 @@ class KlineSpec extends AnyFlatSpec with Matchers {
     recs.length shouldBe 2
     find(recs, "Linear", "interrupted", 3).flatMap(_.hcursor.get[String]("reason").toOption) shouldBe Some("shutdown")
   }
+
+  "The budget warning" should "be cached for /api/health, clear on export, and name its budget" in {
+    val dir = java.nio.file.Files.createTempDirectory("kline-warn")
+    val store = new KlineStore(Some(dir))
+    def rec(c: Long) = io.circe.Json.obj("format" -> io.circe.Json.fromString("re-kline/1"),
+      "id" -> io.circe.Json.fromString(s"a:$c"), "close" -> io.circe.Json.obj("commit" -> io.circe.Json.fromLong(c)))
+    store.append(Seq(rec(1)), "fp-a", 1)
+    store.append(Seq(rec(2)), "fp-b", 2)
+    store.healthWarnings shouldBe empty
+    store.enforceBudget(0)
+    store.healthWarnings.map(_.takeWhile(_ != ':')) shouldBe Seq("klineStoreMaxBytes reached")
+    store.markExported(store.segments.map(_.name).toSet)
+    store.enforceBudget(0)
+    store.healthWarnings shouldBe empty
+    val pe = new KlineStore(Some(dir.resolve("pe")), "isreStoreMaxBytes")
+    pe.append(Seq(rec(1)), "f1", 1); pe.append(Seq(rec(2)), "f2", 2)
+    pe.enforceBudget(0)
+    pe.healthWarnings.head should startWith("isreStoreMaxBytes reached")
+  }
 }

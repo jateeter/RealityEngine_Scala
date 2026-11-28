@@ -168,7 +168,14 @@ object Isre {
   }
 }
 
-final class IsreStore(val dir: Option[Path]) {
+final class IsreStore(val dir: Option[Path], val budgetName: String = "isreStoreMaxBytes") {
+  // The budget warnings as of the last budget check, export or control change,
+  // for /api/health: read from any thread without the step lock, so health
+  // never waits on a step (SURFACE_SPEC "The K-line store", budget).
+  @volatile private var cachedWarnings: Seq[String] = Nil
+  @volatile private var lastMaxBytes: Long = 2147483648L
+  def refreshWarnings(maxBytes: Long): Unit = { lastMaxBytes = maxBytes; cachedWarnings = warnings(maxBytes) }
+  def healthWarnings: Seq[String] = cachedWarnings
   import Isre._
   private val SealBytes = 64L * 1024 * 1024
 
@@ -354,7 +361,7 @@ final class IsreStore(val dir: Option[Path]) {
     val live = segments.filter(s => s.isSealed && !s.archived)
     val unexported = live.count(!_.exported)
     if (live.map(_.bytes).sum > maxBytes && unexported > 0)
-      Seq(s"klineStoreMaxBytes reached: $unexported unexported sealed segment(s) are kept; export them to free space")
+      Seq(s"$budgetName reached: $unexported unexported sealed segment(s) are kept; export them to free space")
     else Nil
   }
 
@@ -374,9 +381,13 @@ final class IsreStore(val dir: Option[Path]) {
       "budget" -> Json.fromLong(maxBytes), "warnings" -> Json.arr(warnings(maxBytes).map(Json.fromString): _*))
   }
 
-  def markExported(names: Set[String]): Unit = { segments.foreach(s => if (names(s.name)) s.exported = true); writeManifest() }
+  def markExported(names: Set[String]): Unit = {
+    segments.foreach(s => if (names(s.name)) s.exported = true); writeManifest(); refreshWarnings(lastMaxBytes)
+  }
 
-  def enforceBudget(maxBytes: Long): Unit = {
+  def enforceBudget(maxBytes: Long): Unit = { enforceBudgetNow(maxBytes); refreshWarnings(maxBytes) }
+
+  private def enforceBudgetNow(maxBytes: Long): Unit = {
     var moved = false
     def sealedBytes = segments.filter(s => s.isSealed && !s.archived).map(_.bytes).sum
     var go = true
@@ -407,6 +418,7 @@ final class IsreRecorder(val instance: String, val store: IsreStore, val taxonom
   import Isre._
   @volatile var capture: Boolean = false
   @volatile var storeMaxBytes: Long = 2L * 1024 * 1024 * 1024
+  store.refreshWarnings(storeMaxBytes)  // an over-budget population from an earlier run warns from boot
   private var reInstance = ""
 
   /** One completed push: `re` is the RE step's clock, `pe` the PE's tick for the record. */

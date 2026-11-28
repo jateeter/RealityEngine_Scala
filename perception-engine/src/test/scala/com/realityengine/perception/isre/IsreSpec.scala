@@ -63,4 +63,13 @@ class IsreSpec extends AnyFlatSpec with Matchers {
     // A reopened store sees the same records.
     new IsreStore(Some(store)).metas.length shouldBe 5
   }
+
+  "the composition store" should "warn for /api/health under its own budget's name" in {
+    val dir = Files.createTempDirectory("isre-warn")
+    val store = new IsreStore(Some(dir))
+    def rec(c: Long) = Json.obj("format" -> Json.fromString("re-isre-composition/1"), "re" -> Json.obj("commit" -> Json.fromLong(c)))
+    store.append(Seq(rec(1)), "t1", 1); store.append(Seq(rec(2)), "t2", 2)
+    store.enforceBudget(0)
+    store.healthWarnings.head should startWith("isreStoreMaxBytes reached")
+  }
 }

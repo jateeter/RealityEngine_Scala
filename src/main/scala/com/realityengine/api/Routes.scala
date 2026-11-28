@@ -1194,7 +1194,13 @@ class Routes(
       pathPrefix("api") {
         concat(
         // Health
-        path("health") { get { complete(Json.obj("status" -> Json.fromString("healthy"))) } },
+        // The K-line store's budget warnings, when there are any (SURFACE_SPEC
+        // "The K-line store"); the store still writes, so status stays.
+        path("health") { get { complete {
+          val w = spaceRuntime.klineHealthWarnings
+          Json.fromFields(List("status" -> Json.fromString("healthy")) ++
+            (if (w.nonEmpty) List("warnings" -> Json.arr(w.map(Json.fromString): _*)) else Nil))
+        } } },
 
         // Prometheus metrics — text/plain exposition format on /api/metrics
         path("metrics") { get {
