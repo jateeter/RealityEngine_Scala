@@ -180,6 +180,8 @@ class Routes(
   // middle segment of every clone id. Without it nothing can be cloned.
   private val engineInstance = sys.env.getOrElse("INSTANCE_ID", "")
   private val historyLimitRef           = new AtomicReference[Int](250)
+  // Runtime snapshots (RealityEngine_CI#287): the store, RE_SNAPSHOT_STORE.
+  private val snapshotStore = com.realityengine.engine.Snapshot.Store.fromEnvironment()
   private val includeMachineResultsRef  = new AtomicReference[Boolean](true)
   private val includePerceptualSpaceRef = new AtomicReference[Boolean](true)
   // Defaults stay full so no existing caller changes shape and the parity gates
@@ -657,6 +659,103 @@ class Routes(
   }
 
   /** One retained step: its records, canonically ordered, under its clock. */
+  private def err(message: String): Json = Json.obj("error" -> Json.fromString(message))
+  private def snapshotsOff: (StatusCode, Json) = StatusCodes.ServiceUnavailable -> err("snapshots are disabled")
+
+  /** A snapshot's controls, machine controls, overrides and arbitration, by corpus
+    * machine name (SURFACE_SPEC "The snapshot body"). */
+  private def snapshotParts(from: Long, to: Long): (Json, Json, Json, Json) = {
+    val machines = engine.getAllMachines
+    val nameOf = machines.map(m => m.id -> m.name).toMap
+    val controls = engineControls.filter(_.scope == "engine").map(c =>
+      c.name -> c.read().hcursor.downField("value").focus.getOrElse(Json.Null))
+    val machineControls = engineControls.filter(_.scope == "machine").flatMap { c =>
+      c.read().hcursor.downField("value").focus.flatMap(_.asObject).toList.flatMap(_.toList.flatMap {
+        case (id, v) => nameOf.get(id).map(n => (n, c.name, v))
+      })
+    }.groupBy(_._1).map { case (n, xs) => n -> Json.fromFields(xs.map(x => x._2 -> x._3)) }
+    val overrides = machines.map { m =>
+      val j = m.toJson.hcursor
+      m.name -> Json.obj(
+        "arbiterRule" -> j.downField("arbiterRule").focus.getOrElse(Json.Null),
+        "outputMergeTransformation" -> j.downField("outputMergeTransformation").focus.getOrElse(Json.Null),
+        "outputMergeLocked" -> Json.fromBoolean(m.outputMergeLocked))
+    }
+    val arbitration =
+      if (!spaceRuntime.getArbitrationRetention) Json.Null
+      else Json.arr(spaceRuntime.retainedArbitration.collect {
+        case (step, clockAt, records) if step >= from && step <= to => arbitrationStepJson(step, clockAt, records)
+      }: _*)
+    (Json.fromFields(controls), Json.fromFields(machineControls), Json.fromFields(overrides), arbitration)
+  }
+
+  private def snapshotCapture(body: Json): (StatusCode, Json) = {
+    if (!snapshotStore.enabled) return snapshotsOff
+    val c = body.hcursor
+    val names = engine.getAllMachines.map(_.name).toSet
+    val scope: Option[Set[String]] = c.downField("scope").focus match {
+      case None => None
+      case Some(j) if j.isNull || j.asString.contains("corpus") => None
+      case Some(j) if j.isArray => Some(j.asArray.get.flatMap(_.asString).toSet)
+      case _ => return StatusCodes.UnprocessableEntity -> err("scope is \"corpus\" or a list of machine names")
+    }
+    scope.getOrElse(Set.empty).find(n => !names.contains(n)).foreach(n =>
+      return StatusCodes.UnprocessableEntity -> err(s"no machine $n"))
+    def step(k: String): Either[Unit, Option[Long]] = c.downField(k).focus match {
+      case None => Right(None)
+      case Some(j) if j.isNull => Right(None)
+      case Some(j) => j.asNumber.flatMap(_.toLong).filter(_ >= 0).map(v => Right(Some(v))).getOrElse(Left(()))
+    }
+    val (from, to) = (step("from"), step("to")) match {
+      case (Right(f), Right(t)) => (f, t)
+      case _ => return StatusCodes.UnprocessableEntity -> err("from and to are step numbers")
+    }
+    val to_ = to.orElse(from).getOrElse(spaceRuntime.snapshotNewestStep)
+    val (controls, machineControls, overrides, arbitration) = snapshotParts(from.getOrElse(to_), to_)
+    spaceRuntime.captureSnapshot(scope, from, to, controls, machineControls, overrides, arbitration) match {
+      case Left((status, e)) => StatusCode.int2StatusCode(status) -> e
+      case Right(snap) =>
+        val id = com.realityengine.engine.Snapshot.idOf(snap)
+        snapshotStore.put(id, snap)
+        StatusCodes.OK -> Json.obj("id" -> Json.fromString(id), "digest" -> snap.hcursor.downField("digest").focus.get,
+          "span" -> snap.hcursor.downField("kline").downField("span").focus.get)
+    }
+  }
+
+  private def snapshotRestore(body: Json): (StatusCode, Json) = {
+    if (!snapshotStore.enabled) return snapshotsOff
+    val c = body.hcursor
+    val snap = c.downField("snapshot").focus.filter(_.isObject).orElse(
+      c.get[String]("id").toOption.map(id => snapshotStore.get(id).getOrElse(return StatusCodes.NotFound -> err(s"no snapshot $id"))))
+      .getOrElse(return StatusCodes.UnprocessableEntity -> err("body is {id} or {snapshot}"))
+    val s = snap.hcursor
+    if (!s.get[String]("format").toOption.contains("re-snapshot/1")) return StatusCodes.UnprocessableEntity -> err("unknown format")
+    if (!s.get[String]("digest").toOption.contains(com.realityengine.engine.Snapshot.digest(snap)))
+      return StatusCodes.UnprocessableEntity -> err("the digest does not match the body")
+    val expected = s.downField("corpus").get[String]("fingerprint").getOrElse("")
+    val actual = spaceRuntime.currentCorpusFingerprint
+    if (expected != actual) return StatusCodes.Conflict -> Json.obj("error" -> Json.fromString("corpus mismatch"),
+      "expected" -> Json.fromString(expected), "actual" -> Json.fromString(actual))
+    // Controls first: historyLimit bounds what follows.
+    s.downField("controls").focus.flatMap(_.asObject).foreach(_.toList.foreach { case (name, v) =>
+      engineControls.find(ec => ec.name == name && ec.scope == "engine").foreach(ec =>
+        ec.write(Json.obj("value" -> v)).left.foreach(r => return StatusCodes.UnprocessableEntity -> err(r.message)))
+    })
+    val byName = engine.getAllMachines.map(m => m.name -> m).toMap
+    s.downField("machineControls").focus.flatMap(_.asObject).foreach(_.toList.foreach { case (name, per) =>
+      for (m <- byName.get(name); v <- per.hcursor.get[Boolean]("transitionsInhibited").toOption) m.transitionsInhibited = v
+    })
+    s.downField("machineOverrides").focus.flatMap(_.asObject).foreach(_.toList.foreach { case (name, o) =>
+      byName.get(name).foreach { m =>
+        o.hcursor.get[String]("outputMergeTransformation").toOption.foreach(t =>
+          m.outputMergeTransformation = OutputMergeTransformation.normalise(Some(t)))
+        o.hcursor.get[Boolean]("outputMergeLocked").toOption.foreach(m.outputMergeLocked = _)
+      }
+    })
+    val step = spaceRuntime.restoreSnapshot(snap)
+    StatusCodes.OK -> Json.obj("digest" -> s.downField("digest").focus.get, "step" -> Json.fromLong(step))
+  }
+
   private def arbitrationStepJson(step: Long, clockAt: (Long, Long), records: List[Arbiter.ArbitrationRecord]): Json =
     Json.obj(
       "clock"           -> clockJson(spaceRuntime.instanceUuid, clockAt._1, clockAt._2, step),
@@ -735,12 +834,12 @@ class Routes(
           // the bound stop bounding anything. `get[Int]` already refuses a
           // fractional value.
           body.hcursor.get[Int]("value").toOption match {
-            case Some(v) if v >= 0 => historyLimitRef.set(v); Right(historyLimitJson())
+            case Some(v) if v >= 0 => historyLimitRef.set(v); spaceRuntime.snapshotLimit = v; Right(historyLimitJson())
             case _ => Left(ControlRefusal("historyLimit requires a non-negative whole-number `value`",
                                           StatusCodes.BadRequest))
           }
         },
-        () => { historyLimitRef.set(250); historyLimitJson() }),
+        () => { historyLimitRef.set(250); spaceRuntime.snapshotLimit = 250; historyLimitJson() }),
       // Step phase timing on every runtime (SURFACE_SPEC.md, "phaseDetail").
       EngineControl("phaseDetail", "engine", () => phaseDetailJson(),
         body => body.hcursor.get[Boolean]("value").toOption match {
@@ -2251,6 +2350,19 @@ class Routes(
 
         // Runtime introspection — parity with /api/runtime/* on LSP and CPP runtimes
         pathPrefix("runtime") { concat(
+          // ── Runtime snapshots (RealityEngine_CI#287; SURFACE_SPEC "Routes") ──
+          path("snapshot") { post { entity(as[Json]) { body => complete(snapshotCapture(body)) } } },
+          path("snapshots") { get { complete(
+            if (snapshotStore.enabled) StatusCodes.OK -> snapshotStore.list else snapshotsOff) } },
+          path("snapshot" / Segment) { id => concat(
+            get { complete(
+              if (!snapshotStore.enabled) snapshotsOff
+              else snapshotStore.get(id).fold[(StatusCode, Json)](StatusCodes.NotFound -> err(s"no snapshot $id"))(StatusCodes.OK -> _)) },
+            delete { complete(
+              if (!snapshotStore.enabled) snapshotsOff
+              else if (snapshotStore.remove(id)) StatusCodes.OK -> Json.obj("deleted" -> Json.fromString(id))
+              else StatusCodes.NotFound -> err(s"no snapshot $id")) }) },
+          path("restore") { post { entity(as[Json]) { body => complete(snapshotRestore(body)) } } },
           path("metrics") { get { complete(Json.obj(
             "stats"            -> engine.getStats,
             "domainWorkerPool" -> Json.obj("semantics" -> Json.fromString("akka-futures"))
