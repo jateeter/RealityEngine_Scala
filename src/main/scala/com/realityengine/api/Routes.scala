@@ -182,6 +182,29 @@ class Routes(
   private val historyLimitRef           = new AtomicReference[Int](250)
   // Runtime snapshots (RealityEngine_CI#287): the store, RE_SNAPSHOT_STORE.
   private val snapshotStore = com.realityengine.engine.Snapshot.Store.fromEnvironment()
+  snapshotStore.offReason.foreach(r => System.err.println(r))
+  if (snapshotStore.mode == "qdrant") System.err.println("Snapshot store: Qdrant (RE_SNAPSHOT_STORE)")
+
+  /** A store that cannot answer (Qdrant down or refusing, #900) is 503 on that request alone. */
+  private def storeGuard(f: => (StatusCode, Json)): (StatusCode, Json) =
+    try f catch {
+      case e: com.realityengine.engine.Snapshot.StoreUnavailable =>
+        StatusCodes.ServiceUnavailable -> err(s"snapshot store unavailable: ${e.getMessage}")
+    }
+
+  private def snapshotNearest(body: Json): (StatusCode, Json) = {
+    if (!snapshotStore.enabled) return snapshotsOff
+    val c = body.hcursor
+    val query = c.downField("isre").focus.flatMap(com.realityengine.engine.Snapshot.parseState)
+      .getOrElse(return StatusCodes.UnprocessableEntity -> err("isre is {length, nonZero: [{index, value}]}"))
+    val limit = c.downField("limit").focus match {
+      case None => 5
+      case Some(j) if j.isNull => 5
+      case Some(j) => j.asNumber.map(_.toDouble).filter(d => d == math.floor(d) && d >= 1 && d <= 100).map(_.toInt)
+        .getOrElse(return StatusCodes.UnprocessableEntity -> err("limit is a whole number from 1 to 100"))
+    }
+    StatusCodes.OK -> snapshotStore.nearest(query, limit)
+  }
   private val includeMachineResultsRef  = new AtomicReference[Boolean](true)
   private val includePerceptualSpaceRef = new AtomicReference[Boolean](true)
   // Defaults stay full so no existing caller changes shape and the parity gates
@@ -2351,18 +2374,19 @@ class Routes(
         // Runtime introspection — parity with /api/runtime/* on LSP and CPP runtimes
         pathPrefix("runtime") { concat(
           // ── Runtime snapshots (RealityEngine_CI#287; SURFACE_SPEC "Routes") ──
-          path("snapshot") { post { entity(as[Json]) { body => complete(snapshotCapture(body)) } } },
-          path("snapshots") { get { complete(
-            if (snapshotStore.enabled) StatusCodes.OK -> snapshotStore.list else snapshotsOff) } },
+          path("snapshot") { post { entity(as[Json]) { body => complete(storeGuard(snapshotCapture(body))) } } },
+          path("snapshots") { get { complete(storeGuard(
+            if (snapshotStore.enabled) StatusCodes.OK -> snapshotStore.list else snapshotsOff)) } },
+          path("snapshots" / "nearest") { post { entity(as[Json]) { body => complete(storeGuard(snapshotNearest(body))) } } },
           path("snapshot" / Segment) { id => concat(
-            get { complete(
+            get { complete(storeGuard(
               if (!snapshotStore.enabled) snapshotsOff
-              else snapshotStore.get(id).fold[(StatusCode, Json)](StatusCodes.NotFound -> err(s"no snapshot $id"))(StatusCodes.OK -> _)) },
-            delete { complete(
+              else snapshotStore.get(id).fold[(StatusCode, Json)](StatusCodes.NotFound -> err(s"no snapshot $id"))(StatusCodes.OK -> _))) },
+            delete { complete(storeGuard(
               if (!snapshotStore.enabled) snapshotsOff
               else if (snapshotStore.remove(id)) StatusCodes.OK -> Json.obj("deleted" -> Json.fromString(id))
-              else StatusCodes.NotFound -> err(s"no snapshot $id")) }) },
-          path("restore") { post { entity(as[Json]) { body => complete(snapshotRestore(body)) } } },
+              else StatusCodes.NotFound -> err(s"no snapshot $id"))) }) },
+          path("restore") { post { entity(as[Json]) { body => complete(storeGuard(snapshotRestore(body))) } } },
           path("metrics") { get { complete(Json.obj(
             "stats"            -> engine.getStats,
             "domainWorkerPool" -> Json.obj("semantics" -> Json.fromString("akka-futures"))

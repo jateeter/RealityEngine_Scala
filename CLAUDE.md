@@ -35,8 +35,20 @@ the hex of its digest (JCS without the clocks' instance and lamport), so the sam
 state has the same id on every runtime. Restore re-establishes the controls, the
 overrides and `activeAfter`; a corpus scope also replaces the history and the
 step count. A restore is a reset for K-line capture. `RE_SNAPSHOT_STORE` is
-`memory` (default), `file:<dir>` or `off` (503 on all five); `qdrant:` is phase 3
-and off until then.
+`memory` (default), `file:<dir>`, `qdrant:<https url>` or `off` (503 on all six).
+`POST /api/runtime/snapshots/nearest {isre, limit}` ranks the stored snapshots
+by the sparse dot product of their state (the ISRE at `span.to`), summed in
+ascending cell order, the same on every store.
+
+The Qdrant store (RealityEngine_CI#900) calls Qdrant through `HttpURLConnection` with `LaneTls.customizeConnection`:
+- **https only.** An `http:` URL leaves the store off, with the reason in the log.
+  With the lane on, it presents the lane certificate.
+- **Collection:** `RE_SNAPSHOT_COLLECTION` (default `re-snapshots`), sparse vector
+  `isre`, created on first use.
+- **Point:** id from sha256(`INSTANCE_UUID:<id>`), payload `body` = the JCS bytes.
+  Every read filters on `instance`.
+- **Failure:** Qdrant down or refusing is 503 on that request, never a boot
+  failure.
 
 ## Building
 
