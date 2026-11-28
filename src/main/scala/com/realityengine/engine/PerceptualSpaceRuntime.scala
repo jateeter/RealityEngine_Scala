@@ -364,6 +364,70 @@ class PerceptualSpaceRuntime(dimension: Int = sys.env.getOrElse("VECTOR_DIMENSIO
 
   def instanceUuid: String = clock.instance
 
+  // ── Runtime snapshots (RealityEngine_CI#287; SURFACE_SPEC "Routes") ──────────
+  private val snapshotRetention = new Snapshot.Retention
+  /** historyLimit: how many steps the snapshot retention keeps. */
+  @volatile var snapshotLimit: Int = 250
+
+  def currentCorpusFingerprint: String = stepLock.synchronized { refreshCorpusFacts(); corpusFingerprint }
+
+  def captureSnapshot(scope: Option[Set[String]], from: Option[Long], to: Option[Long], controls: Json,
+                      machineControls: Json, overrides: Json, arbitration: Json): Either[(Int, Json), Json] =
+    stepLock.synchronized {
+      refreshCorpusFacts()
+      Snapshot.capture(snapshotRetention, Snapshot.Request(scope, from, to, clock.instance, corpusFingerprint,
+        machines.size, controls, machineControls, overrides, arbitration, machines.values))
+    }
+
+  def snapshotNewestStep: Long = stepLock.synchronized(snapshotRetention.newest.getOrElse(-1L))
+
+  /** Re-establish a snapshot's activeAfter; for a corpus scope also the history and
+    * the step count. Each scoped machine's events take exactly the listed state;
+    * restored events start a fresh predecessor chain (a snapshot carries none). A
+    * restore is a reset for K-line capture: open K-lines close interrupted/reset.
+    * It commits no step, so lamport does not tick. The step it leaves the engine at. */
+  def restoreSnapshot(snap: Json): Long = stepLock.synchronized {
+    val kl = snap.hcursor.downField("kline")
+    val corpus = kl.get[String]("scope").isRight
+    val scope: Set[String] =
+      if (corpus) machines.values.map(_.name).toSet else kl.get[List[String]]("scope").getOrElse(Nil).toSet
+    val after = kl.downField("activeAfter").as[List[Json]].getOrElse(Nil).map { e =>
+      val c = e.hcursor
+      Kline.Active(c.get[String]("machine").getOrElse(""), c.get[String]("sequence").getOrElse(""),
+        c.get[String]("event").getOrElse(""), c.get[Boolean]("justMatched").getOrElse(false))
+    }
+    for (m <- machines.values if scope.contains(m.name); s <- m.getAllSequences; ev <- s.getAllVectors) {
+      ev.clearActive(); ev.clearWasJustMatched()
+    }
+    val byName = machines.values.map(m => m.name -> m).toMap
+    for (a <- after if scope.contains(a.machine); m <- byName.get(a.machine); s <- m.getSequence(a.sequence);
+         ev <- s.getVector(a.event)) {
+      ev.setActive()
+      if (a.justMatched) ev.setWasJustMatched()
+    }
+    if (corpus) {
+      def entry(j: Json): TrajectoryEntry = {
+        val c = j.hcursor
+        TrajectoryEntry(c.get[Int]("stepNumber").getOrElse(0), c.get[Int]("length").getOrElse(0),
+          c.downField("nonZero").as[List[Json]].getOrElse(Nil).map(x =>
+            TrajectoryCell(x.hcursor.get[Int]("index").getOrElse(0), x.hcursor.get[Double]("value").getOrElse(0.0))))
+      }
+      val pairs = kl.downField("pairs").as[List[Json]].getOrElse(Nil)
+      val to = kl.downField("span").get[Long]("to").getOrElse(0L)
+      isreHistory = pairs.map(p => entry(p.hcursor.downField("isre").focus.getOrElse(Json.Null))).toVector
+      osreHistory = pairs.map(p => entry(p.hcursor.downField("osre").focus.getOrElse(Json.Null))).toVector
+      history = Nil
+      immediateStepCount = (to + 1).toInt
+      lastArbitration = Nil
+      arbitrationSteps = arbitrationSteps.empty
+      snapshotRetention.restore(after)
+      completedStep = to
+      stepLock.notifyAll()
+    }
+    if (klines.capture) { try klines.onReset() catch { case e: Throwable => klineFailed(e) } }
+    if (corpus) completedStep else immediateStepCount - 1L
+  }
+
   /** The (ISRE, OSRE) pair for step `n`, waiting up to `timeoutMs` for it.
     * Left(408) when step `n` has not resolved within the window; Left(410)
     * when it resolved and is no longer retained. */
@@ -404,6 +468,7 @@ class PerceptualSpaceRuntime(dimension: Int = sys.env.getOrElse("VECTOR_DIMENSIO
     lastArbitration = Nil
     arbitrationSteps = arbitrationSteps.empty
     commitClocks = commitClocks.empty
+    snapshotRetention.onReset()
     stop()
     perceptualSpace.reset()
     history = Nil
@@ -849,6 +914,9 @@ class PerceptualSpaceRuntime(dimension: Int = sys.env.getOrElse("VECTOR_DIMENSIO
     // K-lines that closed at this step are stored before its completion is
     // published (#603), the same place arbitration retention commits.
     captureKlines(step, tick._2, sim, isre, osre)
+    // Snapshot retention (#287): every retained step's active list,
+    // contributions and clock, whether or not K-line capture is on.
+    snapshotRetention.onStep(step, tick._1, isre, osre, sim, machines.values, snapshotLimit)
     tickStepPhase(3)                                    // B4: pair committed
     // The pair is committed: the step's completion point (#375).
     completedStep = step

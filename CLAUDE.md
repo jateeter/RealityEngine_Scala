@@ -24,6 +24,20 @@ This repo contains the Scala/Akka Reality Engine and a standalone Scala Percepti
 - `perception-engine/src/main/scala/com/realityengine/perception/healthkit/`, `.../triggers/`: HealthKit ingest and trigger dispatch.
 - `src/test/`, `perception-engine/tests/`: test coverage.
 
+## Runtime snapshots (RealityEngine_CI#287)
+
+`engine/Snapshot.scala` keeps, for every retained step (`historyLimit`), the active list after it,
+its contributions and its clock, whether or not K-line capture is on, and serves
+`POST /api/runtime/snapshot`, `GET /api/runtime/snapshots`,
+`GET`/`DELETE /api/runtime/snapshot/:id` and `POST /api/runtime/restore`
+(SURFACE_SPEC "K-lines and runtime snapshots"). A body is `re-snapshot/1`, its id
+the hex of its digest (JCS without the clocks' instance and lamport), so the same
+state has the same id on every runtime. Restore re-establishes the controls, the
+overrides and `activeAfter`; a corpus scope also replaces the history and the
+step count. A restore is a reset for K-line capture. `RE_SNAPSHOT_STORE` is
+`memory` (default), `file:<dir>` or `off` (503 on all five); `qdrant:` is phase 3
+and off until then.
+
 ## Building
 
 **Builds are controlled through `RealityEngine_CI`, not from here.** This repo is
